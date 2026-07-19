@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DeepFlow — repository map</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/demo-polish.css">
+</head>
+<body>
+  <main id="app">
+    <section class="workspace">
+      <header class="ribbon">
+        <a class="brand" href="#" aria-label="DeepFlow home"><i></i><span>DeepFlow</span></a>
+        <div class="workspace-name"><b id="repo-name">atlas-workspace</b></div>
+        <div class="ribbon-actions">
+          <button class="toolbar-toggle active" data-edge-toggle="calls">Calls</button><button class="toolbar-toggle active" data-edge-toggle="imports">Imports</button>
+          <button id="history-back" title="Back" aria-label="Back">←</button><button id="history-forward" title="Forward" aria-label="Forward">→</button>
+          <button id="reset-view" title="Reset presentation" aria-label="Reset presentation">↺</button><button id="settings-open" title="Settings" aria-label="Settings">⚙</button><button id="open-workspace">Open</button>
+        </div>
+      </header>
+      <div id="board" aria-label="Repository architecture whiteboard">
+        <div id="world"><svg id="wires"></svg><div id="scene"></div></div><div id="minimap" aria-label="Map overview"></div>
+        <div class="canvas-hint">Drag canvas to pan · drag a file or folder to arrange · single click focuses · double click expands</div>
+      </div>
+    </section>
+    <aside id="inspector">
+      <button id="inspector-toggle" title="Collapse inspector">›</button>
+      <div id="inspector-body">
+        <p class="inspector-kicker" id="inspect-kind">REPOSITORY MAP</p><h2 id="inspect-title">Choose a file</h2><p id="inspect-path">Single click shows its trace without moving the map.</p>
+        <section><b>Trace</b><p id="inspect-trace">Semantic callers and consumers appear on the canvas.</p></section>
+        <section id="source-panel" hidden><b>Source</b><div id="inspect-source"></div></section>
+        <section><b>Activity</b><div id="activity-list" class="activity-list"></div></section>
+        <section><b>Why this connects</b><div id="inspect-edges" class="edge-list"></div></section>
+        <section id="diff-panel" hidden><b>Local change</b><pre id="diff-code"></pre></section>
+      </div>
+    </aside>
+  </main>
+  <dialog id="open-dialog" class="open-dialog">
+    <form method="dialog">
+      <header><div><b>Open a repository</b><span>Load locally, then let your agent report edits to this map.</span></div><button value="cancel" aria-label="Close">×</button></header>
+      <section>
+        <button id="choose-folder" value="choose" type="button">Choose local folder</button>
+        <p>If your browser blocks folder access, use the file picker fallback after closing this dialog.</p>
+      </section>
+      <section>
+        <b>Paste this into your agent MCP config</b>
+        <pre id="mcp-snippet"></pre>
+        <button id="copy-mcp" value="copy" type="button">Copy MCP setup</button>
+      </section>
+    </form>
+  </dialog>
+  <dialog id="settings-dialog" class="open-dialog settings-dialog">
+    <form method="dialog">
+      <header><div><b>DeepFlow settings</b><span>Tune the canvas mood and motion.</span></div><button value="cancel" aria-label="Close">×</button></header>
+      <section>
+        <b>Theme</b>
+        <div class="theme-grid" id="theme-grid">
+          <button type="button" data-theme-choice="aurora">Aurora</button>
+          <button type="button" data-theme-choice="catppuccin">Catppuccin</button>
+          <button type="button" data-theme-choice="tokyo">Tokyo Night</button>
+          <button type="button" data-theme-choice="nord">Nord</button>
+          <button type="button" data-theme-choice="dracula">Dracula</button>
+          <button type="button" data-theme-choice="github-dark">GitHub Dark</button>
+          <button type="button" data-theme-choice="solarized">Solarized</button>
+          <button type="button" data-theme-choice="gruvbox">Gruvbox</button>
+          <button type="button" data-theme-choice="material">Material</button>
+          <button type="button" data-theme-choice="one-dark">One Dark Pro</button>
+          <button type="button" data-theme-choice="everforest">Everforest</button>
+        </div>
+      </section>
+      <section>
+        <label class="setting-row"><span>Luxury motion</span><input id="motion-toggle" type="checkbox" checked></label>
+        <label class="setting-row"><span>Auto reveal agent edits</span><input id="auto-reveal-toggle" type="checkbox"></label>
+      </section>
+    </form>
+  </dialog>
+  <input id="workspace-files" type="file" webkitdirectory directory multiple hidden>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

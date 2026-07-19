@@ -65,6 +65,21 @@ function safeRelative(value) { const path = String(value || '').replaceAll('\\',
 await startTracking(fixtureRoot);
 createServer(async (req, res) => {
   try {
+    if (req.url === '/api/health' && req.method === 'GET') {
+      return sendJson(res, { ok: true, service: 'deepflow-viewer', version: '0.3.0' });
+    }
+    if (req.url === '/api/status' && req.method === 'GET') {
+      return sendJson(res, {
+        ok: true,
+        service: 'deepflow-viewer',
+        version: '0.3.0',
+        trackedRoot,
+        clients: clients.size,
+        watching: workspaceWatchers.length,
+        defaultFixture: fixtureRoot,
+        hint: clients.size ? 'Viewer connected — MCP jumps will animate live.' : 'Open http://127.0.0.1:4317 in a browser, then call deepflow_open_workspace.'
+      });
+    }
     if (req.url === '/api/changes' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
       res.write(`event: ready\ndata: ${JSON.stringify({ root: trackedRoot })}\n\n`); clients.add(res); req.on('close', () => clients.delete(res)); return;

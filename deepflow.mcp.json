@@ -1,8 +1,9 @@
 {
   "mcpServers": {
-    "deepflow-local": {
+    "deepflow": {
       "command": "node",
-      "args": ["/Users/vks/Documents/DeepFlow/mcp-server.js"]
+      "args": ["/ABSOLUTE/PATH/TO/DeepFlow/mcp-server.js"]
     }
-  }
+  },
+  "_comment": "Prefer: bash scripts/agent-bootstrap.sh → use .deepflow.mcp.generated.json"
 }

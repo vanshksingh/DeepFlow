@@ -1,45 +1,325 @@
 #!/usr/bin/env node
-/** Local-only MCP bridge for DeepFlow's live viewer. */
+/** Local-only MCP bridge for DeepFlow — agent-native architecture map. */
 import { createInterface } from 'node:readline';
 import { stat } from 'node:fs/promises';
-import { resolve, relative, sep } from 'node:path';
+import { resolve, relative, sep, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createRepositoryGraph } from './src/repository-graph.js';
+import {
+  summarizeGraph, stripSources, findInGraph, impactOf, pathBetween,
+  explainNode, orphans, entrypoints, DEMO_TOUR_STEPS
+} from './src/graph-insights.js';
 
 const run = promisify(execFile);
+const HERE = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_VIEWER = 'http://127.0.0.1:4317';
 const send = message => process.stdout.write(`${JSON.stringify(message)}\n`);
 const result = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
-const schema = { type: 'object', properties: { root: { type: 'string', description: 'Absolute path to the local workspace.' }, viewerUrl: { type: 'string', description: 'Local DeepFlow viewer URL.', default: 'http://127.0.0.1:4317' } }, required: ['root'], additionalProperties: false };
+
+const rootProp = { type: 'string', description: 'Absolute path to the local workspace.' };
+const viewerProp = { type: 'string', description: 'Local DeepFlow viewer URL.', default: DEFAULT_VIEWER };
+const withRoot = (properties = {}, required = ['root']) => ({
+  type: 'object',
+  properties: { root: rootProp, viewerUrl: viewerProp, ...properties },
+  required,
+  additionalProperties: false
+});
+
 const tools = [
-  { name: 'deepflow_open_workspace', description: 'Connect a local workspace to the running DeepFlow viewer. The viewer starts a filesystem watcher, so subsequent agent edits update the graph and local diff indicators automatically.', inputSchema: schema },
-  { name: 'deepflow_analyze_workspace', description: 'Build and return the semantic local repository graph, and connect the workspace to the live DeepFlow viewer.', inputSchema: schema },
-  { name: 'deepflow_after_edit', description: 'Immediately notify DeepFlow after an agent edit. This is optional because the workspace watcher also detects changes, but it removes filesystem-event latency.', inputSchema: { ...schema, properties: { ...schema.properties, paths: { type: 'array', items: { type: 'string' }, description: 'Changed workspace-relative paths.' } } } },
-  { name: 'deepflow_jump_to', description: 'Command the DeepFlow viewer to reveal and focus a folder, file, module, or exact source line.', inputSchema: { ...schema, properties: { ...schema.properties, path: { type: 'string', description: 'Workspace-relative folder or file path.' }, module: { type: 'string', description: 'Optional function/module name to reveal.' }, line: { type: 'number', description: 'Optional source line to focus.' }, pin: { type: 'boolean', description: 'Pin the revealed trace.' } }, required: ['root', 'path'] } },
-  { name: 'deepflow_highlight_paths', description: 'Highlight several workspace-relative files/folders in the DeepFlow viewer.', inputSchema: { ...schema, properties: { ...schema.properties, paths: { type: 'array', items: { type: 'string' } }, pin: { type: 'boolean' } }, required: ['root', 'paths'] } },
-  { name: 'deepflow_clear_highlights', description: 'Clear viewer pins/highlights without changing the workspace watcher.', inputSchema: schema },
-  { name: 'deepflow_file_diff', description: 'Return the current local Git diff for a workspace file.', inputSchema: { type: 'object', properties: { root: { type: 'string' }, path: { type: 'string' } }, required: ['root', 'path'], additionalProperties: false } }
+  {
+    name: 'deepflow_status',
+    description: 'Health-check the DeepFlow viewer and report tracked workspace, client count, and setup hints. Call this first if unsure whether the map is running.',
+    inputSchema: { type: 'object', properties: { viewerUrl: viewerProp }, additionalProperties: false }
+  },
+  {
+    name: 'deepflow_open_workspace',
+    description: 'Connect a local workspace to the running DeepFlow viewer and start the filesystem watcher. Always call this before editing so the map stays live.',
+    inputSchema: withRoot()
+  },
+  {
+    name: 'deepflow_analyze_workspace',
+    description: 'Build the semantic repository graph (JS/TS/Python via Tree-sitter), connect the viewer, and return a source-stripped graph JSON plus a compact summary.',
+    inputSchema: withRoot({ includeSource: { type: 'boolean', description: 'Include full file sources (large). Default false.' } })
+  },
+  {
+    name: 'deepflow_summary',
+    description: 'Return a compact architecture briefing: rails, languages, entrypoints, orphans, hot files, diagnostics. Prefer this over full analyze for agent planning.',
+    inputSchema: withRoot()
+  },
+  {
+    name: 'deepflow_find',
+    description: 'Search files, folders, and modules by path or name substring.',
+    inputSchema: withRoot({ query: { type: 'string' }, limit: { type: 'number' } }, ['root', 'query'])
+  },
+  {
+    name: 'deepflow_explain',
+    description: 'Explain one file/module: region, orphan status, modules, and typed relationships with evidence lines.',
+    inputSchema: withRoot({ path: { type: 'string', description: 'Workspace-relative path, optionally file.py::function' } }, ['root', 'path'])
+  },
+  {
+    name: 'deepflow_impact',
+    description: 'Show upstream callers and downstream consumers for a path (static impact radius).',
+    inputSchema: withRoot({
+      path: { type: 'string' },
+      direction: { type: 'string', enum: ['in', 'out', 'both'], default: 'both' },
+      depth: { type: 'number', default: 3 }
+    }, ['root', 'path'])
+  },
+  {
+    name: 'deepflow_path_between',
+    description: 'Find a directed relationship path between two files/modules for storytelling or reviews.',
+    inputSchema: withRoot({ from: { type: 'string' }, to: { type: 'string' }, maxDepth: { type: 'number', default: 8 } }, ['root', 'from', 'to'])
+  },
+  {
+    name: 'deepflow_entrypoints',
+    description: 'List detected entrypoint files (main/app/server/manage/asgi/wsgi/route/worker, etc.).',
+    inputSchema: withRoot()
+  },
+  {
+    name: 'deepflow_orphans',
+    description: 'List files/modules with no static execution references — useful for cleanup demos.',
+    inputSchema: withRoot({ showInViewer: { type: 'boolean', description: 'Also highlight orphans in the viewer.', default: true } })
+  },
+  {
+    name: 'deepflow_diagnostics',
+    description: 'Return parse/import diagnostics (unresolved imports, syntax errors, TODO markers).',
+    inputSchema: withRoot({ severity: { type: 'string', enum: ['error', 'warning', 'notice', 'all'], default: 'all' } })
+  },
+  {
+    name: 'deepflow_after_edit',
+    description: 'Immediately refresh the viewer after an agent write. Optional but removes FS-event latency. Pass changed relative paths when known.',
+    inputSchema: withRoot({ paths: { type: 'array', items: { type: 'string' } } })
+  },
+  {
+    name: 'deepflow_jump_to',
+    description: 'Command the viewer to reveal and focus a folder, file, module, or source line (enters signal-path mode).',
+    inputSchema: withRoot({
+      path: { type: 'string' },
+      module: { type: 'string' },
+      line: { type: 'number' },
+      pin: { type: 'boolean' },
+      pulse: { type: 'boolean', description: 'Flash the focused card for demos.', default: true }
+    }, ['root', 'path'])
+  },
+  {
+    name: 'deepflow_highlight_paths',
+    description: 'Highlight several workspace-relative files/folders in the viewer.',
+    inputSchema: withRoot({ paths: { type: 'array', items: { type: 'string' } }, pin: { type: 'boolean' } }, ['root', 'paths'])
+  },
+  {
+    name: 'deepflow_clear_highlights',
+    description: 'Clear pins/highlights and return the viewer to architecture rails.',
+    inputSchema: withRoot()
+  },
+  {
+    name: 'deepflow_set_mode',
+    description: 'Force viewer layout mode: rails (architecture overview) or signal (calls-in → focus → calls-out).',
+    inputSchema: withRoot({ mode: { type: 'string', enum: ['rails', 'signal'] } }, ['root', 'mode'])
+  },
+  {
+    name: 'deepflow_set_edges',
+    description: 'Toggle which relationship types are drawn (calls, imports, dataflow, events, inherits, references, reexports).',
+    inputSchema: withRoot({
+      edges: {
+        type: 'object',
+        description: 'Map of edge type → boolean visibility.',
+        additionalProperties: { type: 'boolean' }
+      }
+    }, ['root', 'edges'])
+  },
+  {
+    name: 'deepflow_tour',
+    description: 'Run the built-in Atlas demo walkthrough in the viewer (judge-ready narrative). Use workspace fixtures/atlas-workspace for best results.',
+    inputSchema: withRoot({
+      step: { type: 'number', description: '0-based step index. Omit to run/list all steps metadata.' },
+      autoPlay: { type: 'boolean', description: 'When true and step omitted, play the full tour in the viewer.', default: false }
+    })
+  },
+  {
+    name: 'deepflow_share_link',
+    description: 'Return a shareable viewer deep-link hash for the current focus (path/module/mode).',
+    inputSchema: withRoot({ path: { type: 'string' }, module: { type: 'string' }, mode: { type: 'string', enum: ['rails', 'signal'] } }, ['root', 'path'])
+  },
+  {
+    name: 'deepflow_file_diff',
+    description: 'Return the current local Git diff for a workspace file.',
+    inputSchema: { type: 'object', properties: { root: rootProp, path: { type: 'string' } }, required: ['root', 'path'], additionalProperties: false }
+  },
+  {
+    name: 'deepflow_setup_help',
+    description: 'Return copy-paste setup instructions for installing DeepFlow, starting the viewer, and wiring this MCP server into an agent IDE.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  }
 ];
 
-async function workspaceRoot(value) { const root = resolve(String(value || '')); if (!(await stat(root)).isDirectory()) throw new Error(`Not a readable local directory: ${root}`); return root; }
-function safePath(root, value) { const target = resolve(root, String(value || '')); if (target !== root && !target.startsWith(root + sep)) throw new Error('Path must stay inside the requested workspace.'); return relative(root, target).replaceAll('\\', '/'); }
-async function viewerRequest(url, path, body) {
-  const response = await fetch(`${String(url || 'http://127.0.0.1:4317').replace(/\/$/, '')}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(`DeepFlow viewer is not available at ${url || 'http://127.0.0.1:4317'} (${response.status}). Start it with npm run dev.`);
+async function workspaceRoot(value) {
+  const root = resolve(String(value || ''));
+  if (!(await stat(root)).isDirectory()) throw new Error(`Not a readable local directory: ${root}`);
+  return root;
+}
+function safePath(root, value) {
+  const target = resolve(root, String(value || ''));
+  if (target !== root && !target.startsWith(root + sep)) throw new Error('Path must stay inside the requested workspace.');
+  return relative(root, target).replaceAll('\\', '/');
+}
+/** Allow `path/to/file.ts::moduleName` while still sandboxing the file portion. */
+function safePathRef(root, value) {
+  const raw = String(value || '');
+  const split = raw.search(/::|#/);
+  if (split === -1) return safePath(root, raw);
+  return `${safePath(root, raw.slice(0, split))}${raw.slice(split)}`;
+}
+async function viewerRequest(url, path, body, method = 'POST') {
+  const base = String(url || DEFAULT_VIEWER).replace(/\/$/, '');
+  const response = await fetch(`${base}${path}`, {
+    method,
+    headers: method === 'GET' ? undefined : { 'content-type': 'application/json' },
+    body: method === 'GET' ? undefined : JSON.stringify(body || {})
+  });
+  if (!response.ok) throw new Error(`DeepFlow viewer is not available at ${base} (${response.status}). Start it with: npm run dev`);
   return response.json();
 }
-async function call(name, args) {
+async function graphFor(root) {
+  return createRepositoryGraph({ roots: [root] });
+}
+
+async function call(name, args = {}) {
+  if (name === 'deepflow_setup_help') {
+    return {
+      title: 'DeepFlow — agent setup',
+      steps: [
+        '1. cd into the DeepFlow checkout',
+        '2. npm install',
+        '3. npm run dev   # leaves http://127.0.0.1:4317 running',
+        '4. Add MCP config pointing at this mcp-server.js (absolute path)',
+        '5. Call deepflow_open_workspace with the absolute path of the repo to map',
+        '6. After edits: deepflow_after_edit; to narrate: deepflow_jump_to / deepflow_tour'
+      ],
+      mcpConfig: {
+        mcpServers: {
+          deepflow: {
+            command: 'node',
+            args: [resolve(HERE, 'mcp-server.js')]
+          }
+        }
+      },
+      demoWorkspace: resolve(HERE, 'fixtures/atlas-workspace'),
+      pythonDemo: resolve(HERE, 'fixtures/python-mini'),
+      docs: ['README.md', 'AGENTS.md']
+    };
+  }
+
+  if (name === 'deepflow_status') {
+    try {
+      const status = await viewerRequest(args.viewerUrl, '/api/status', null, 'GET');
+      return { ok: true, viewer: String(args.viewerUrl || DEFAULT_VIEWER), ...status };
+    } catch (error) {
+      return {
+        ok: false,
+        viewer: String(args.viewerUrl || DEFAULT_VIEWER),
+        error: error.message,
+        fix: 'From the DeepFlow checkout run: npm install && npm run dev'
+      };
+    }
+  }
+
   const root = await workspaceRoot(args.root);
-  if (name === 'deepflow_open_workspace') return viewerRequest(args.viewerUrl, '/api/track', { root });
-  if (name === 'deepflow_analyze_workspace') { await viewerRequest(args.viewerUrl, '/api/track', { root }); return createRepositoryGraph({ roots: [root] }); }
-  if (name === 'deepflow_after_edit') return viewerRequest(args.viewerUrl, '/api/mcp-change', { root, paths: args.paths || [] });
-  if (name === 'deepflow_jump_to') return viewerRequest(args.viewerUrl, '/api/mcp-command', { type: 'jump', path: safePath(root, args.path), module: args.module, line: args.line, pin: !!args.pin });
-  if (name === 'deepflow_highlight_paths') return viewerRequest(args.viewerUrl, '/api/mcp-command', { type: 'highlight-paths', paths: (args.paths || []).map(path => safePath(root, path)), pin: !!args.pin });
-  if (name === 'deepflow_clear_highlights') return viewerRequest(args.viewerUrl, '/api/mcp-command', { type: 'clear-highlights' });
+  const viewer = args.viewerUrl || DEFAULT_VIEWER;
+
+  if (name === 'deepflow_open_workspace') return viewerRequest(viewer, '/api/track', { root });
+
+  if (name === 'deepflow_analyze_workspace') {
+    await viewerRequest(viewer, '/api/track', { root });
+    const graph = await graphFor(root);
+    return {
+      summary: summarizeGraph(graph),
+      graph: args.includeSource ? graph : stripSources(graph)
+    };
+  }
+
+  if (name === 'deepflow_summary') {
+    try { await viewerRequest(viewer, '/api/track', { root }); } catch {}
+    return summarizeGraph(await graphFor(root));
+  }
+
+  if (name === 'deepflow_find') return { query: args.query, matches: findInGraph(await graphFor(root), args.query, { limit: args.limit || 24 }) };
+  if (name === 'deepflow_explain') return explainNode(await graphFor(root), safePathRef(root, args.path));
+  if (name === 'deepflow_impact') return impactOf(await graphFor(root), safePathRef(root, args.path), { direction: args.direction || 'both', depth: args.depth || 3 });
+  if (name === 'deepflow_path_between') {
+    return pathBetween(await graphFor(root), safePathRef(root, args.from), safePathRef(root, args.to), { maxDepth: args.maxDepth || 8 });
+  }
+  if (name === 'deepflow_entrypoints') return { entrypoints: entrypoints(await graphFor(root)) };
+  if (name === 'deepflow_orphans') {
+    const list = orphans(await graphFor(root));
+    if (args.showInViewer !== false) {
+      try {
+        await viewerRequest(viewer, '/api/track', { root });
+        await viewerRequest(viewer, '/api/mcp-command', { type: 'show-orphans', pulse: true, paths: list.filter(i => i.kind === 'file').map(i => i.path).slice(0, 40) });
+      } catch {}
+    }
+    return { count: list.length, orphans: list };
+  }
+  if (name === 'deepflow_diagnostics') {
+    const graph = await graphFor(root);
+    const severity = args.severity || 'all';
+    const items = (graph.diagnostics || []).filter(d => severity === 'all' || d.severity === severity);
+    return { count: items.length, diagnostics: items.slice(0, 80) };
+  }
+  if (name === 'deepflow_after_edit') return viewerRequest(viewer, '/api/mcp-change', { root, paths: (args.paths || []).map(p => safePath(root, p)) });
+  if (name === 'deepflow_jump_to') {
+    await viewerRequest(viewer, '/api/track', { root });
+    return viewerRequest(viewer, '/api/mcp-command', {
+      type: 'jump',
+      path: safePath(root, args.path),
+      module: args.module,
+      line: args.line,
+      pin: !!args.pin,
+      pulse: args.pulse !== false
+    });
+  }
+  if (name === 'deepflow_highlight_paths') {
+    await viewerRequest(viewer, '/api/track', { root });
+    return viewerRequest(viewer, '/api/mcp-command', {
+      type: 'highlight-paths',
+      paths: (args.paths || []).map(path => safePath(root, path)),
+      pin: !!args.pin
+    });
+  }
+  if (name === 'deepflow_clear_highlights') return viewerRequest(viewer, '/api/mcp-command', { type: 'clear-highlights' });
+  if (name === 'deepflow_set_mode') return viewerRequest(viewer, '/api/mcp-command', { type: 'set-mode', mode: args.mode });
+  if (name === 'deepflow_set_edges') return viewerRequest(viewer, '/api/mcp-command', { type: 'set-edges', edges: args.edges || {} });
+  if (name === 'deepflow_tour') {
+    await viewerRequest(viewer, '/api/track', { root });
+    if (typeof args.step === 'number') {
+      const step = DEMO_TOUR_STEPS[args.step];
+      if (!step) throw new Error(`Tour step ${args.step} out of range (0–${DEMO_TOUR_STEPS.length - 1}).`);
+      await viewerRequest(viewer, '/api/mcp-command', { type: 'tour-step', index: args.step, ...step });
+      return { step: args.step, ...step, delivered: true };
+    }
+    if (args.autoPlay) {
+      return viewerRequest(viewer, '/api/mcp-command', { type: 'tour-play', steps: DEMO_TOUR_STEPS });
+    }
+    return { steps: DEMO_TOUR_STEPS.map((step, index) => ({ index, title: step.title, narrative: step.narrative })), tip: 'Call again with step: N or autoPlay: true' };
+  }
+  if (name === 'deepflow_share_link') {
+    const path = safePath(root, args.path);
+    const params = new URLSearchParams();
+    params.set('path', path);
+    if (args.module) params.set('module', args.module);
+    if (args.mode) params.set('mode', args.mode);
+    const hash = `#${params.toString()}`;
+    return { url: `${String(viewer).replace(/\/$/, '')}/${hash}`, hash, path, module: args.module || null, mode: args.mode || 'signal' };
+  }
   if (name === 'deepflow_file_diff') {
     const path = safePath(root, args.path);
-    try { const { stdout } = await run('git', ['-C', root, 'diff', '--no-ext-diff', '--unified=3', 'HEAD', '--', path], { timeout: 5000 }); return { root, path, diff: stdout || 'No uncommitted Git diff for this file.' }; }
-    catch (error) { return { root, path, diff: error.stdout || 'No Git diff is available for this file.' }; }
+    try {
+      const { stdout } = await run('git', ['-C', root, 'diff', '--no-ext-diff', '--unified=3', 'HEAD', '--', path], { timeout: 5000 });
+      return { root, path, diff: stdout || 'No uncommitted Git diff for this file.' };
+    } catch (error) {
+      return { root, path, diff: error.stdout || 'No Git diff is available for this file.' };
+    }
   }
   throw new Error(`Unknown tool: ${name}`);
 }
@@ -53,9 +333,23 @@ async function handleRequest(line) {
   let request;
   try {
     request = JSON.parse(line);
-    if (request.method === 'initialize') return send({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: request.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'deepflow-local', version: '0.2.0' } } });
+    if (request.method === 'initialize') {
+      return send({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: {
+          protocolVersion: request.params?.protocolVersion || '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'deepflow-local', version: '0.3.0' }
+        }
+      });
+    }
+    if (request.method === 'notifications/initialized') return;
     if (request.method === 'tools/list') return send({ jsonrpc: '2.0', id: request.id, result: { tools } });
     if (request.method === 'tools/call') return send({ jsonrpc: '2.0', id: request.id, result: result(await call(request.params.name, request.params.arguments || {})) });
+    if (request.method === 'ping') return send({ jsonrpc: '2.0', id: request.id, result: {} });
     if (request.id !== undefined) return send({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: `Unsupported method: ${request.method}` } });
-  } catch (error) { if (request?.id !== undefined) send({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: error.message } }); }
+  } catch (error) {
+    if (request?.id !== undefined) send({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: error.message } });
+  }
 }

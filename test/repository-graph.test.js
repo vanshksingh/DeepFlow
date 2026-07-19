@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createRepositoryGraph, defaultAnalyzer } from '../src/repository-graph.js';
+import { createRepositoryGraph, defaultAnalyzer, jsTsAnalyzer, pythonAnalyzer } from '../src/repository-graph.js';
 
 const fixture = new URL('../fixtures/atlas-workspace', import.meta.url).pathname;
+const pythonFixture = new URL('../fixtures/python-mini', import.meta.url).pathname;
 
 test('indexes nested folders, modules, typed edges, and diagnostics', async () => {
   const graph = await createRepositoryGraph({ roots: [fixture] });
@@ -26,11 +27,41 @@ test('uses Tree-sitter for TypeScript and TSX semantic extraction', () => {
     export const Screen = () => <button onClick={() => start()} />;
     export class Child extends Parent { execute() { return start(); } }
   `;
-  const result = defaultAnalyzer.analyze(source, { path: 'ui/Screen.tsx', analyzerName: defaultAnalyzer.name });
-  assert.equal(defaultAnalyzer.name, 'tree-sitter-js-ts-v1');
+  const result = jsTsAnalyzer.analyze(source, { path: 'ui/Screen.tsx', analyzerName: jsTsAnalyzer.name });
+  assert.equal(jsTsAnalyzer.name, 'tree-sitter-js-ts-v1');
   assert.deepEqual(result.imports[0].bindings, ['start']);
   assert.ok(result.modules.some(module => module.name === 'Screen' && module.exported));
   assert.ok(result.modules.some(module => module.name === 'Child' && module.kind === 'class'));
   assert.ok(result.calls.some(call => call.name === 'start'));
   assert.deepEqual(result.inherits, [{ name: 'Child', base: 'Parent', line: 4 }]);
+});
+
+test('extracts Python modules, imports, and calls', () => {
+  const source = `
+from services.worker import start
+
+def create_app():
+    start()
+    return True
+
+class App(Base):
+    def run(self):
+        create_app()
+`;
+  assert.equal(defaultAnalyzer.supports('app/api.py'), true);
+  const result = pythonAnalyzer.analyze(source, { path: 'app/api.py', analyzerName: pythonAnalyzer.name });
+  assert.ok(result.imports.some(item => item.specifier === 'services.worker' && item.bindings.includes('start')));
+  assert.ok(result.modules.some(module => module.name === 'create_app'));
+  assert.ok(result.modules.some(module => module.name === 'App'));
+  assert.ok(result.modules.some(module => module.name === 'App.run'));
+  assert.ok(result.calls.some(call => call.name === 'start'));
+  assert.ok(result.inherits.some(item => item.name === 'App' && item.base === 'Base'));
+});
+
+test('indexes a Python workspace with import and call edges', async () => {
+  const graph = await createRepositoryGraph({ roots: [pythonFixture] });
+  assert.ok(graph.nodes.some(node => node.kind === 'file' && node.path === 'main.py' && node.language === 'python'));
+  assert.ok(graph.nodes.some(node => node.kind === 'module' && node.label === 'create_app'));
+  assert.ok(graph.edges.some(edge => edge.type === 'imports' && edge.evidence.includes('imports app.api')));
+  assert.ok(graph.edges.some(edge => edge.type === 'calls'));
 });

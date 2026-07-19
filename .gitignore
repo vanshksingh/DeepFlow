@@ -1,3 +1,5 @@
 node_modules/
 .DS_Store
 test.1
+.deepflow.mcp.generated.json
+/tmp/

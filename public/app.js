@@ -50,7 +50,7 @@ let draggingTraceAnchorId = null;
 const FLOW_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits', 'imports', 'references', 'reexports']);
 const WALK_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits']);
 const CONTEXT_TYPES = new Set(['imports', 'references', 'reexports']);
-const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx']);
+const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.mts', '.cts', '.py']);
 // The map opens with the two relationships people can read at a glance. Other
 // semantic edge types remain available to the trace engine without flooding
 // the architectural overview.
@@ -92,6 +92,7 @@ function sourceSeeds(item) {
 }
 function collectTrace(item) {
   const found = new Set(), edges = new Set();
+  if (!item) return { nodes: found, edges };
   const seeds = sourceSeeds(item);
   seeds.forEach(id => found.add(id));
   const walk = (direction, maxDepth) => {
@@ -119,14 +120,16 @@ function collectTrace(item) {
 function traceFrom(item) {
   return collectTrace(item).nodes;
 }
+function mergeTrace(item) {
+  const data = collectTrace(item);
+  for (const id of data.nodes) trace.add(id);
+  for (const id of data.edges) traceEdges.add(id);
+}
 function rebuildTrace() {
-  const data = collectTrace(selected() || entryItem());
-  trace = data.nodes; traceEdges = data.edges;
-  for (const pin of pinned) {
-    const pinnedData = collectTrace(node(pin));
-    for (const id of pinnedData.nodes) trace.add(id);
-    for (const id of pinnedData.edges) traceEdges.add(id);
-  }
+  trace = new Set();
+  traceEdges = new Set();
+  mergeTrace(selected() || entryItem());
+  for (const pin of pinned) mergeTrace(node(pin));
 }
 function hasTrace(item) {
   if (!item) return false;
@@ -135,7 +138,13 @@ function hasTrace(item) {
   if (item.kind === 'folder') return filesBelow(item).some(hasTrace);
   return false;
 }
-function traceActive() { return traceMode; }
+// Flow state dims the map around the active selection. Overview stays open.
+function traceActive() { return flowMode && !!focusedFileId; }
+function exitFlow() {
+  flowMode = false;
+  focusOrigin = null;
+  focusedFileId = null;
+}
 function traceFiles() {
   const result = new Map();
   for (const id of trace) { const file = fileOf(node(id)); if (file) result.set(file.id, file); }
@@ -165,16 +174,33 @@ function roleFor(item) {
 }
 function mapRegion(item) {
   const path = `${item.path || ''}/${item.label || ''}`.toLowerCase();
-  if (/(^|\/)(apps?|gateway|console|web|api)(\/|$)/.test(path)) return 'application';
-  if (/(^|\/)(services?|workers?|server)(\/|$)/.test(path)) return 'service';
-  if (/(^|\/)(packages?|shared|common|lib|core)(\/|$)/.test(path)) return 'package';
+  if (/(^|\/)(apps?|gateway|console|web|api|frontend|backend)(\/|$)/.test(path)) return 'application';
+  if (/(^|\/)(services?|workers?|server|tasks?)(\/|$)/.test(path)) return 'service';
+  if (/(^|\/)(packages?|shared|common|lib|core|utils?)(\/|$)/.test(path)) return 'package';
   if (/(^|\/)(tests?|__tests__|specs?|fixtures)(\/|$)/.test(path)) return 'test';
   if (/(^|\/)(generated|dist|build|coverage|vendor)(\/|$)/.test(path)) return 'generated';
   if (/(^|\/)(docs?|readme|examples?)(\/|$)/.test(path)) return 'docs';
-  if (/(^|\/)(config|infra|scripts|assets|docker|deploy)(\/|$)/.test(path) || isInfrastructure(item)) return 'infrastructure';
+  if (/(^|\/)(config|infra|scripts|assets|docker|deploy|migrations?)(\/|$)/.test(path) || isInfrastructure(item)) return 'infrastructure';
+  if (/\.py$/.test(path) && /(^|\/)(main|manage|asgi|wsgi)\.py$/.test(path)) return 'application';
   return 'context';
 }
-const mapRegionPriority = { application: 0, service: 1, package: 2, context: 3, infrastructure: 4, docs: 5, generated: 6, test: 7 };
+const mapRegionPriority = { application: 0, package: 1, service: 2, infrastructure: 3, docs: 4, test: 5, generated: 6, context: 7 };
+const RAIL_COPY = {
+  application: { title: 'Apps', subtitle: 'entry points & UI' },
+  package: { title: 'Packages', subtitle: 'shared libraries' },
+  service: { title: 'Services', subtitle: 'runtime workers' },
+  infrastructure: { title: 'Platform', subtitle: 'config & ops' },
+  docs: { title: 'Docs', subtitle: 'guides & notes' },
+  test: { title: 'Tests', subtitle: 'specs & fixtures' },
+  generated: { title: 'Generated', subtitle: 'build artifacts' },
+  context: { title: 'Workspace', subtitle: 'everything else' },
+  upstream: { title: 'Calls in', subtitle: 'who reaches here' },
+  focus: { title: 'Signal', subtitle: 'you are here' },
+  downstream: { title: 'Calls out', subtitle: 'where it goes next' }
+};
+function railCopy(key) {
+  return RAIL_COPY[key] || { title: key, subtitle: '' };
+}
 function relationshipCount(item) {
   if (item.kind === 'folder') {
     const ids = new Set(filesBelow(item).flatMap(file => [file.id, ...modules(file).map(module => module.id)]));
@@ -210,7 +236,9 @@ function folderItems(item) {
 }
 function primaryTraceScore(item) {
   const score = hasTrace(item) ? 1000 : 0;
-  return score + externalRelationshipCount(item) * 22 + relationshipCount(item) * 3 + (item.entrypoint ? 80 : 0) + (isInfrastructure(item) ? -40 : 0) - (item.orphan ? 120 : 0);
+  const external = externalRelationshipCount(item);
+  const local = Math.min(relationshipCount(item), 18);
+  return score + external * 64 + local * 3 + (item.entrypoint ? 140 : 0) + (isInfrastructure(item) ? -28 : 0) - (item.orphan ? 140 : 0);
 }
 function connectionPressure(item, anchor) {
   const empty = { incoming: 0, outgoing: 0, total: 0, ratio: .5, role: 'context' };
@@ -253,15 +281,18 @@ function traceSpringPairs(items) {
 }
 function entryItem(item = rootFolder()) {
   const direct = directItems(item);
-  return direct.sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label))[0] || entryFile(item) || item;
+  const ranked = direct.sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label));
+  const bestFile = ranked.find(entry => entry.kind === 'file' && relationshipCount(entry) > 0);
+  const bestFolder = ranked.find(entry => entry.kind === 'folder' && externalRelationshipCount(entry) > 0);
+  return bestFile || bestFolder || ranked[0] || entryFile(item) || item;
 }
 function snapshot() {
-  return { scopeId, selectedId, selectedImportEdgeId, layoutAnchorFileId, flowMode, traceMode, presentationMode, expanded: [...expandedFiles], expandedFolders: [...expandedFolders], expandedModules: [...expandedModules], source: [...sourceFiles], pinned: [...pinned], offsets: [...offsets.entries()].map(([id, value]) => [id, { ...value }]), canvas: { ...canvas }, edgeVisibility: { ...edgeVisibility } };
+  return { scopeId, selectedId, selectedImportEdgeId, layoutAnchorFileId, flowMode, focusedFileId, traceMode, presentationMode, expanded: [...expandedFiles], expandedFolders: [...expandedFolders], expandedModules: [...expandedModules], source: [...sourceFiles], pinned: [...pinned], offsets: [...offsets.entries()].map(([id, value]) => [id, { ...value }]), canvas: { ...canvas }, edgeVisibility: { ...edgeVisibility } };
 }
 function updateHistory() { $('#history-back').disabled = !undoStack.length; $('#history-forward').disabled = !redoStack.length; }
 function remember() { if (!graph) return; undoStack.push(snapshot()); if (undoStack.length > 70) undoStack.shift(); redoStack.length = 0; updateHistory(); }
 function restore(state) {
-  scopeId = state.scopeId; selectedId = state.selectedId; selectedImportEdgeId = state.selectedImportEdgeId; layoutAnchorFileId = state.layoutAnchorFileId; flowMode = state.flowMode; traceMode = state.traceMode ?? true; presentationMode = !!state.presentationMode;
+  scopeId = state.scopeId; selectedId = state.selectedId; selectedImportEdgeId = state.selectedImportEdgeId; layoutAnchorFileId = state.layoutAnchorFileId; flowMode = state.flowMode; focusedFileId = state.focusedFileId || null; focusOrigin = null; traceMode = state.traceMode ?? true; presentationMode = !!state.presentationMode;
   Object.assign(edgeVisibility, state.edgeVisibility || {});
   expandedFiles.clear(); state.expanded.forEach(id => expandedFiles.add(id)); expandedFolders.clear(); (state.expandedFolders || []).forEach(id => expandedFolders.add(id)); expandedModules.clear(); (state.expandedModules || []).forEach(id => expandedModules.add(id)); sourceFiles.clear(); state.source.forEach(id => sourceFiles.add(id)); pinned.clear(); state.pinned.forEach(id => pinned.add(id)); offsets.clear(); state.offsets.forEach(([id, value]) => offsets.set(id, value)); Object.assign(canvas, state.canvas);
   rebuildTrace(); render(); updateInspector();
@@ -306,7 +337,7 @@ function folderContentHeight(item, depth = 0) {
     const imports = expanded ? importSummaries(child).length : 0;
     const moduleRows = expanded ? Math.max(1, modules(child).length) : 0;
     const sourceRows = expanded ? modules(child).filter(module => expandedModules.has(module.id)).reduce((height, module) => height + moduleSourceHeight(child, module), 0) : 0;
-    return 50 + (expanded ? 20 + imports * 34 + moduleRows * 42 + sourceRows : 0);
+    return 50 + (expanded ? 20 + imports * 40 + moduleRows * 42 + sourceRows : 0);
   });
   if (!rows.length) return 34;
   const columns = depth > 1 ? 1 : rows.length > 6 ? 3 : 2;
@@ -325,7 +356,8 @@ function cardSize(item, collapsed = false) {
     return { w: !collapsed && expandedFolders.has(item.id) ? 700 : 318, h: 108 + contentHeight + (contentHeight ? 34 : 0) };
   }
   const sourceHeight = !collapsed && expandedFiles.has(item.id) ? modules(item).filter(module => expandedModules.has(module.id)).reduce((height, module) => height + moduleSourceHeight(item, module), 0) : 0;
-  const moduleHeight = !collapsed && expandedFiles.has(item.id) ? Math.max(0, modules(item).length * 44 + 46 + sourceHeight) : 0;
+  const importHeight = !collapsed && expandedFiles.has(item.id) ? importSummaries(item).length * 40 + (importSummaries(item).length ? 12 : 0) : 0;
+  const moduleHeight = !collapsed && expandedFiles.has(item.id) ? Math.max(0, modules(item).length * 44 + 46 + sourceHeight + importHeight) : 0;
   const liveHeight = recentFor(item) && item.git?.change ? 88 : 0;
   return { w: expandedFiles.has(item.id) ? 408 : 318, h: 108 + moduleHeight + liveHeight + (item.git?.change ? 22 : 0) };
 }
@@ -382,16 +414,9 @@ function rememberLayoutPositions() {
     });
   });
 }
-function softenedPlacement(item, target, locked = false) {
-  if (locked) return target;
-  const previous = layoutMemory.get(item.id);
-  if (!previous) return target;
-  const maxMove = hasTrace(item) ? 280 : 180;
-  const dx = target.x - previous.x, dy = target.y - previous.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance <= maxMove) return target;
-  const ratio = maxMove / distance;
-  return { ...target, x: previous.x + dx * ratio, y: previous.y + dy * ratio };
+function softenedPlacement(_item, target) {
+  // Demo layout is intentional and fixed — no soft-snap interpolation.
+  return target;
 }
 function requestLayoutSettle(item) {
   const file = fileOf(item);
@@ -404,6 +429,9 @@ function requestLayoutSettle(item) {
   basePlacements.clear();
   basePlacementKey = '';
 }
+function livesInsideExpandedFolder(file) {
+  return !!file && ancestors(file).some(parent => parent.kind === 'folder' && parent.id !== rootFolder().id && expandedFolders.has(parent.id));
+}
 function focusAnchorElement() {
   const item = selected();
   if (item?.kind === 'module') return scene.querySelector(`[data-module="${CSS.escape(item.id)}"]`);
@@ -413,22 +441,42 @@ function focusAnchorElement() {
 function lockFocusedAnchor(previousRect) {
   const item = selected(); const file = fileOf(item);
   const anchor = focusAnchorElement();
-  if (!previousRect || !anchor || !file || focusedFileId !== file.id) return;
+  if (!previousRect || !anchor || !file || focusedFileId !== file.id || !basePlacements.has(file.id)) return;
   const current = anchor.getBoundingClientRect();
   const dx = (previousRect.left - current.left) / canvas.scale;
   const dy = (previousRect.top - current.top) / canvas.scale;
   if (Math.abs(dx) < .5 && Math.abs(dy) < .5) return;
-  const value = offsets.get(file.id) || { x: 0, y: 0 };
-  const next = { x: value.x + dx, y: value.y + dy };
-  offsets.set(file.id, next);
-  const card = scene.querySelector(`.card[data-id="${CSS.escape(file.id)}"]`);
-  if (card) card.style.translate = `${next.x}px ${next.y}px`;
+  // Keep the selected card's *layout* anchored, rather than layering a new
+  // visual translate on every render.  The old approach compounded offsets
+  // and only worked for top-level cards, which produced locked/jittery renders
+  // for files inside folders.
+  const placement = basePlacements.get(file.id);
+  if (placement) basePlacements.set(file.id, { ...placement, x: placement.x + dx, y: placement.y + dy });
+  if (focusOrigin?.id === file.id) focusOrigin = { ...focusOrigin, x: focusOrigin.x + dx, y: focusOrigin.y + dy };
+  const remembered = layoutMemory.get(file.id);
+  if (remembered) layoutMemory.set(file.id, { ...remembered, x: remembered.x + dx, y: remembered.y + dy });
+  const container = scene.querySelector(`.card[data-id="${CSS.escape(file.id)}"], [data-inline-file="${CSS.escape(file.id)}"]`);
+  if (container) container.style.translate = `${dx}px ${dy}px`;
 }
 function activateFocus(item) {
   const file = fileOf(item); if (!file) return;
+  // A file revealed inside an expanded folder is part of that recursive
+  // container. Selecting it should refine its trace in place, never promote it
+  // into the floating trace stage outside its parent.
+  if (livesInsideExpandedFolder(file)) {
+    focusedFileId = null;
+    focusOrigin = null;
+    flowMode = false;
+    layoutAnchorFileId = file.id;
+    return;
+  }
   // Capture the *rendered* position at pointer time. That location becomes the
   // file's new anchor before a single neighbouring card begins to move.
   focusOrigin = captureFocusOrigin(file);
+  // Focus origin is already the rendered position, including any manual drag.
+  // Normalize the offset so the position cannot be applied twice during the
+  // focus layout pass.
+  offsets.delete(file.id);
   focusedFileId = file.id;
   flowMode = true;
   layoutAnchorFileId = file.id;
@@ -438,6 +486,7 @@ function activateFocus(item) {
 function settleDragAnchor(item) {
   const file = fileOf(item) || (item?.kind === 'file' ? item : null);
   if (!file) return false;
+  if (livesInsideExpandedFolder(file)) return false;
   const origin = captureCardOrigin(file.id) || captureFocusOrigin(file);
   if (!origin) return false;
   focusOrigin = origin;
@@ -451,227 +500,116 @@ function settleDragAnchor(item) {
   rebuildTrace();
   return true;
 }
+function stackColumn(items, x, top, width, lane, gap = 18) {
+  const placements = [];
+  let y = top;
+  for (const item of items) {
+    const size = cardSize(item);
+    const w = Math.min(width, Math.max(size.w, Math.min(320, width)));
+    const h = size.h;
+    const placement = { item, x, y, w, h, lane, groupId: `rail:${lane}`, boundaryKey: `rail:${lane}` };
+    placements.push(placement);
+    basePlacements.set(item.id, placement);
+    y += h + gap;
+  }
+  return { placements, bottom: y };
+}
 function automaticLayout() {
   const current = folder();
   const direct = directItems(current);
-  const directIds = new Set(direct.map(item => item.id));
-  const anchor = node(layoutAnchorFileId)?.kind === 'file' ? node(layoutAnchorFileId) : entryFile(current);
   const focusItem = selected();
-  const focusMode = focusedFileId === fileOf(focusItem)?.id && (focusItem?.kind === 'module' || focusItem?.kind === 'file');
+  const nestedFocus = livesInsideExpandedFolder(fileOf(focusItem));
+  const focusMode = !nestedFocus && flowMode && focusedFileId === fileOf(focusItem)?.id && (focusItem?.kind === 'module' || focusItem?.kind === 'file');
   const focusFiles = focusMode ? focusTraceFiles(focusItem) : [];
-  const related = focusMode ? focusFiles : flowMode ? traceFilesFor(anchor).filter(file => !directIds.has(file.id) && file.id !== anchor?.id).slice(0, 18) : [];
-  const contextItems = (focusMode ? [...direct.filter(item => !hasTrace(item)), ...related] : [...direct, ...related]).filter((item, index, list) => list.findIndex(other => other.id === item.id) === index);
-  const pad = 72;
-  const gap = 42;
-  const minColumn = 300;
-  const maxColumn = 720;
   const viewportWidth = Math.max(980, board.clientWidth);
   const viewportHeight = Math.max(680, board.clientHeight);
-  const usableWidth = Math.max(900, viewportWidth - pad * 2);
-  const worldWidth = Math.max(viewportWidth, usableWidth + pad * 2);
+  const padX = 40;
+  const padY = 108;
+  const usableWidth = Math.max(860, viewportWidth - padX * 2);
+  basePlacements.clear();
+  basePlacementKey = `${scopeId}:${focusMode ? `signal:${focusItem.id}` : 'rails'}:${direct.map(item => item.id).join('|')}`;
+
+  if (focusMode) {
+    const selectedFile = fileOf(focusItem);
+    const others = focusFiles.filter(file => file.id !== selectedFile.id);
+    const upstream = others.filter(file => connectionPressure(file, selectedFile).ratio <= .5)
+      .sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a));
+    const downstream = others.filter(file => connectionPressure(file, selectedFile).ratio > .5)
+      .sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a));
+    const colGap = 36;
+    const colW = Math.floor((usableWidth - colGap * 2) / 3);
+    const leftX = padX;
+    const midX = padX + colW + colGap;
+    const rightX = padX + (colW + colGap) * 2;
+    const stackTop = padY + 28;
+    const inset = 22;
+    const left = stackColumn(upstream.slice(0, 6), leftX + inset, stackTop, colW - inset, 'upstream');
+    const mid = stackColumn([selectedFile], midX + inset, stackTop + Math.max(0, (Math.max(upstream.length, downstream.length) - 1) * 24), colW - inset, 'focus', 24);
+    const right = stackColumn(downstream.slice(0, 6), rightX + inset, stackTop, colW - inset, 'downstream');
+    const placements = [...left.placements, ...mid.placements, ...right.placements];
+    const contentBottom = Math.max(left.bottom, mid.bottom, right.bottom, stackTop + 280);
+    const worldH = Math.max(viewportHeight, contentBottom + 80);
+    const worldW = Math.max(viewportWidth, padX * 2 + usableWidth);
+    const chrome = [
+      { kind: 'stage', mode: 'signal', x: 0, y: 0, w: worldW, h: worldH, title: selectedFile.label, path: selectedFile.path || '' },
+      { kind: 'rail', lane: 'upstream', x: leftX, y: padY - 8, w: colW, h: worldH - padY, index: 0, count: upstream.length },
+      { kind: 'rail', lane: 'focus', x: midX, y: padY - 8, w: colW, h: worldH - padY, index: 1, count: 1 },
+      { kind: 'rail', lane: 'downstream', x: rightX, y: padY - 8, w: colW, h: worldH - padY, index: 2, count: downstream.length }
+    ];
+    return { placements, chrome, boundaries: [], mode: 'signal', w: worldW, h: worldH };
+  }
+
+  // Architecture rails: fixed columns that read left → right like a circuit.
+  const regions = new Map();
+  for (const item of direct) {
+    const region = mapRegion(item);
+    const list = regions.get(region) || [];
+    list.push(item);
+    regions.set(region, list);
+  }
+  const orderedRails = [...regions.entries()]
+    .sort(([a], [b]) => (mapRegionPriority[a] ?? 9) - (mapRegionPriority[b] ?? 9))
+    .map(([lane, items]) => ({
+      lane,
+      items: [...items].sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label))
+    }));
+  // Prefer at most 4 primary rails; fold leftovers into the last column.
+  const primary = orderedRails.slice(0, 4);
+  if (orderedRails.length > 4) {
+    const overflow = orderedRails.slice(4).flatMap(rail => rail.items);
+    primary[primary.length - 1].items = [...primary[primary.length - 1].items, ...overflow]
+      .sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label));
+  }
+  const railCount = Math.max(1, primary.length);
+  const colGap = 28;
+  const colW = Math.floor((usableWidth - colGap * (railCount - 1)) / railCount);
+  const stackTop = padY + 36;
   const placements = [];
-  const layoutKey = `${scopeId}:${focusMode ? `focus:${focusItem.id}:` : ''}${contextItems.map(item => item.id).sort().join('|')}`;
-  const collides = (a, b, verticalGap = 32, horizontalGap = gap) => !(a.x + a.w + horizontalGap < b.x || b.x + b.w + horizontalGap < a.x || a.y + a.h + verticalGap < b.y || b.y + b.h + verticalGap < a.y);
-  const clampX = (x, width) => Math.max(pad, Math.min(pad + usableWidth - width, x));
-  const clampY = (y, height) => Math.max(56, Math.min(Math.max(56, viewportHeight - height - 26), y));
-  const openSpot = (box, placed, keepInFrame = false) => {
-    const fits = candidate => !placed.some(other => collides(candidate, other));
-    const normalized = candidate => ({
-      ...candidate,
-      x: clampX(candidate.x, candidate.w),
-      y: keepInFrame ? clampY(candidate.y, candidate.h) : Math.max(56, candidate.y)
+  const chrome = [{ kind: 'stage', mode: 'rails', x: 0, y: 0, w: 0, h: 0, title: current.label || 'repository', path: current.path || '/' }];
+  let maxBottom = stackTop;
+  primary.forEach((rail, index) => {
+    const x = padX + index * (colW + colGap);
+    const inset = 22;
+    const stacked = stackColumn(rail.items, x + inset, stackTop, colW - inset, rail.lane);
+    placements.push(...stacked.placements);
+    maxBottom = Math.max(maxBottom, stacked.bottom);
+    chrome.push({
+      kind: 'rail',
+      lane: rail.lane,
+      x,
+      y: padY - 8,
+      w: colW,
+      h: 0,
+      index,
+      count: rail.items.length
     });
-    const first = normalized(box);
-    if (fits(first)) return first;
-    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
-    for (let ring = 1; ring <= 6; ring++) {
-      const distance = ring * 56;
-      for (const [dx, dy] of directions) {
-        const candidate = normalized({ ...box, x: box.x + dx * distance, y: box.y + dy * distance });
-        if (fits(candidate)) return candidate;
-      }
-    }
-    let y = first.y, attempts = 0;
-    while (placed.some(other => collides({ ...first, y }, other)) && attempts++ < 60) {
-      const blockers = placed.filter(other => collides({ ...first, y }, other));
-      y = Math.max(y + 28, ...blockers.map(other => other.y + other.h + 44));
-    }
-    return { ...first, y };
-  };
-  const relaxTraceSprings = items => {
-    const lockedId = focusMode ? focusedFileId : null;
-    const move = new Map();
-    const center = placement => ({ x: placement.x + placement.w / 2, y: placement.y + placement.h / 2 });
-    const add = (id, dx, dy) => {
-      if (!id || id === lockedId) return;
-      const value = move.get(id) || { x: 0, y: 0 };
-      value.x += dx; value.y += dy; move.set(id, value);
-    };
-    for (const { from, to, weight } of traceSpringPairs(items).slice(0, 28)) {
-      const a = basePlacements.get(from.id), b = basePlacements.get(to.id);
-      if (!a || !b) continue;
-      const ac = center(a), bc = center(b);
-      const dx = bc.x - ac.x, dy = bc.y - ac.y;
-      const distance = Math.max(1, Math.hypot(dx, dy));
-      const desired = 390 + Math.min(90, Math.abs(dy) * .22);
-      const stretch = Math.max(-90, Math.min(180, distance - desired));
-      const pull = Math.max(-20, Math.min(46, stretch * .09 * Math.min(2.2, weight)));
-      if (Math.abs(pull) > .5) {
-        const ux = dx / distance, uy = dy / distance;
-        add(from.id, ux * pull, uy * pull);
-        add(to.id, -ux * pull, -uy * pull);
-      }
-      if (bc.x < ac.x + 180) {
-        const correction = Math.min(54, (ac.x + 180 - bc.x) * .16 * Math.min(2, weight));
-        add(from.id, -correction, 0);
-        add(to.id, correction, 0);
-      }
-    }
-    for (const [id, delta] of move) {
-      const placement = basePlacements.get(id); if (!placement) continue;
-      const length = Math.hypot(delta.x, delta.y);
-      const cap = hasTrace(node(id)) ? 72 : 38;
-      const ratio = length > cap ? cap / length : 1;
-      basePlacements.set(id, {
-        ...placement,
-        x: clampX(placement.x + delta.x * ratio, placement.w),
-        y: clampY(placement.y + delta.y * ratio, placement.h)
-      });
-    }
-  };
-
-  // Root and folder scopes are composed as an architectural map. Regions are
-  // semantic, fixed in meaning, and packed to the current landscape viewport.
-  // Connections are deliberately absent from this primary placement pass.
-  if (layoutKey !== basePlacementKey) {
-    basePlacements.clear();
-    if (focusMode) {
-      const seeded = [];
-      const selectedFile = fileOf(focusItem);
-      const focusSize = cardSize(selectedFile, true);
-      const preserved = focusOrigin?.id === selectedFile.id ? focusOrigin : layoutMemory.get(selectedFile.id) || basePlacements.get(selectedFile.id);
-      const centerX = Math.max(pad, Math.min(pad + usableWidth - focusSize.w, preserved?.x ?? pad + usableWidth * .5 - focusSize.w / 2));
-      const centerY = Math.max(56, preserved?.y ?? 62 + viewportHeight * .44 - focusSize.h / 2);
-      const place = (item, x, y, lane) => {
-        const size = cardSize(item, true);
-        const target = { x, y, w: size.w, h: size.h, lane };
-        const placement = softenedPlacement(item, target, item.id === selectedFile.id);
-        seeded.push(placement); basePlacements.set(item.id, placement);
-      };
-      place(selectedFile, centerX, centerY, 'focus');
-      const others = focusFiles.filter(file => file.id !== selectedFile.id);
-      const left = others.filter(file => connectionPressure(file, selectedFile).ratio <= .5);
-      const right = others.filter(file => connectionPressure(file, selectedFile).ratio > .5);
-      const distribute = (files, side) => files.forEach((file, index) => {
-        const size = cardSize(file, true);
-        const x = side === 'left' ? Math.max(pad, centerX - size.w - 150) : Math.min(pad + usableWidth - size.w, centerX + focusSize.w + 150);
-        const y = centerY + (index - (files.length - 1) / 2) * (size.h + 34);
-        place(file, x, Math.max(70, y), side === 'left' ? 'upstream' : 'downstream');
-      });
-      distribute(left, 'left'); distribute(right, 'right');
-      const quiet = contextItems.filter(item => !focusFiles.some(file => file.id === item.id));
-      quiet.forEach((item, index) => {
-        const size = cardSize(item, true); const width = Math.min(224, size.w);
-        // Quiet context is parked around the perimeter of the current frame,
-        // rather than sent to a distant column or piled under the trace.
-        const corners = [
-          [pad + 18, 66], [pad + usableWidth - width - 18, 66],
-          [pad + 18, Math.max(66, viewportHeight - size.h - 42)], [pad + usableWidth - width - 18, Math.max(66, viewportHeight - size.h - 42)]
-        ];
-        const corner = corners[index % corners.length], layer = Math.floor(index / corners.length);
-        const x = corner[0] + (layer % 2) * (width + 18) * (corner[0] < centerX ? 1 : -1);
-        const y = corner[1] + layer * (size.h + 18) * (corner[1] < centerY ? 1 : -1);
-        const target = {
-          x: Math.max(pad, Math.min(pad + usableWidth - width, x)),
-          y: Math.max(56, Math.min(viewportHeight - size.h - 26, y)),
-          w: width, h: size.h, lane: 'context'
-        };
-        const placement = softenedPlacement(item, target);
-        seeded.push(placement); basePlacements.set(item.id, placement);
-      });
-    } else {
-    const regions = new Map();
-    for (const item of contextItems) {
-      const region = mapRegion(item); const list = regions.get(region) || [];
-      list.push(item); regions.set(region, list);
-    }
-    const slots = {
-      // A deliberate, magazine-like composition: core architecture lives at
-      // the top and centre; supporting material frames it rather than cutting
-      // through it. This remains useful on both compact and ultrawide screens.
-      application: [0.04, 0.09, 0.30, 0.25], package: [0.66, 0.09, 0.30, 0.25], service: [0.35, 0.40, 0.30, 0.24],
-      infrastructure: [0.04, 0.62, 0.42, 0.28], docs: [0.62, 0.62, 0.34, 0.24], context: [0.34, 0.10, 0.32, 0.24],
-      generated: [0.62, 0.84, 0.34, 0.16], test: [0.35, 0.76, 0.27, 0.18]
-    };
-    const seeded = [];
-    for (const [region, items] of [...regions.entries()].sort(([a], [b]) => (mapRegionPriority[a] ?? 9) - (mapRegionPriority[b] ?? 9))) {
-      const slot = slots[region] || slots.context;
-      const slotX = pad + usableWidth * slot[0], slotY = 56 + viewportHeight * slot[1];
-      const slotW = Math.max(minColumn, usableWidth * slot[2]), slotH = Math.max(140, viewportHeight * slot[3]);
-      const ranked = [...items].sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label));
-      const compact = ['infrastructure', 'docs', 'generated', 'test', 'context'].includes(region);
-      const localGap = compact ? 20 : gap;
-      const compactWidth = Math.max(196, Math.min(236, (slotW - localGap) / 2));
-      const cellW = compact ? compactWidth : Math.min(Math.max(minColumn, slotW / Math.min(2, Math.ceil(Math.sqrt(ranked.length)))), maxColumn);
-      const columns = compact ? Math.max(1, Math.min(2, Math.floor((slotW + localGap) / (cellW + localGap)))) : Math.max(1, Math.min(2, Math.floor((slotW + gap) / (cellW + gap))));
-      ranked.forEach((item, index) => {
-        const size = cardSize(item, true);
-        const width = compact ? Math.min(cellW, slotW) : Math.min(Math.max(size.w, minColumn), Math.max(minColumn, slotW));
-        const column = index % columns, row = Math.floor(index / columns);
-        let x = slotX + column * (width + localGap);
-        let y = slotY + row * (size.h + localGap);
-        x = Math.max(pad, Math.min(pad + usableWidth - width, x));
-        // Small local refinement only: strong architectural neighbours sit
-        // closer, but never leave their semantic region.
-        const pressure = connectionPressure(item, anchor);
-        if (pressure.total) x += (pressure.ratio - .5) * Math.min(34, slotW * .12);
-        let attempts = 0;
-        while (seeded.some(other => collides({ x, y, w: width, h: size.h }, other, 22, localGap)) && attempts++ < 24) y += size.h + localGap;
-        const placement = softenedPlacement(item, { x, y, w: width, h: size.h, lane: region });
-        seeded.push(placement); basePlacements.set(item.id, placement);
-      });
-    }
-    }
-    basePlacementKey = layoutKey;
-  }
-  relaxTraceSprings(contextItems);
-
-  // Expand in place. Only cards that physically collide with the enlarged
-  // container are pushed down; unrelated clusters never get re-laid out.
-  const flowOrder = [...contextItems].sort((a, b) => {
-    const ap = basePlacements.get(a.id), bp = basePlacements.get(b.id);
-    return (ap?.y || 0) - (bp?.y || 0) || (ap?.x || 0) - (bp?.x || 0);
   });
-  for (const item of flowOrder) {
-    const base = basePlacements.get(item.id);
-    const size = cardSize(item);
-    const width = Math.min(Math.max(size.w, minColumn), maxColumn);
-    let x = base?.x ?? pad;
-    let y = base?.y ?? 132;
-    // The clicked file is a physical anchor. It is never collision-resolved;
-    // every other card yields around it.
-    if (focusMode && item.id === focusedFileId) {
-      placements.push({ item, x, y, w: width, h: size.h, lane: 'focus' });
-      continue;
-    }
-    const resolved = openSpot({ x, y, w: width, h: size.h, lane: roleFor(item) }, placements, true);
-    placements.push({ item, ...resolved });
-  }
-  const rows = placements.map(placement => placement.y + placement.h);
-  const boundariesByKey = new Map();
-  for (const placement of placements) {
-    const group = groupFolder(placement.item, current); const key = `${group.id}:${placement.lane}`; placement.groupId = group.id; placement.boundaryKey = key;
-    const list = boundariesByKey.get(key) || { key, group, lane: placement.lane, placements: [] }; list.placements.push(placement); boundariesByKey.set(key, list);
-  }
-  const boundaries = [...boundariesByKey.values()].filter(group => {
-    if (group.group.id === current.id) return current.depth > 0 && group.placements.length > 1;
-    return group.group.kind === 'folder' && group.placements.length > 1;
-  }).map(group => {
-    const boxes = group.placements.map(placement => { const offset = offsets.get(placement.item.id) || { x: 0, y: 0 }; return { left: placement.x + offset.x, top: placement.y + offset.y, right: placement.x + offset.x + placement.w, bottom: placement.y + offset.y + placement.h }; });
-    const left = Math.min(...boxes.map(box => box.left)) - 18, top = Math.min(...boxes.map(box => box.top)) - 25, right = Math.max(...boxes.map(box => box.right)) + 18, bottom = Math.max(...boxes.map(box => box.bottom)) + 18;
-    return { ...group, x: left, y: top, w: right - left, h: bottom - top, label: group.placements.length > 1 || current.depth > 0 };
-  });
-  return { placements, boundaries, w: Math.max(worldWidth + pad, ...placements.map(item => item.x + item.w + pad)), h: Math.max(720, ...rows) + 92 };
+  const worldH = Math.max(viewportHeight, maxBottom + 96);
+  const worldW = Math.max(viewportWidth, padX * 2 + usableWidth);
+  chrome[0].w = worldW;
+  chrome[0].h = worldH;
+  for (const rail of chrome) if (rail.kind === 'rail') rail.h = worldH - padY;
+  return { placements, chrome, boundaries: [], mode: 'rails', w: worldW, h: worldH };
 }
 
 function sourceNotes(file) {
@@ -687,6 +625,16 @@ function sourceNotes(file) {
 }
 function importSummaries(file) {
   return edgeTypes().filter(edge => CONTEXT_TYPES.has(edge.type) && (edge.from === file.id || edge.to === file.id)).slice(0, 8);
+}
+function importPortId(edge, side) {
+  return `import:${edge.id}:${side === 'from' ? 'out' : 'in'}`;
+}
+function importRowHtml(edge) {
+  return `<button class="inline-import ${selectedImportEdgeId === edge.id ? 'selected' : ''} ${traceActive() && !traceEdges.has(edge.id) ? 'dim' : ''}" data-inline-import="${edge.id}" title="${escape(edge.evidence)}">
+    <span class="port edge-port in import-edge-port" data-import-port="${importPortId(edge, 'to')}" data-port-for="${importPortId(edge, 'to')}" data-port-side="in"></span>
+    <span class="import-kind">import</span><b>${escape(edge.evidence)}</b>
+    <span class="port edge-port out import-edge-port" data-import-port="${importPortId(edge, 'from')}" data-port-for="${importPortId(edge, 'from')}" data-port-side="out"></span>
+  </button>`;
 }
 function sourceHtml(file) {
   const notes = sourceNotes(file); const source = file.meta?.source || '';
@@ -745,7 +693,7 @@ function inlineFileCardHtml(file) {
   </section>`;
 }
 function inlineFileDetails(file, importEdges = importSummaries(file)) {
-  const imports = importEdges.map(edge => `<button class="inline-import ${selectedImportEdgeId === edge.id ? 'selected' : ''} ${traceActive() && !traceEdges.has(edge.id) ? 'dim' : ''}" data-inline-import="${edge.id}" title="${escape(edge.evidence)}"><span>import</span><b>${escape(edge.evidence)}</b></button>`).join('');
+  const imports = importEdges.map(importRowHtml).join('');
   const moduleRows = displayModules(file).map(module => moduleHtml(file, module, true)).join('');
   return `<div class="inline-file-detail">${imports ? `<div class="inline-imports">${imports}</div>` : ''}<div class="inline-modules">${moduleRows || '<span class="inline-empty">No semantic modules found.</span>'}</div></div>`;
 }
@@ -764,7 +712,10 @@ function moduleHtml(file, module, inline = false) {
 }
 function fileHtml(file, placement) {
   const offset = offsets.get(file.id) || { x: 0, y: 0 }; const traceClass = traceActive() && !hasTrace(file) ? 'dim' : ''; const selectedClass = selectedId === file.id || fileOf(selected())?.id === file.id ? 'selected' : ''; const expanded = expandedFiles.has(file.id); const list = modules(file); const liveClass = recentFor(file) ? 'live-changed' : ''; const focusClass = focusedFileId === file.id ? 'focus-anchor' : '';
-  return `<article class="card file-card ${expanded ? 'expanded' : ''} ${traceClass} ${selectedClass} ${liveClass} ${focusClass}" data-id="${file.id}" data-drag-id="${file.id}" data-kind="file" data-parent="${file.parentId}" data-group="${placement.groupId}" data-boundary="${placement.boundaryKey}" style="left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;--node:${color(file.path)};translate:${offset.x}px ${offset.y}px"><span class="port edge-port in endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="in" title="File input"></span><span class="port edge-port out endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="out" title="File output"></span><div class="file-head"><button class="chevron" data-expand="${file.id}" title="${expanded ? 'Collapse modules' : 'Show modules'}">${expanded ? '⌄' : '›'}</button><small class="file-path">${escape(file.path)}</small><b>${escape(file.label)}</b><span>${file.meta?.loc || 0} lines · ${list.length} modules · ${relationshipCount(file)} links</span><button class="port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" title="Pin file trace"></button>${file.git?.change ? `<button class="change" data-diff="${file.id}">${escape(file.git.change)} diff</button>` : ''}</div>${diffPreviewHtml(file)}${expanded ? `<div class="module-list">${displayModules(file).map(module => moduleHtml(file, module)).join('') || '<div class="module">No semantic modules found.</div>'}</div>${diffHtml(file)}` : ''}</article>`;
+  const orphanClass = file.orphan ? 'orphan' : '';
+  const entryClass = file.entrypoint ? 'entrypoint' : '';
+  const importRows = expanded ? importSummaries(file).map(importRowHtml).join('') : '';
+  return `<article class="card file-card ${expanded ? 'expanded' : ''} ${traceClass} ${selectedClass} ${liveClass} ${focusClass} ${orphanClass} ${entryClass}" data-id="${file.id}" data-drag-id="${file.id}" data-kind="file" data-parent="${file.parentId}" data-group="${placement.groupId}" data-boundary="${placement.boundaryKey}" style="left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;--node:${color(file.path)};translate:${offset.x}px ${offset.y}px"><span class="port edge-port in endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="in" title="File input"></span><span class="port edge-port out endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="out" title="File output"></span><div class="file-head"><button class="chevron" data-expand="${file.id}" title="${expanded ? 'Collapse modules' : 'Show modules'}">${expanded ? '⌄' : '›'}</button><small class="file-path">${escape(file.path)}</small><b>${escape(file.label)}${file.entrypoint ? '<em class="badge entry">entry</em>' : ''}${file.orphan ? '<em class="badge orphan">orphan</em>' : ''}</b><span>${file.meta?.loc || 0} lines · ${list.length} modules · ${relationshipCount(file)} links</span><button class="port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" title="Pin file trace"></button>${file.git?.change ? `<button class="change" data-diff="${file.id}">${escape(file.git.change)} diff</button>` : ''}</div>${diffPreviewHtml(file)}${expanded ? `${importRows ? `<div class="file-imports">${importRows}</div>` : ''}<div class="module-list">${displayModules(file).map(module => moduleHtml(file, module)).join('') || '<div class="module">No semantic modules found.</div>'}</div>${diffHtml(file)}` : ''}</article>`;
 }
 function folderHtml(item, placement) {
   const offset = offsets.get(item.id) || { x: 0, y: 0 }; const traceClass = traceActive() && !hasTrace(item) ? 'dim' : ''; const nested = children(item.id).filter(child => child.kind === 'folder').length; const files = filesBelow(item).length; const live = recentDescendants(item).length; const expanded = expandedFolders.has(item.id);
@@ -859,31 +810,59 @@ function renderActivityFeed() {
     bindActivityFeed();
   });
 }
+function chromeHtml(layout) {
+  return (layout.chrome || []).map(piece => {
+    if (piece.kind === 'stage') {
+      const modeLabel = piece.mode === 'signal' ? 'Signal path' : 'Architecture map';
+      const hint = piece.mode === 'signal'
+        ? 'Callers feed the signal on the left. Consumers leave on the right.'
+        : 'Read left to right — entry, shared code, runtime, platform.';
+      const stats = graph?.stats || {};
+      const meta = piece.mode === 'rails'
+        ? `${stats.files || 0} files · ${stats.modules || 0} modules · ${stats.orphaned || 0} orphans`
+        : hint;
+      return `<div class="stage-banner ${piece.mode}" data-stage="${piece.mode}">
+        <div class="stage-banner-copy">
+          <span class="stage-kicker">${modeLabel}</span>
+          <h2>${escape(piece.title)}</h2>
+          <p>${escape(piece.path || hint)}</p>
+        </div>
+        <p class="stage-hint">${escape(meta)}</p>
+      </div>`;
+    }
+    const copy = railCopy(piece.lane);
+    return `<div class="arch-rail ${piece.lane}" data-rail="${piece.lane}" style="left:${piece.x}px;top:${piece.y}px;width:${piece.w}px;height:${piece.h}px;--rail:${color(piece.lane)}">
+      <header>
+        <em>${String(piece.index + 1).padStart(2, '0')}</em>
+        <div><b>${escape(copy.title)}</b><span>${escape(copy.subtitle)}</span></div>
+        <small>${piece.count}</small>
+      </header>
+      <i class="rail-spine" aria-hidden="true"></i>
+    </div>`;
+  }).join('');
+}
 function render() {
   if (!graph) return;
-  const previousFocusRect = focusAnchorElement()?.getBoundingClientRect();
-  const previousRects = new Map([...scene.querySelectorAll('.card[data-id], .zone[data-zone]')].map(element => [element.dataset.id ? `card:${element.dataset.id}` : `zone:${element.dataset.zone}`, element.getBoundingClientRect()]));
+  const previousRects = new Map([...scene.querySelectorAll('.card[data-id]')].map(element => [`card:${element.dataset.id}`, element.getBoundingClientRect()]));
   rememberLayoutPositions();
-  const layout = automaticLayout(); world.style.width = `${layout.w}px`; world.style.height = `${layout.h}px`;
-  const zones = layout.boundaries.map(zone => `<div class="zone" data-zone="${zone.key}" style="left:${zone.x}px;top:${zone.y}px;width:${zone.w}px;height:${zone.h}px;--zone:${color(zone.group.path)}"></div>${zone.label ? `<div class="zone-label" style="left:${zone.x + 9}px;top:${zone.y + 7}px;--zone:${color(zone.group.path)}"><i></i><b title="${escape(zone.group.path || zone.group.label)}">${escape(zone.group.label)}</b><small>${zone.lane === 'in' ? 'upstream' : zone.lane === 'out' ? 'downstream' : zone.lane === 'focus' ? 'focus' : roleFor(zone.group)}</small></div>` : ''}`).join('');
-  scene.innerHTML = zones + layout.placements.map(placement => placement.item.kind === 'folder' ? folderHtml(placement.item, placement) : fileHtml(placement.item, placement)).join('');
-  lockFocusedAnchor(previousFocusRect);
-  bindScene(); applyCanvas(); drawEdges(); animateReflowEdges(5200); renderMinimap(); renderActivityFeed();
-  // Rendering is deliberately stateless, so use FLIP to make a changed layout
-  // read as objects being gently pushed aside rather than being recreated.
+  const layout = automaticLayout();
+  world.style.width = `${layout.w}px`;
+  world.style.height = `${layout.h}px`;
+  world.dataset.layoutMode = layout.mode || 'rails';
+  scene.innerHTML = chromeHtml(layout) + layout.placements.map(placement => placement.item.kind === 'folder' ? folderHtml(placement.item, placement) : fileHtml(placement.item, placement)).join('');
+  bindScene(); applyCanvas(); refreshFocusClasses(); drawEdges(); animateReflowEdges(720); renderMinimap(); renderActivityFeed();
   requestAnimationFrame(() => {
-    for (const element of scene.querySelectorAll('.card[data-id], .zone[data-zone]')) {
-      const key = element.dataset.id ? `card:${element.dataset.id}` : `zone:${element.dataset.zone}`;
-      const before = previousRects.get(key); if (!before) continue;
+    for (const element of scene.querySelectorAll('.card[data-id]')) {
+      const before = previousRects.get(`card:${element.dataset.id}`);
+      if (!before) continue;
       const after = element.getBoundingClientRect();
       const dx = (before.left - after.left) / canvas.scale, dy = (before.top - after.top) / canvas.scale;
       if (Math.abs(dx) < .5 && Math.abs(dy) < .5) continue;
-      const item = element.dataset.id ? node(element.dataset.id) : null;
-      const duration = element.classList.contains('focus-anchor') ? 0 : item && hasTrace(item) ? 5000 : 8000;
-      if (duration) element.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }], { duration, easing: 'cubic-bezier(.16, 1, .3, 1)' });
+      element.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }], { duration: 420, easing: 'cubic-bezier(.2, .8, .2, 1)' });
     }
   });
 }
+
 function folderOwnsEndpoint(folder) {
   return !expandedFolders.has(folder.id);
 }
@@ -894,12 +873,20 @@ function endpointFor(edge, side) {
   const id = side === 'from' ? edge.from : edge.to; const item = node(id); const file = fileOf(item);
   const sourcePort = `source:${edge.id}:${side === 'from' ? 'out' : 'in'}`;
   if (scene.querySelector(`[data-source-port="${CSS.escape(sourcePort)}"]`)) return sourcePort;
+  const importPort = importPortId(edge, side);
+  if (CONTEXT_TYPES.has(edge.type) && scene.querySelector(`[data-import-port="${CSS.escape(importPort)}"]`)) return importPort;
   if (item?.kind === 'module' && scene.querySelector(`[data-inline-module="${CSS.escape(item.id)}"]`)) return `inline-module:${item.id}`;
   if (item?.kind === 'module' && expandedFiles.has(item.fileId) && scene.querySelector(`[data-module="${item.id}"]`)) return `module:${item.id}`;
   if (file && fileOwnsEndpoint(file) && scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"]`)) return `inline:${file.id}`;
   if (file && fileOwnsEndpoint(file) && scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`)) return file.id;
-  const visible = nearestVisibleFolder(file || item);
-  if (visible && folderOwnsEndpoint(visible)) return visible.id;
+  if (file && item?.kind === 'file' && scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"]`)) return `inline:${file.id}`;
+  if (file && item?.kind === 'file' && scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`)) return file.id;
+  // An expanded folder has delegated its connection point to the visible
+  // children inside it.  Walk past it until we find the first still-collapsed
+  // container instead of targeting a hidden parent-side port.
+  let visible = nearestVisibleFolder(file || item);
+  while (visible && !folderOwnsEndpoint(visible)) visible = nearestVisibleFolder(node(visible.parentId));
+  if (visible) return visible.id;
   return null;
 }
 function isDetailedEndpoint(id) {
@@ -909,13 +896,17 @@ function sameModuleOrInternalContainer(edge) {
   if (edge.from === edge.to) return true;
   const from = node(edge.from), to = node(edge.to);
   const fromFile = fileOf(from), toFile = fileOf(to);
-  if (!fromFile || !toFile || fromFile.id !== toFile.id) return false;
-  if (from?.kind === 'module' && to?.kind === 'module' && from.id === to.id) return true;
-  return (from?.kind === 'file' && to?.kind === 'module') || (from?.kind === 'module' && to?.kind === 'file');
+  if (fromFile && toFile && fromFile.id === toFile.id) {
+    const visibleModules = expandedFiles.has(fromFile.id) || !!scene.querySelector(`[data-inline-module="${CSS.escape(from?.id || '')}"],[data-module="${CSS.escape(from?.id || '')}"]`);
+    if (from?.kind === 'module' && to?.kind === 'module' && from.id !== to.id && visibleModules) return false;
+    return true;
+  }
+  return false;
 }
 function markEndpoint(id, side) {
-  const selector = id.startsWith('source:') ? `[data-source-port="${CSS.escape(id)}"]` : id.startsWith('inline-module:') ? `[data-inline-module="${CSS.escape(id.slice(14))}"]` : id.startsWith('module:') ? `[data-module="${CSS.escape(id.slice(7))}"]` : id.startsWith('inline:') ? `[data-inline-file="${CSS.escape(id.slice(7))}"]` : `[data-id="${CSS.escape(id)}"]`;
+  const selector = id.startsWith('source:') ? `[data-source-port="${CSS.escape(id)}"]` : id.startsWith('import:') ? `[data-import-port="${CSS.escape(id)}"]` : id.startsWith('inline-module:') ? `[data-inline-module="${CSS.escape(id.slice(14))}"]` : id.startsWith('module:') ? `[data-module="${CSS.escape(id.slice(7))}"]` : id.startsWith('inline:') ? `[data-inline-file="${CSS.escape(id.slice(7))}"]` : `[data-id="${CSS.escape(id)}"]`;
   const element = scene.querySelector(selector); if (!element) return;
+  if (element.matches('[data-source-port],[data-import-port]')) { element.classList.add('connected-port'); return; }
   const moduleId = id.startsWith('inline-module:') ? id.slice(14) : id.startsWith('module:') ? id.slice(7) : null;
   const portId = moduleId || (id.startsWith('inline:') ? id.slice(7) : id);
   const port = element.matches(`[data-source-port="${CSS.escape(id)}"]`) ? element : element.querySelector(`[data-port-for="${CSS.escape(portId)}"][data-port-side="${side}"]`);
@@ -934,6 +925,8 @@ function crossingOffsets(edges) {
       let inversions = 0, near = 0;
       for (let j = 0; j < ordered.length; j++) {
         if (i === j) continue;
+        const overlapX = !(Math.max(ordered[i].a.x, ordered[i].b.x) < Math.min(ordered[j].a.x, ordered[j].b.x) || Math.max(ordered[j].a.x, ordered[j].b.x) < Math.min(ordered[i].a.x, ordered[i].b.x));
+        if (!overlapX) continue;
         const beforeAtSource = ordered[i].a.y < ordered[j].a.y;
         const beforeAtTarget = ordered[i].b.y < ordered[j].b.y;
         if (beforeAtSource !== beforeAtTarget) inversions += beforeAtSource ? -1 : 1;
@@ -948,13 +941,12 @@ function usesModulePort(id) {
   return id?.startsWith('inline-module:') || id?.startsWith('module:') || id?.startsWith('source:');
 }
 function showOverviewEdge(edge) {
-  // The overview should communicate the main architecture, not every incidental
-  // test/config/import relationship. Detail appears naturally as containers open.
-  if (folder()?.depth > 0 || expandedFolders.size || expandedFiles.size || expandedModules.size || pinned.size) return true;
+  if (traceActive() || expandedFolders.size || expandedFiles.size || expandedModules.size || pinned.size) return true;
+  // Architecture map only draws links that jump between rails — the story of
+  // the system, not every internal chatter inside one column.
   const fromRegion = mapRegion(fileOf(node(edge.from)) || node(edge.from));
   const toRegion = mapRegion(fileOf(node(edge.to)) || node(edge.to));
-  const core = new Set(['application', 'service', 'package']);
-  return core.has(fromRegion) && core.has(toRegion);
+  return fromRegion !== toRegion;
 }
 function moduleBusPath(a, b, spread, cross, backwards) {
   const lanePad = 34 + Math.min(46, Math.abs(cross) * .55);
@@ -995,9 +987,8 @@ function drawEdges() {
     const startY = a.y + spread * .3 + cross * .22, endY = b.y + spread * .3 - cross * .22;
     const midLift = cross * .65;
     const moduleRoute = !relaxedFocus && (usesModulePort(edge.from) || usesModulePort(edge.to));
-    // In focused tracing, a single Bézier segment continuously relaxes toward
-    // the least-kinked route as endpoints move. The stage layout keeps this
-    // clean curve in an unobstructed central corridor.
+    // Flow stage uses a single soft Bézier so wires relax as cards settle.
+    // Overview keeps the slightly busier curves that separate parallel links.
     const focusHandle = Math.max(76, Math.min(300, Math.abs(b.x - a.x) * .46));
     const focusDirection = b.x >= a.x ? 1 : -1;
     const pathData = relaxedFocus
@@ -1005,12 +996,18 @@ function drawEdges() {
       : moduleRoute ? moduleBusPath(a, b, spread, cross, backwards) : backwards
       ? `M ${a.x} ${startY} C ${a.x + span} ${startY + bend}, ${b.x - span} ${endY + bend + midLift}, ${b.x} ${endY}`
       : `M ${a.x} ${startY} C ${a.x + span} ${startY + spread + cross}, ${b.x - span} ${endY + spread - cross}, ${b.x} ${endY}`;
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', pathData); path.setAttribute('class', `wire moving ${edge.type} ${moduleRoute ? 'module-bus' : ''} ${Math.abs(cross) > 18 ? 'resolved-crossing' : ''}`); path.style.setProperty('--delay', `${index * -0.14}s`); path.append(Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'title'), { textContent: `${edge.type}: ${edge.evidence}` })); wires.append(path);
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', pathData);
+    path.setAttribute('class', `wire moving ${edge.type} ${moduleRoute ? 'module-bus' : ''} ${Math.abs(cross) > 18 ? 'resolved-crossing' : ''} ${relaxedFocus ? 'flow-stage' : 'overview-stage'}`);
+    path.style.setProperty('--delay', `${index * -0.14}s`);
+    path.append(Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'title'), { textContent: `${edge.type}: ${edge.evidence}` }));
+    wires.append(path);
   });
 }
 function point(id, side) {
-  const selector = id.startsWith('source:') ? `[data-source-port="${CSS.escape(id)}"]` : id.startsWith('inline-module:') ? `[data-inline-module="${CSS.escape(id.slice(14))}"]` : id.startsWith('module:') ? `[data-module="${CSS.escape(id.slice(7))}"]` : id.startsWith('inline:') ? `[data-inline-file="${CSS.escape(id.slice(7))}"]` : `[data-id="${CSS.escape(id)}"]`;
+  const selector = id.startsWith('source:') ? `[data-source-port="${CSS.escape(id)}"]` : id.startsWith('import:') ? `[data-import-port="${CSS.escape(id)}"]` : id.startsWith('inline-module:') ? `[data-inline-module="${CSS.escape(id.slice(14))}"]` : id.startsWith('module:') ? `[data-module="${CSS.escape(id.slice(7))}"]` : id.startsWith('inline:') ? `[data-inline-file="${CSS.escape(id.slice(7))}"]` : `[data-id="${CSS.escape(id)}"]`;
   const element = scene.querySelector(selector); if (!element) return null; const worldRect = world.getBoundingClientRect(), rect = element.getBoundingClientRect();
+  if (id.startsWith('source:') || id.startsWith('import:')) return { x: ((side === 'out' ? rect.right : rect.left) - worldRect.left) / canvas.scale, y: (rect.top - worldRect.top + rect.height / 2) / canvas.scale };
   const moduleId = id.startsWith('inline-module:') ? id.slice(14) : id.startsWith('module:') ? id.slice(7) : null;
   const portId = moduleId || (id.startsWith('inline:') ? id.slice(7) : id);
   const port = element.querySelector(`[data-port-for="${CSS.escape(portId)}"][data-port-side="${side}"]`);
@@ -1122,12 +1119,30 @@ function bindScene() {
       render(); updateInspector();
     });
   });
-  scene.querySelectorAll('.card[data-id]').forEach(card => { card.addEventListener('click', event => { if (Date.now() - Number(card.dataset.dragged || 0) < 240 || event.target.closest('button,[data-module],[data-inline]')) return; const item = node(card.dataset.id); requestLayoutSettle(item); selectItem(card.dataset.id); render(); }); card.addEventListener('dblclick', event => { if (event.target.closest('button,[data-module],[data-inline]')) return; const item = node(card.dataset.id); remember(); requestLayoutSettle(item); if (item.kind === 'folder') expandedFolders.has(item.id) ? expandedFolders.delete(item.id) : expandedFolders.add(item.id); else { layoutAnchorFileId = item.id; expandedFiles.add(item.id); sourceFiles.add(item.id); } render(); updateInspector(); }); });
+  scene.querySelectorAll('.card[data-id]').forEach(card => {
+    card.addEventListener('click', event => {
+      if (Date.now() - Number(card.dataset.dragged || 0) < 240 || event.target.closest('button,[data-module],[data-inline]')) return;
+      const item = node(card.dataset.id);
+      requestLayoutSettle(item);
+      selectItem(card.dataset.id);
+      render();
+    });
+    card.addEventListener('dblclick', event => {
+      if (event.target.closest('button,[data-module],[data-inline]')) return;
+      const item = node(card.dataset.id);
+      remember();
+      requestLayoutSettle(item);
+      if (item.kind === 'folder') expandedFolders.has(item.id) ? expandedFolders.delete(item.id) : expandedFolders.add(item.id);
+      else { layoutAnchorFileId = item.id; expandedFiles.has(item.id) ? (expandedFiles.delete(item.id), sourceFiles.delete(item.id)) : (expandedFiles.add(item.id), sourceFiles.add(item.id)); }
+      render();
+      updateInspector();
+    });
+  });
 }
 function bindActivityFeed() {
   $('#activity-list')?.querySelectorAll('[data-open-change]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation(); const file = fileForPath(button.dataset.openChange); if (!file) return;
-    remember(); selectedId = file.id; layoutAnchorFileId = file.id; flowMode = true; expandedFiles.add(file.id);
+    remember(); selectedId = file.id; layoutAnchorFileId = file.id; activateFocus(file); expandedFiles.add(file.id);
     for (const parent of ancestors(file).filter(item => item.kind === 'folder').slice(-3)) expandedFolders.add(parent.id);
     rebuildTrace(); render(); updateInspector();
   }));
@@ -1140,17 +1155,21 @@ function bindActivityFeed() {
 }
 function refreshFocusClasses() {
   const selectedFile = fileOf(selected());
+  world.classList.toggle('flow-active', traceActive());
+  world.classList.toggle('rails-active', !traceActive());
   scene.querySelectorAll('.card[data-id]').forEach(card => {
-    const item = node(card.dataset.id);
     card.classList.toggle('selected', card.dataset.id === selectedId || card.dataset.id === selectedFile?.id);
-    card.classList.toggle('dim', traceActive() && !hasTrace(item));
+    card.classList.toggle('focus-anchor', card.dataset.id === focusedFileId);
+    card.classList.toggle('dim', false);
   });
-  scene.querySelectorAll('[data-module]').forEach(element => element.classList.toggle('selected', element.dataset.module === selectedId));
-  scene.querySelectorAll('[data-module]').forEach(element => element.classList.toggle('dim', selected()?.kind === 'module' && !hasTrace(node(element.dataset.module))));
+  scene.querySelectorAll('[data-module]').forEach(element => {
+    const item = node(element.dataset.module);
+    element.classList.toggle('selected', element.dataset.module === selectedId);
+    element.classList.toggle('dim', selected()?.kind === 'module' && item && !hasTrace(item));
+  });
   scene.querySelectorAll('[data-inline]').forEach(element => {
-    const item = node(element.dataset.inline);
     element.classList.toggle('selected', element.dataset.inline === selectedId || fileOf(selected())?.id === element.dataset.inline);
-    element.classList.toggle('dim', traceActive() && !hasTrace(item));
+    element.classList.toggle('dim', false);
   });
   const activeModule = selected()?.kind === 'module' ? selected() : null;
   document.querySelectorAll('.line[data-line]').forEach(line => {
@@ -1161,11 +1180,16 @@ function refreshFocusClasses() {
 }
 function selectItem(id) {
   if (selectedId !== id) remember();
-  selectedId = id; selectedImportEdgeId = undefined; rebuildTrace(); refreshFocusClasses(); drawEdges(); renderMinimap(); updateInspector();
+  selectedId = id; selectedImportEdgeId = undefined; rebuildTrace(); refreshFocusClasses(); drawEdges(); renderMinimap(); updateInspector(); writeDeepLink();
 }
 function updateInspector() {
   const item = selected() || entryFile(); if (!item) return; const file = fileOf(item) || item; const related = edgeTypes().filter(edge => edge.from === item.id || edge.to === item.id || edge.from === file.id || edge.to === file.id);
-  $('#inspect-kind').textContent = `${item.kind.toUpperCase()} · ${traceActive() && hasTrace(item) ? 'ACTIVE TRACE' : isInfrastructure(file) ? 'INFRASTRUCTURE' : 'CONTEXT'}`; $('#inspect-title').textContent = item.kind === 'module' ? `${item.label}()` : item.label; $('#inspect-path').textContent = item.path || '/'; $('#inspect-trace').textContent = related.length ? `${related.length} semantic relationship${related.length === 1 ? '' : 's'} visible. Single click did not move the map.` : 'No direct semantic relationship was found.';
+  $('#inspect-kind').textContent = `${item.kind.toUpperCase()} · ${traceActive() ? 'SIGNAL PATH' : `RAIL · ${mapRegion(file || item).toUpperCase()}`}`;
+  $('#inspect-title').textContent = item.kind === 'module' ? `${item.label}()` : item.label;
+  $('#inspect-path').textContent = item.path || '/';
+  $('#inspect-trace').textContent = related.length
+    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}.${traceActive() ? ' Reading as calls-in → signal → calls-out.' : ' Click to isolate its signal path.'}`
+    : 'No direct relationships with the current edge filters.';
   $('#inspect-edges').innerHTML = related.slice(0, 9).map(edge => `<div><code>${edge.from === item.id ? '→' : '←'}</code> ${escape(edge.type)} · ${escape(edge.evidence)}${edge.line ? ` · line ${edge.line}` : ''}</div>`).join('') || '<div>No direct relationships.</div>';
   const sourcePanel = $('#source-panel'), sourceTarget = $('#inspect-source');
   if (file?.kind === 'file' && file.meta?.source) { sourcePanel.hidden = false; sourceTarget.innerHTML = sourceHtml(file); bindInspectorSource(); }
@@ -1177,11 +1201,15 @@ function bindInspectorSource() {
   $('#inspect-source').querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.pin; remember(); pinned.has(id) ? pinned.delete(id) : pinned.add(id); rebuildTrace(); render(); updateInspector(); }));
 }
 function renderMinimap() {
-  if (!graph) return; const w = 160, h = 104, scale = Math.min(w / Math.max(1, world.offsetWidth), h / Math.max(1, world.offsetHeight)); const zones = [...scene.querySelectorAll('.zone')].map(zone => `<i class="mini-zone" style="left:${zone.offsetLeft * scale}px;top:${zone.offsetTop * scale}px;width:${Math.max(4, zone.offsetWidth * scale)}px;height:${Math.max(4, zone.offsetHeight * scale)}px"></i>`).join(''); const cards = [...scene.querySelectorAll('.card')].map(card => `<i class="mini-node ${card.dataset.id === selectedId ? 'selected' : ''}" style="left:${(card.offsetLeft + card.offsetWidth / 2) * scale}px;top:${(card.offsetTop + card.offsetHeight / 2) * scale}px"></i>`).join(''); minimap.innerHTML = `${zones}${cards}<i class="mini-viewport" style="left:${-canvas.x * scale}px;top:${-canvas.y * scale}px;width:${board.clientWidth * scale / canvas.scale}px;height:${board.clientHeight * scale / canvas.scale}px"></i>`;
+  if (!graph) return; const w = 160, h = 104, scale = Math.min(w / Math.max(1, world.offsetWidth), h / Math.max(1, world.offsetHeight)); const cards = [...scene.querySelectorAll('.card')].map(card => `<i class="mini-node ${card.dataset.id === selectedId ? 'selected' : ''}" style="left:${(card.offsetLeft + card.offsetWidth / 2) * scale}px;top:${(card.offsetTop + card.offsetHeight / 2) * scale}px"></i>`).join(''); minimap.innerHTML = `${cards}<i class="mini-viewport" style="left:${-canvas.x * scale}px;top:${-canvas.y * scale}px;width:${board.clientWidth * scale / canvas.scale}px;height:${board.clientHeight * scale / canvas.scale}px"></i>`;
 }
 function fitMap() {
-  const cards = [...scene.querySelectorAll('.card,.zone')]; if (!cards.length) return; const left = Math.min(...cards.map(card => card.offsetLeft)), top = Math.min(...cards.map(card => card.offsetTop)), right = Math.max(...cards.map(card => card.offsetLeft + card.offsetWidth)), bottom = Math.max(...cards.map(card => card.offsetTop + card.offsetHeight));
-  canvas.scale = Math.min(1, Math.max(.35, Math.min((board.clientWidth - 48) / (right - left + 1), (board.clientHeight - 48) / (bottom - top + 1)))); canvas.x = board.clientWidth / 2 - (left + right) / 2 * canvas.scale; canvas.y = board.clientHeight / 2 - (top + bottom) / 2 * canvas.scale; applyCanvas();
+  const cards = [...scene.querySelectorAll('.card')]; if (!cards.length) return; const left = Math.min(...cards.map(card => card.offsetLeft)), top = Math.min(...cards.map(card => card.offsetTop)), right = Math.max(...cards.map(card => card.offsetLeft + card.offsetWidth)), bottom = Math.max(...cards.map(card => card.offsetTop + card.offsetHeight));
+  const rawScale = Math.min((board.clientWidth - 96) / (right - left + 1), (board.clientHeight - 88) / (bottom - top + 1));
+  canvas.scale = Math.min(1, Math.max(.72, rawScale));
+  canvas.x = board.clientWidth / 2 - (left + right) / 2 * canvas.scale;
+  canvas.y = board.clientHeight / 2 - (top + bottom) / 2 * canvas.scale;
+  applyCanvas();
 }
 function focusSelection() {
   const element = elementForSelection();
@@ -1222,14 +1250,25 @@ function keepSelectionVisible() {
   canvas.y += dy;
   applyCanvas();
 }
-function resetPresentation() { remember(); offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; focusOrigin = null; focusedFileId = null; flowMode = false; render(); requestAnimationFrame(fitMap); }
+function resetPresentation() { remember(); exitFlow(); offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; render(); requestAnimationFrame(fitMap); }
 function canvasControls() {
   let pan, lastPanMoved = false, wheelRemainder = 0;
   const stopPan = () => { lastPanMoved = !!pan?.moved; pan = null; board.classList.remove('panning'); setTimeout(() => { lastPanMoved = false; }, 0); };
   board.addEventListener('pointerdown', event => { if (event.button !== 0 || event.target.closest('.card,button,#minimap')) return; pan = { x: event.clientX, y: event.clientY, left: canvas.x, top: canvas.y, moved: false }; board.classList.add('panning'); board.setPointerCapture(event.pointerId); });
   board.addEventListener('pointermove', event => { if (!pan) return; const dx = event.clientX - pan.x, dy = event.clientY - pan.y; pan.moved ||= Math.abs(dx) + Math.abs(dy) > 8; canvas.x = pan.left + dx; canvas.y = pan.top + dy; applyCanvas(); });
   board.addEventListener('pointerup', stopPan); board.addEventListener('pointercancel', stopPan);
-  board.addEventListener('click', event => { if (event.target.closest('.card,button,#minimap') || lastPanMoved) return; const fallback = entryItem(folder()); if (!fallback) return; remember(); selectedId = fallback.id; selectedImportEdgeId = undefined; traceMode = true; flowMode = false; focusOrigin = null; focusedFileId = null; rebuildTrace(); render(); updateInspector(); syncToolbar(); });
+  board.addEventListener('click', event => {
+    if (event.target.closest('.card,button,#minimap') || lastPanMoved) return;
+    const fallback = entryItem(folder()); if (!fallback) return;
+    remember();
+    selectedId = fallback.id;
+    selectedImportEdgeId = undefined;
+    exitFlow();
+    rebuildTrace();
+    render();
+    updateInspector();
+    syncToolbar();
+  });
   board.addEventListener('wheel', event => {
     event.preventDefault();
     wheelRemainder += event.deltaY;
@@ -1243,7 +1282,15 @@ function canvasControls() {
     canvas.scale = next; canvas.x = cx - wx * next; canvas.y = cy - wy * next; applyCanvas();
   }, { passive: false });
   board.addEventListener('dblclick', event => { if (!event.target.closest('.card')) fitMap(); });
-  window.addEventListener('keydown', event => { if (event.key === 'Escape') { if (expandedModules.size) { remember(); expandedModules.clear(); render(); } else if (sourceFiles.size) { remember(); sourceFiles.clear(); render(); } else if (expandedFiles.size) { remember(); expandedFiles.clear(); render(); } else if (expandedFolders.size) { remember(); expandedFolders.clear(); render(); } else if (scopeId !== rootFolder().id) { remember(); scopeId = node(scopeId)?.parentId || rootFolder().id; layoutAnchorFileId = entryFile(folder())?.id; render(); } } });
+  window.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    if (expandedModules.size) { remember(); expandedModules.clear(); render(); }
+    else if (sourceFiles.size) { remember(); sourceFiles.clear(); render(); }
+    else if (expandedFiles.size) { remember(); expandedFiles.clear(); render(); }
+    else if (expandedFolders.size) { remember(); expandedFolders.clear(); render(); }
+    else if (flowMode) { remember(); exitFlow(); rebuildTrace(); render(); updateInspector(); }
+    else if (scopeId !== rootFolder().id) { remember(); scopeId = node(scopeId)?.parentId || rootFolder().id; layoutAnchorFileId = entryFile(folder())?.id; render(); }
+  });
 }
 minimap.addEventListener('pointerdown', event => { const rect = minimap.getBoundingClientRect(); const x = (event.clientX - rect.left) / rect.width * world.offsetWidth, y = (event.clientY - rect.top) / rect.height * world.offsetHeight; canvas.x = board.clientWidth / 2 - x * canvas.scale; canvas.y = board.clientHeight / 2 - y * canvas.scale; applyCanvas(); });
 async function snapshotFiles(files) { sourceMode = 'snapshot'; if ($('#tracking-status')) $('#tracking-status').textContent = 'static browser snapshot'; const payload = await Promise.all(files.filter(file => file.size < 2_000_000).map(async file => ({ path: file.webkitRelativePath || file.name, source: await file.text() }))); const response = await fetch('/api/graph-files', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ files: payload }) }); if (!response.ok) throw new Error(await response.text()); applyGraph(await response.json()); }
@@ -1330,7 +1377,7 @@ function folderByPath(path) {
   const normalized = String(path || '').replaceAll('\\', '/').replace(/\/$/, '');
   return graph?.nodes.find(item => item.kind === 'folder' && item.path === normalized);
 }
-function revealItem(item, { moduleName, line, pin = false } = {}) {
+function revealItem(item, { moduleName, line, pin = false, pulse = false, enterFlow = true } = {}) {
   if (!item || !graph) return;
   remember();
   const file = item.kind === 'file' ? item : item.kind === 'module' ? fileOf(item) : null;
@@ -1342,6 +1389,7 @@ function revealItem(item, { moduleName, line, pin = false } = {}) {
   if (targetFile) {
     expandedFiles.add(targetFile.id);
     layoutAnchorFileId = targetFile.id;
+    activateFocus(targetFile);
     const module = moduleName
       ? modules(targetFile).find(entry => entry.label === moduleName || `${entry.label}()` === moduleName)
       : line ? modules(targetFile).find(entry => line >= entry.loc.start && line <= entry.loc.end) : null;
@@ -1349,12 +1397,86 @@ function revealItem(item, { moduleName, line, pin = false } = {}) {
   }
   selectedId = target.id;
   if (pin) pinned.add(target.id);
-  flowMode = true;
+  if (enterFlow) flowMode = true;
   rebuildTrace(); render(); updateInspector(); syncToolbar();
-  requestAnimationFrame(focusSelection);
+  requestAnimationFrame(() => {
+    focusSelection();
+    if (pulse) pulseSelection();
+    writeDeepLink();
+  });
+}
+function pulseSelection() {
+  const element = elementForSelection();
+  if (!element) return;
+  element.classList.add('pulse-hit');
+  setTimeout(() => element.classList.remove('pulse-hit'), 1400);
+}
+function showTourCard(title, body) {
+  const card = $('#tour-card');
+  if (!card) return;
+  $('#tour-title').textContent = title || 'DeepFlow tour';
+  $('#tour-body').textContent = body || '';
+  card.hidden = false;
+  card.classList.add('visible');
+  clearTimeout(showTourCard.timer);
+  showTourCard.timer = setTimeout(() => { card.classList.remove('visible'); card.hidden = true; }, 5200);
+}
+async function playTour(steps = []) {
+  for (let index = 0; index < steps.length; index++) {
+    const step = steps[index];
+    showTourCard(`${index + 1}/${steps.length} · ${step.title}`, step.narrative);
+    handleViewerCommand({ ...step.command, type: step.command?.type });
+    await new Promise(resolve => setTimeout(resolve, 2200));
+  }
 }
 function handleViewerCommand(command = {}) {
-  if (command.type === 'clear-highlights') { remember(); pinned.clear(); recentPaths.clear(); rebuildTrace(); render(); updateInspector(); return; }
+  if (command.type === 'clear-highlights') {
+    remember(); pinned.clear(); exitFlow(); recentPaths.clear(); rebuildTrace(); render(); updateInspector(); writeDeepLink(); return;
+  }
+  if (command.type === 'set-mode') {
+    remember();
+    if (command.mode === 'rails') { exitFlow(); rebuildTrace(); render(); updateInspector(); }
+    else if (command.mode === 'signal') {
+      const item = selected() || entryItem();
+      if (item) revealItem(fileOf(item) || item, { enterFlow: true, pulse: true });
+    }
+    writeDeepLink();
+    return;
+  }
+  if (command.type === 'set-edges') {
+    remember();
+    Object.assign(edgeVisibility, command.edges || {});
+    rebuildTrace(); render(); updateInspector(); syncToolbar();
+    return;
+  }
+  if (command.type === 'show-orphans') {
+    remember();
+    const paths = command.paths?.length
+      ? command.paths
+      : graph.nodes.filter(n => n.kind === 'file' && n.orphan).map(n => n.path);
+    pinned.clear();
+    for (const path of paths.slice(0, 40)) {
+      const item = fileByPath(path);
+      if (!item) continue;
+      pinned.add(item.id);
+      for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
+      selectedId = item.id;
+    }
+    exitFlow();
+    rebuildTrace(); render(); updateInspector(); syncToolbar();
+    showTourCard('Orphans', `${paths.length} nodes with no static callers.`);
+    if (command.pulse) requestAnimationFrame(pulseSelection);
+    return;
+  }
+  if (command.type === 'tour-step') {
+    showTourCard(command.title, command.narrative);
+    if (command.command) handleViewerCommand(command.command);
+    return;
+  }
+  if (command.type === 'tour-play') {
+    playTour(command.steps || []).catch(console.error);
+    return;
+  }
   if (command.type === 'highlight-paths') {
     remember();
     for (const path of command.paths || []) {
@@ -1370,20 +1492,132 @@ function handleViewerCommand(command = {}) {
   }
   if (command.type === 'jump') {
     const item = fileByPath(command.path) || folderByPath(command.path);
-    revealItem(item, { moduleName: command.module, line: command.line, pin: command.pin });
+    revealItem(item, { moduleName: command.module, line: command.line, pin: command.pin, pulse: command.pulse !== false });
   }
+}
+function updateRepoStats() {
+  const el = $('#repo-stats');
+  if (!el || !graph) return;
+  const s = graph.stats || {};
+  el.textContent = `${s.files || 0} files · ${s.modules || 0} modules · ${s.orphaned || 0} orphans`;
+}
+function writeDeepLink() {
+  if (!graph) return;
+  const item = selected();
+  const file = fileOf(item) || (item?.kind === 'folder' ? item : null);
+  if (!file?.path) return;
+  const params = new URLSearchParams();
+  params.set('path', file.path);
+  if (item?.kind === 'module') params.set('module', item.label);
+  params.set('mode', traceActive() ? 'signal' : 'rails');
+  history.replaceState(null, '', `#${params.toString()}`);
+}
+function applyDeepLink() {
+  const hash = location.hash.replace(/^#/, '');
+  if (!hash || !graph) return false;
+  const params = new URLSearchParams(hash);
+  const path = params.get('path');
+  if (!path) return false;
+  const item = fileByPath(path) || folderByPath(path);
+  if (!item) return false;
+  revealItem(item, {
+    moduleName: params.get('module') || undefined,
+    enterFlow: params.get('mode') !== 'rails',
+    pulse: true
+  });
+  return true;
+}
+function searchCandidates(query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q || !graph) return [];
+  return graph.nodes
+    .filter(n => n.kind === 'file' || n.kind === 'module' || n.kind === 'folder')
+    .map(n => {
+      const hay = `${n.path || ''} ${n.label || ''}`.toLowerCase();
+      if (!hay.includes(q)) return null;
+      let score = 0;
+      if ((n.label || '').toLowerCase() === q) score += 100;
+      if ((n.path || '').toLowerCase().endsWith(q)) score += 80;
+      if ((n.label || '').toLowerCase().startsWith(q)) score += 40;
+      if (n.entrypoint) score += 12;
+      if (n.orphan) score -= 4;
+      return { node: n, score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.node.path.localeCompare(b.node.path))
+    .slice(0, 18)
+    .map(entry => entry.node);
+}
+function renderSearchResults(query) {
+  const list = $('#search-results');
+  if (!list) return;
+  const matches = searchCandidates(query);
+  list.innerHTML = matches.map((item, index) => `<button type="button" class="search-hit ${index === 0 ? 'active' : ''}" data-search-id="${item.id}">
+    <b>${escape(item.kind === 'module' ? `${item.label}()` : item.label)}</b>
+    <span>${escape(item.path || '/')}${item.entrypoint ? ' · entry' : ''}${item.orphan ? ' · orphan' : ''}</span>
+  </button>`).join('') || '<p class="search-empty">No matches in this workspace.</p>';
+  list.querySelectorAll('[data-search-id]').forEach(button => button.addEventListener('click', () => {
+    const item = node(button.dataset.searchId);
+    $('#search-dialog')?.close?.();
+    revealItem(item, { pulse: true });
+  }));
+}
+function openSearch() {
+  const dialog = $('#search-dialog');
+  const input = $('#search-input');
+  if (!dialog?.showModal) return;
+  input.value = '';
+  renderSearchResults('');
+  dialog.showModal();
+  requestAnimationFrame(() => input.focus());
+}
+function initSearch() {
+  $('#search-open')?.addEventListener('click', openSearch);
+  const input = $('#search-input');
+  input?.addEventListener('input', () => renderSearchResults(input.value));
+  input?.addEventListener('keydown', event => {
+    const hits = [...document.querySelectorAll('.search-hit')];
+    const active = document.querySelector('.search-hit.active');
+    const index = hits.indexOf(active);
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      hits.forEach(hit => hit.classList.remove('active'));
+      (hits[Math.min(hits.length - 1, index + 1)] || hits[0])?.classList.add('active');
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      hits.forEach(hit => hit.classList.remove('active'));
+      (hits[Math.max(0, index - 1)] || hits[0])?.classList.add('active');
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      active?.click();
+    }
+  });
+  window.addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      openSearch();
+    }
+  });
 }
 function applyGraph(next, { preserve = false } = {}) {
   const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
-  if (!preserve) { offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; focusOrigin = null; focusedFileId = null; expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; flowMode = false; undoStack.length = 0; redoStack.length = 0; }
+  if (!preserve) { offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
   scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id; selectedId = preserve && node(previousSelected) ? previousSelected : entryItem(folder())?.id || rootFolder().id; layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
   if (preserve) revealRecentChanges();
-  $('#repo-name').textContent = graph.roots.map(root => root.label).join(' + '); rebuildTrace(); render(); updateInspector(); updateHistory(); renderActivityFeed(); syncToolbar(); if (!preserve) fitMap();
+  $('#repo-name').textContent = graph.roots.map(root => root.label).join(' + ');
+  updateRepoStats();
+  rebuildTrace(); render(); updateInspector(); updateHistory(); renderActivityFeed(); syncToolbar();
+  if (!preserve) {
+    fitMap();
+    if (!applyDeepLink()) writeDeepLink();
+  }
 }
 async function loadGraph({ preserve = false } = {}) { const response = await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }); if (!response.ok) throw new Error(await response.text()); sourceMode = 'live'; if ($('#tracking-status')) $('#tracking-status').textContent = 'live local map'; applyGraph(await response.json(), { preserve }); }
 initSettings();
+initSearch();
 $('#history-back').addEventListener('click', () => moveHistory(true)); $('#history-forward').addEventListener('click', () => moveHistory(false)); $('#reset-view').addEventListener('click', resetPresentation); $('#open-workspace').addEventListener('click', showOpenDialog); $('#choose-folder').addEventListener('click', openWorkspace); $('#copy-mcp').addEventListener('click', async () => { await navigator.clipboard?.writeText($('#mcp-snippet').textContent); $('#copy-mcp').textContent = 'Copied'; setTimeout(() => $('#copy-mcp').textContent = 'Copy MCP setup', 1200); }); $('#workspace-files').addEventListener('change', event => { if (event.target.files.length) snapshotFiles([...event.target.files]); event.target.value = ''; }); $('#inspector-toggle').addEventListener('click', () => app.classList.toggle('inspector-closed'));
 $('#focus-selection')?.addEventListener('click', focusSelection);
+window.addEventListener('hashchange', () => applyDeepLink());
 document.querySelectorAll('[data-toolbar-toggle]').forEach(button => button.addEventListener('click', () => {
   remember();
   if (button.dataset.toolbarToggle === 'trace') traceMode = !traceMode;

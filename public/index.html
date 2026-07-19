@@ -2,30 +2,55 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DeepFlow — repository map</title><link rel="icon" href="/favicon.svg"><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/demo-polish.css">
+  <title>DeepFlow — signal map</title><link rel="icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=Sora:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/demo-polish.css">
 </head>
 <body>
   <main id="app">
     <section class="workspace">
       <header class="ribbon">
         <a class="brand" href="#" aria-label="DeepFlow home"><i></i><span>DeepFlow</span></a>
-        <div class="workspace-name"><b id="repo-name">atlas-workspace</b></div>
+        <div class="workspace-name"><b id="repo-name">atlas-workspace</b><em id="repo-stats">booting…</em></div>
         <div class="ribbon-actions">
-          <button class="toolbar-toggle active" data-edge-toggle="calls">Calls</button><button class="toolbar-toggle active" data-edge-toggle="imports">Imports</button>
-          <button id="history-back" title="Back" aria-label="Back">←</button><button id="history-forward" title="Forward" aria-label="Forward">→</button>
-          <button id="reset-view" title="Reset presentation" aria-label="Reset presentation">↺</button><button id="settings-open" title="Settings" aria-label="Settings">⚙</button><button id="open-workspace">Open</button>
+          <button id="search-open" title="Search (⌘K)" aria-label="Search">⌕</button>
+          <button class="toolbar-toggle active" data-edge-toggle="calls">Calls</button>
+          <button class="toolbar-toggle active" data-edge-toggle="imports">Imports</button>
+          <button class="toolbar-toggle" data-edge-toggle="dataflow">Data</button>
+          <button class="toolbar-toggle" data-edge-toggle="events">Events</button>
+          <button id="history-back" title="Back" aria-label="Back">←</button>
+          <button id="history-forward" title="Forward" aria-label="Forward">→</button>
+          <button id="reset-view" title="Reset presentation" aria-label="Reset presentation">↺</button>
+          <button id="settings-open" title="Settings" aria-label="Settings">⚙</button>
+          <button id="open-workspace">Open</button>
         </div>
       </header>
-      <div id="board" aria-label="Repository architecture whiteboard">
-        <div id="world"><svg id="wires"></svg><div id="scene"></div></div><div id="minimap" aria-label="Map overview"></div>
-        <div class="canvas-hint">Drag canvas to pan · drag a file or folder to arrange · single click focuses · double click expands</div>
+      <div id="board" aria-label="Repository signal map">
+        <div id="world"><svg id="wires"></svg><div id="scene"></div></div>
+        <div id="minimap" aria-label="Map overview"></div>
+        <div class="edge-legend" aria-hidden="true">
+          <span class="leg calls"><i></i>calls</span>
+          <span class="leg imports"><i></i>imports</span>
+          <span class="leg dataflow"><i></i>data</span>
+          <span class="leg events"><i></i>events</span>
+          <span class="leg orphan"><i></i>orphan</span>
+        </div>
+        <div class="canvas-hint">Architecture rails left→right · click a node for its signal path · ⌘K search · Esc returns</div>
+        <div id="tour-card" class="tour-card" hidden>
+          <span class="tour-kicker">Live tour</span>
+          <b id="tour-title">Architecture rails</b>
+          <p id="tour-body">DeepFlow narrates the repo while your agent drives the map.</p>
+        </div>
       </div>
     </section>
     <aside id="inspector">
       <button id="inspector-toggle" title="Collapse inspector">›</button>
       <div id="inspector-body">
-        <p class="inspector-kicker" id="inspect-kind">REPOSITORY MAP</p><h2 id="inspect-title">Choose a file</h2><p id="inspect-path">Single click shows its trace without moving the map.</p>
-        <section><b>Trace</b><p id="inspect-trace">Semantic callers and consumers appear on the canvas.</p></section>
+        <p class="inspector-kicker" id="inspect-kind">SIGNAL MAP</p>
+        <h2 id="inspect-title">Choose a node</h2>
+        <p id="inspect-path">Click a file to isolate callers → signal → consumers.</p>
+        <section><b>Trace</b><p id="inspect-trace">Rails show where code lives. Signal path shows how it moves.</p></section>
         <section id="source-panel" hidden><b>Source</b><div id="inspect-source"></div></section>
         <section><b>Activity</b><div id="activity-list" class="activity-list"></div></section>
         <section><b>Why this connects</b><div id="inspect-edges" class="edge-list"></div></section>
@@ -33,12 +58,19 @@
       </div>
     </aside>
   </main>
+  <dialog id="search-dialog" class="search-dialog">
+    <form method="dialog" id="search-form">
+      <input id="search-input" type="search" placeholder="Jump to file, folder, or module…" autocomplete="off">
+      <div id="search-results" class="search-results"></div>
+      <p class="search-hint">↑↓ select · Enter jump · Esc close</p>
+    </form>
+  </dialog>
   <dialog id="open-dialog" class="open-dialog">
     <form method="dialog">
-      <header><div><b>Open a repository</b><span>Load locally, then let your agent report edits to this map.</span></div><button value="cancel" aria-label="Close">×</button></header>
+      <header><div><b>Open a repository</b><span>Load locally, then let your agent drive this map over MCP.</span></div><button value="cancel" aria-label="Close">×</button></header>
       <section>
         <button id="choose-folder" value="choose" type="button">Choose local folder</button>
-        <p>If your browser blocks folder access, use the file picker fallback after closing this dialog.</p>
+        <p>Browser open is a static snapshot. For live agent demos, use MCP <code>deepflow_open_workspace</code>.</p>
       </section>
       <section>
         <b>Paste this into your agent MCP config</b>

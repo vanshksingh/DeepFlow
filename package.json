@@ -1,13 +1,22 @@
 {
   "name": "deepflow-circuit-map",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "node server.js", "mcp": "node mcp-server.js", "test": "node --test" },
-  "bin": { "deepflow-local-mcp": "./mcp-server.js" },
+  "description": "Local architecture signal map with agent MCP bridge (JS/TS + Python).",
+  "scripts": {
+    "dev": "node server.js",
+    "mcp": "node mcp-server.js",
+    "test": "node --test",
+    "bootstrap": "bash scripts/agent-bootstrap.sh"
+  },
+  "bin": {
+    "deepflow-local-mcp": "./mcp-server.js"
+  },
   "dependencies": {
     "tree-sitter": "^0.21.1",
     "tree-sitter-javascript": "^0.21.4",
+    "tree-sitter-python": "^0.21.0",
     "tree-sitter-typescript": "^0.21.2"
   }
 }

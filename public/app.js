@@ -17,7 +17,12 @@ let presentationMode = false;
 let trace = new Set();
 let traceEdges = new Set();
 let sourceMode = 'live';
-let autoRevealChanges = false;
+let autoRevealChanges = true;
+let agentRevealDwellMs = 8000;
+let agentRevealTimer = 0;
+let agentRevealPath = null;
+let agentRevealExpandedId = null;
+let canvasAnim = 0;
 const expandedFiles = new Set();
 const expandedFolders = new Set();
 const expandedModules = new Set();
@@ -49,6 +54,12 @@ let draggingTraceAnchorId = null;
 let hoverId = null;
 let hoverTimer = 0;
 const floatPlacements = new Map();
+const localOffsets = new Map(); // nested rearrange inside a parent canvas
+const pinnedLayout = new Set(); // user-dragged frames skip gravity
+let gravityTimer = 0;
+let skipFlipOnce = false;
+let flipBefore = null;
+let clickAnchor = null; // expand under pointer — never camera-center on open
 
 const FLOW_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits', 'imports', 'references', 'reexports']);
 const WALK_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits']);
@@ -59,17 +70,52 @@ const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx',
 // the architectural overview.
 const edgeVisibility = { calls: true, dataflow: false, events: false, inherits: false, imports: true, references: false, reexports: false };
 const edgeTypes = () => graph.edges.filter(edge => FLOW_TYPES.has(edge.type) && edgeVisibility[edge.type] !== false);
-const node = id => graph?.nodes.find(item => item.id === id);
-const rootFolder = () => graph.nodes.find(item => item.kind === 'folder' && item.depth === 0);
-const children = id => graph.nodes.filter(item => item.parentId === id);
+const SYNTHETIC_ROOT_ID = 'synthetic:root';
+let syntheticRootFiles = []; // loose files under displayRoot, grouped into a "root" island
+const layoutModes = new Map(); // parentId -> 'auto' | 'row' | 'column'
+/** Real workspace root (unwrap single wrapper folders). Does not include synthetic nodes. */
+function displayRootRaw() {
+  const root = graph?.nodes.find(item => item.kind === 'folder' && item.depth === 0);
+  if (!root) return null;
+  const kids = graph.nodes.filter(item => item.parentId === root.id && (item.kind === 'folder' || item.kind === 'file'));
+  if (kids.length === 1 && kids[0].kind === 'folder') {
+    const inner = graph.nodes.filter(item => item.parentId === kids[0].id && (item.kind === 'folder' || item.kind === 'file'));
+    if (inner.length > 2) return kids[0];
+  }
+  return root;
+}
+function syntheticRootNode() {
+  const root = displayRootRaw();
+  return {
+    id: SYNTHETIC_ROOT_ID,
+    kind: 'folder',
+    label: 'root',
+    path: `${root?.path || ''}/root`.replace(/\/{2,}/g, '/'),
+    parentId: root?.id || null,
+    depth: (root?.depth || 0) + 1,
+    synthetic: true
+  };
+}
+const node = id => {
+  if (id === SYNTHETIC_ROOT_ID) return syntheticRootNode();
+  return graph?.nodes.find(item => item.id === id);
+};
+const rootFolder = () => graph?.nodes.find(item => item.kind === 'folder' && item.depth === 0);
+const children = id => {
+  if (id === SYNTHETIC_ROOT_ID) return [...syntheticRootFiles];
+  return (graph?.nodes || []).filter(item => item.parentId === id);
+};
 const folder = () => node(scopeId) || rootFolder();
 const selected = () => node(selectedId);
 const fileOf = item => item?.kind === 'module' ? node(item.fileId) : item?.kind === 'file' ? item : null;
 const modules = file => children(file.id).filter(item => item.kind === 'module').sort((a, b) => a.loc.start - b.loc.start);
-const filesBelow = item => graph.nodes.filter(entry => entry.kind === 'file' && ancestors(entry).some(parent => parent.id === item.id));
+const filesBelow = item => {
+  if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) return [...syntheticRootFiles];
+  return (graph?.nodes || []).filter(entry => entry.kind === 'file' && ancestors(entry).some(parent => parent.id === item.id));
+};
 const directItems = item => children(item.id).filter(child => child.kind === 'folder' || child.kind === 'file');
 const escape = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-// Distinct folder hues — spread far enough that sibling packages read as different islands.
+// Distinct folder hues — translucent glass groups share a tint with their files.
 const FOLDER_COLORS = [
   '#0d8a72', '#3b6fb8', '#b05a28', '#8f3f72', '#218ea0',
   '#6f8230', '#5a48a8', '#b4474a', '#1f7a62', '#9a6b18',
@@ -89,6 +135,7 @@ const REGION_COLOR = {
 const hashHue = value => [...String(value || '')].reduce((sum, letter) => sum + letter.charCodeAt(0), 0);
 const color = value => FOLDER_COLORS[hashHue(value) % FOLDER_COLORS.length];
 function folderTint(item) {
+  if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) return '#4a5f78';
   const region = mapRegion(item);
   const base = REGION_COLOR[region] || REGION_COLOR.context;
   // Keep region identity, but salt by path so sibling folders stay distinct.
@@ -97,9 +144,35 @@ function folderTint(item) {
   const baseIndex = Math.max(0, FOLDER_COLORS.indexOf(base));
   return FOLDER_COLORS[(baseIndex + 1 + (salt % (FOLDER_COLORS.length - 1))) % FOLDER_COLORS.length];
 }
+function folderIcon(item) {
+  if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) return { g: '▤', c: '#4a5f78', region: 'context' };
+  const region = mapRegion(item);
+  const glyphs = {
+    application: '▣', package: '◫', service: '◎', infrastructure: '⛭',
+    docs: '¶', test: '✓', generated: '◇', context: '▤'
+  };
+  return { g: glyphs[region] || '▤', c: folderTint(item), region };
+}
 function fileTint(file) {
+  const root = displayRootRaw();
+  if (file?.parentId === root?.id) return folderTint(syntheticRootNode());
   const parent = node(file.parentId);
   return parent?.kind === 'folder' ? folderTint(parent) : color(file.path);
+}
+function fileGlyph(file) {
+  const ext = String(file?.extension || '').toLowerCase();
+  const table = {
+    '.ts': { g: 'TS', c: '#3178c6' }, '.tsx': { g: 'TX', c: '#3178c6' },
+    '.js': { g: 'JS', c: '#f0db4f' }, '.jsx': { g: 'JX', c: '#61dafb' },
+    '.mjs': { g: 'MJ', c: '#f0db4f' }, '.cjs': { g: 'CJ', c: '#f0db4f' },
+    '.py': { g: 'PY', c: '#3776ab' }, '.json': { g: '{}', c: '#cbb26a' },
+    '.md': { g: 'MD', c: '#6b8cae' }, '.css': { g: 'CS', c: '#563d7c' },
+    '.html': { g: 'HT', c: '#e34c26' }, '.sql': { g: 'SQ', c: '#e38c00' },
+    '.yml': { g: 'YM', c: '#cb171e' }, '.yaml': { g: 'YM', c: '#cb171e' },
+    '.toml': { g: 'TM', c: '#9c4121' }, '.sh': { g: 'SH', c: '#4eaa25' },
+    '.go': { g: 'GO', c: '#00add8' }, '.rs': { g: 'RS', c: '#dea584' }
+  };
+  return table[ext] || { g: (ext.replace('.', '') || '•').slice(0, 2).toUpperCase(), c: fileTint(file) };
 }
 
 function ancestors(item) {
@@ -188,7 +261,7 @@ function outlineDim() {
   return false;
 }
 function hoverPreviewTrace() {
-  if (!hoverId || !graph) return null;
+  if (!traceMode || !hoverId || !graph) return null;
   const item = node(hoverId);
   if (!item) return null;
   // Prefer hover when nothing is selected, or when hovering a different node.
@@ -288,7 +361,15 @@ function fileOrder(a, b) {
 function folderItems(item) {
   // This is a document outline, not a trace-derived list: hierarchy and source
   // relevance stay predictable even when the selected trace changes.
-  return directItems(item).sort((a, b) => {
+  if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) {
+    return [...syntheticRootFiles].sort((a, b) => fileOrder(a, b));
+  }
+  // Hide loose files at display-root — they live inside the synthetic "root" island.
+  const root = displayRootRaw();
+  const list = item?.id === root?.id
+    ? directItems(item).filter(child => child.kind === 'folder')
+    : directItems(item);
+  return list.sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
     if (a.kind === 'folder') return (mapRegionPriority[mapRegion(a)] ?? 9) - (mapRegionPriority[mapRegion(b)] ?? 9) || a.label.localeCompare(b.label);
     return fileOrder(a, b);
@@ -485,14 +566,320 @@ function requestLayoutSettle(item) {
 }
 function expandAncestors(item) {
   if (!item) return;
+  // Only open ancestor folders so a collapse isn't immediately undone.
   for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
-  if (item.kind === 'folder') expandedFolders.add(item.id);
+  const root = displayRootRaw();
+  if (item.kind === 'file' && item.parentId === root?.id) expandedFolders.add(SYNTHETIC_ROOT_ID);
+  pruneFolderDepth();
+}
+/** Prefer the inner workspace when a single wrapper folder was uploaded. */
+function displayRoot() {
+  return displayRootRaw();
+}
+/** Top-level islands: real folders + optional synthetic "root" for loose files. */
+function topLevelItems(view = displayRoot()) {
+  if (!view) return [];
+  const kids = directItems(view);
+  const folders = kids.filter(item => item.kind === 'folder');
+  const files = kids.filter(item => item.kind === 'file');
+  syntheticRootFiles = files;
+  const items = [...folders];
+  if (files.length) {
+    items.push(syntheticRootNode());
+    expandedFolders.add(SYNTHETIC_ROOT_ID);
+  }
+  return items.sort((a, b) => {
+    if (a.id === SYNTHETIC_ROOT_ID) return 1;
+    if (b.id === SYNTHETIC_ROOT_ID) return -1;
+    if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
+    return (mapRegionPriority[mapRegion(a)] ?? 9) - (mapRegionPriority[mapRegion(b)] ?? 9) || a.label.localeCompare(b.label);
+  });
+}
+function folderDepthFrom(root, item) {
+  if (!root || !item) return 0;
+  let depth = 0;
+  for (let cursor = item; cursor && cursor.id !== root.id; cursor = node(cursor.parentId)) depth += 1;
+  return depth;
+}
+/** Always keep 1 level open; never more than 2 levels of open folders. */
+function pruneFolderDepth() {
+  const root = displayRoot();
+  if (!root) return;
+  expandedFolders.add(root.id);
+  if (syntheticRootFiles.length) expandedFolders.add(SYNTHETIC_ROOT_ID);
+  for (const child of topLevelItems(root)) {
+    if (child.kind === 'folder') expandedFolders.add(child.id);
+  }
+  for (const id of [...expandedFolders]) {
+    if (id === SYNTHETIC_ROOT_ID) continue;
+    const item = node(id);
+    if (!item || item.kind !== 'folder') continue;
+    if (folderDepthFrom(root, item) > 2) expandedFolders.delete(id);
+  }
+}
+function toggleFolder(id) {
+  const item = node(id);
+  const root = displayRoot();
+  if (!item || item.kind !== 'folder' || !root) return;
+  if (item.id === root.id || item.id === SYNTHETIC_ROOT_ID || item.synthetic) return; // stay open
+  if (expandedFolders.has(id)) {
+    // Keep level-1 always open
+    if (folderDepthFrom(root, item) <= 1) return;
+    expandedFolders.delete(id);
+    for (const child of folderItems(item)) {
+      if (child.kind === 'folder') expandedFolders.delete(child.id);
+    }
+  } else {
+    if (folderDepthFrom(root, item) > 2) return;
+    expandedFolders.add(id);
+    pruneFolderDepth();
+  }
 }
 function ensureDefaultOutlineExpanded() {
-  const root = rootFolder();
+  const root = displayRoot();
   if (!root) return;
-  // Overview stays as floating collapsed islands — expand on demand.
+  expandedFolders.clear();
   expandedFolders.add(root.id);
+  for (const child of topLevelItems(root)) {
+    if (child.kind === 'folder') expandedFolders.add(child.id);
+  }
+}
+function captureFlip() {
+  const map = new Map();
+  scene.querySelectorAll('.frame.float[data-drag-id]').forEach(el => {
+    map.set(el.dataset.dragId, el.getBoundingClientRect());
+  });
+  return map;
+}
+function playFlip(before) {
+  if (skipFlipOnce) {
+    skipFlipOnce = false;
+    return;
+  }
+  if (!before?.size || document.body.classList.contains('reduce-motion')) return;
+  scene.querySelectorAll('.frame.float[data-drag-id]').forEach((el, index) => {
+    const id = el.dataset.dragId;
+    el.style.setProperty('--float-delay', String((hashHue(id) % 1200)));
+    el.style.setProperty('--inertia', String(index % 7));
+    const prev = before.get(id);
+    if (!prev) {
+      el.classList.add('calm-in');
+      return;
+    }
+    const next = el.getBoundingClientRect();
+    const dx = prev.left - next.left;
+    const dy = prev.top - next.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+    el.classList.add('flipping');
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        el.style.transform = '';
+        const done = () => {
+          el.classList.remove('flipping');
+          el.removeEventListener('transitionend', done);
+        };
+        el.addEventListener('transitionend', done);
+        setTimeout(done, 2600);
+      });
+    });
+  });
+}
+function triggerJelly(el, strength = 1) {
+  if (!el || document.body.classList.contains('reduce-motion')) return;
+  el.classList.remove('jelly-wobble');
+  el.style.setProperty('--jelly', String(Math.min(1.4, Math.max(.4, strength))));
+  void el.offsetWidth;
+  el.classList.add('jelly-wobble');
+  clearTimeout(el._jellyTimer);
+  el._jellyTimer = setTimeout(() => el.classList.remove('jelly-wobble'), 1400);
+}
+const ISLAND_GAP = 26; // same breathing room between top-level islands as nested siblings
+const MODULE_GAP = 22; // always keep air between fn modules inside a file
+const NESTED_GAP = 26; // padding between sibling folders/files inside a parent
+function topLevelIslandElements() {
+  return [...scene.querySelectorAll('.frame-artboard > .frame.float[data-drag-id]')];
+}
+/** Top-level folder under pointer — only case where a drag may overlap another island. */
+function folderUnderPointer(clientX, clientY, excludeId) {
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (id === excludeId) continue;
+    if (node(id)?.kind !== 'folder') continue;
+    const r = el.getBoundingClientRect();
+    if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) return { id, el };
+  }
+  return null;
+}
+/** Visible board frame — gravity parks islands just outside this, never inside. */
+function viewFieldBounds() {
+  const boardRect = board.getBoundingClientRect();
+  return {
+    left: boardRect.left,
+    top: boardRect.top,
+    right: boardRect.right,
+    bottom: boardRect.bottom
+  };
+}
+/** Rim just outside the view frame where strays settle. */
+function viewFieldRim(margin = 28) {
+  const field = viewFieldBounds();
+  return {
+    left: field.left - margin,
+    top: field.top - margin,
+    right: field.right + margin,
+    bottom: field.bottom + margin
+  };
+}
+/** True when the island is already near the field (inside or just outside) — no pull. */
+function islandNearViewField(rect, slack = 40) {
+  const field = viewFieldBounds();
+  const nearLeft = rect.right >= field.left - slack;
+  const nearRight = rect.left <= field.right + slack;
+  const nearTop = rect.bottom >= field.top - slack;
+  const nearBottom = rect.top <= field.bottom + slack;
+  return nearLeft && nearRight && nearTop && nearBottom;
+}
+/** Pull toward the nearest point on the outside rim — not toward center, not inside the field. */
+function pullTowardViewField(rect) {
+  const rim = viewFieldRim(28);
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  let targetX = cx, targetY = cy;
+  if (cx < rim.left) targetX = rim.left;
+  else if (cx > rim.right) targetX = rim.right;
+  if (cy < rim.top) targetY = rim.top;
+  else if (cy > rim.bottom) targetY = rim.bottom;
+  return { pullX: targetX - cx, pullY: targetY - cy };
+}
+function rectsOverlap(a, b, gap = ISLAND_GAP) {
+  // Collide when rects are closer than `gap` (not when they already overlap by gap).
+  const overlapX = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  return overlapX > -gap && overlapY > -gap;
+}
+function separationPush(moving, fixed, gap = ISLAND_GAP) {
+  const overlapX = Math.min(moving.right, fixed.right) - Math.max(moving.left, fixed.left);
+  const overlapY = Math.min(moving.bottom, fixed.bottom) - Math.max(moving.top, fixed.bottom);
+  // Penetration past the required gap (positive = too close / overlapping).
+  const penX = overlapX + gap;
+  const penY = overlapY + gap;
+  if (penX <= 0 || penY <= 0) return { dx: 0, dy: 0 };
+  if (penX <= penY) {
+    const dir = moving.left + moving.width / 2 <= fixed.left + fixed.width / 2 ? -penX : penX;
+    return { dx: dir, dy: 0 };
+  }
+  const dir = moving.top + moving.height / 2 <= fixed.top + fixed.height / 2 ? -penY : penY;
+  return { dx: 0, dy: dir };
+}
+function applyIslandTranslate(entry, next) {
+  offsets.set(entry.item.id, next);
+  entry.el.style.translate = `${next.x}px ${next.y}px`;
+  entry.el.style.setProperty('--ox', `${next.x}px`);
+  entry.el.style.setProperty('--oy', `${next.y}px`);
+  entry.off = next;
+  entry.rect = entry.el.getBoundingClientRect();
+}
+function resolveIslandOverlapDrag(islandId, islandEl, ox, oy, dx, dy, allowOverId) {
+  let tx = ox + dx, ty = oy + dy;
+  const scale = Math.max(.35, canvas.scale || 1);
+  for (let pass = 0; pass < 8; pass++) {
+    islandEl.style.translate = `${tx}px ${ty}px`;
+    islandEl.style.setProperty('--ox', `${tx}px`);
+    islandEl.style.setProperty('--oy', `${ty}px`);
+    let myRect = islandEl.getBoundingClientRect();
+    let hit = false;
+    for (const other of topLevelIslandElements()) {
+      const otherId = other.dataset.dragId;
+      if (otherId === islandId || otherId === allowOverId) continue;
+      const oRect = other.getBoundingClientRect();
+      if (!rectsOverlap(myRect, oRect)) continue;
+      const { dx: fixX, dy: fixY } = separationPush(myRect, oRect);
+      tx += fixX / scale;
+      ty += fixY / scale;
+      hit = true;
+      break;
+    }
+    if (!hit) break;
+  }
+  return { x: tx, y: ty };
+}
+function markDropTarget(clientX, clientY, excludeId) {
+  const over = folderUnderPointer(clientX, clientY, excludeId);
+  for (const el of topLevelIslandElements()) {
+    el.classList.toggle('drop-target', over?.el === el);
+  }
+  return over?.id || null;
+}
+function clearDropTargets() {
+  topLevelIslandElements().forEach(el => el.classList.remove('drop-target'));
+}
+function scheduleGravityDrift(delay = 160) {
+  // Viewport field gravity runs continuously; luxury-motion only gates jelly/FLIP.
+  if (app.classList.contains('dragging')) return;
+  clearTimeout(gravityTimer);
+  gravityTimer = setTimeout(() => softGravityStep(0), delay);
+}
+function softGravityStep(pass) {
+  if (!graph) return;
+  if (app.classList.contains('dragging')) {
+    gravityTimer = setTimeout(() => softGravityStep(0), 240);
+    return;
+  }
+  const root = displayRoot();
+  if (!root) {
+    gravityTimer = setTimeout(() => softGravityStep(0), 400);
+    return;
+  }
+  const top = topLevelItems(root);
+  let moved = false;
+  const centers = [];
+  for (const item of top) {
+    const el = scene.querySelector(`.frame.float[data-drag-id="${CSS.escape(item.id)}"]`);
+    if (!el) continue;
+    const off = offsets.get(item.id) || { x: 0, y: 0 };
+    const rect = el.getBoundingClientRect();
+    centers.push({ item, el, off, rect });
+  }
+  const scale = Math.max(.35, canvas.scale || 1);
+  for (const A of centers) {
+    if (pinnedLayout.has(A.item.id)) continue;
+    // Already inside or just outside the view frame — leave context alone.
+    if (islandNearViewField(A.rect)) continue;
+    const { pullX, pullY } = pullTowardViewField(A.rect);
+    if (Math.abs(pullX) < 4 && Math.abs(pullY) < 4) continue;
+    const speed = 0.028;
+    const stepX = Math.max(-2.0, Math.min(2.0, pullX * speed / scale));
+    const stepY = Math.max(-2.0, Math.min(2.0, pullY * speed / scale));
+    if (Math.abs(stepX) < 0.04 && Math.abs(stepY) < 0.04) continue;
+    applyIslandTranslate(A, { x: A.off.x + stepX, y: A.off.y + stepY });
+    moved = true;
+  }
+  for (let i = 0; i < centers.length; i++) {
+    for (let j = i + 1; j < centers.length; j++) {
+      const A = centers[i], B = centers[j];
+      if (!rectsOverlap(A.rect, B.rect, ISLAND_GAP)) continue;
+      const aPinned = pinnedLayout.has(A.item.id);
+      const bPinned = pinnedLayout.has(B.item.id);
+      if (aPinned && bPinned) continue;
+      const { dx, dy } = separationPush(A.rect, B.rect);
+      if (!dx && !dy) continue;
+      const sx = dx / scale, sy = dy / scale;
+      if (!aPinned && !bPinned) {
+        applyIslandTranslate(A, { x: A.off.x + sx * 0.5, y: A.off.y + sy * 0.5 });
+        applyIslandTranslate(B, { x: B.off.x - sx * 0.5, y: B.off.y - sy * 0.5 });
+        moved = true;
+      } else if (aPinned && !bPinned) {
+        applyIslandTranslate(B, { x: B.off.x - sx, y: B.off.y - sy });
+        moved = true;
+      } else if (!aPinned && bPinned) {
+        applyIslandTranslate(A, { x: A.off.x + sx, y: A.off.y + sy });
+        moved = true;
+      }
+    }
+  }
+  if (moved) scheduleDraw();
+  gravityTimer = setTimeout(() => softGravityStep(0), moved ? 140 : 320);
 }
 function livesInsideExpandedFolder(file) {
   return !!file && ancestors(file).some(parent => parent.kind === 'folder' && parent.id !== rootFolder().id && expandedFolders.has(parent.id));
@@ -536,32 +923,105 @@ function activateFocus(item) {
 function settleDragAnchor() {
   return false;
 }
-function frameModuleSize() {
-  return { w: 188, h: 52 };
+/** Remember where the pointer was on a frame before expand/reflow. */
+function captureClickAnchor(id, event) {
+  if (!id || !event) return;
+  const el = scene.querySelector(`[data-drag-id="${CSS.escape(id)}"],[data-id="${CSS.escape(id)}"]`);
+  if (!el) {
+    clickAnchor = { id, clientX: event.clientX, clientY: event.clientY, relX: .5, relY: .35 };
+    return;
+  }
+  const rect = el.getBoundingClientRect();
+  clickAnchor = {
+    id,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    relX: rect.width ? (event.clientX - rect.left) / rect.width : .5,
+    relY: rect.height ? (event.clientY - rect.top) / rect.height : .35
+  };
+}
+/** After layout, slide the island so the click point stays under the pointer. */
+function stabilizeClickAnchor() {
+  const anchor = clickAnchor;
+  clickAnchor = null;
+  if (!anchor) return;
+  const el = scene.querySelector(`[data-drag-id="${CSS.escape(anchor.id)}"],[data-id="${CSS.escape(anchor.id)}"]`);
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  const targetX = rect.left + rect.width * (anchor.relX ?? .5);
+  const targetY = rect.top + rect.height * (anchor.relY ?? .35);
+  const dx = (anchor.clientX - targetX) / canvas.scale;
+  const dy = (anchor.clientY - targetY) / canvas.scale;
+  if (Math.abs(dx) < .4 && Math.abs(dy) < .4) return;
+  const islandId = dragIslandId(anchor.id);
+  const cur = offsets.get(islandId) || { x: 0, y: 0 };
+  const next = { x: cur.x + dx, y: cur.y + dy };
+  offsets.set(islandId, next);
+  const islandEl = scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`) || el;
+  islandEl.style.translate = `${next.x}px ${next.y}px`;
+  islandEl.style.setProperty('--ox', `${next.x}px`);
+  islandEl.style.setProperty('--oy', `${next.y}px`);
+  scheduleDraw();
+}
+/** Top-level island that owns a nested frame (folder group drag). */
+function dragIslandId(id) {
+  const item = node(id);
+  if (!item) return id;
+  const top = topLevelOwner(item);
+  return top?.id || id;
+}
+function parentCanvasId(id) {
+  const item = node(id);
+  if (!item) return null;
+  if (item.kind === 'module') return item.fileId;
+  const root = displayRootRaw();
+  if (item.kind === 'file' && item.parentId === root?.id) return SYNTHETIC_ROOT_ID;
+  if (item.parentId && item.parentId !== root?.id && item.parentId !== rootFolder()?.id) return item.parentId;
+  return null;
+}
+/** Size frame chrome from label length so titles wrap instead of clipping. */
+function frameLabelMetrics(label = '', { minW = 220, maxW = 420, chrome = 84, charW = 7.2, baseH = 54, lineH = 17, maxLines = 3 } = {}) {
+  const text = String(label || '');
+  const w = Math.min(maxW, Math.max(minW, Math.round(text.length * charW * 0.62) + chrome));
+  const charsPerLine = Math.max(14, Math.floor((w - chrome) / charW));
+  const lines = Math.min(maxLines, Math.max(1, Math.ceil(text.length / charsPerLine) || 1));
+  return { w, h: baseH + (lines - 1) * lineH, lines };
+}
+function frameModuleSize(_file, module) {
+  const label = module?.label ? `${module.label}()` : 'fn';
+  const { w, h } = frameLabelMetrics(label, { minW: 172, maxW: 320, chrome: 56, baseH: 50, lineH: 16, maxLines: 2 });
+  return { w, h: Math.max(50, h) };
 }
 function frameFileSize(file) {
-  if (!expandedFiles.has(file.id)) return { w: 200, h: 58, children: [] };
+  const header = frameLabelMetrics(file.label, { minW: 228, maxW: 440, chrome: 96, baseH: 54, lineH: 17, maxLines: 3 });
+  if (!expandedFiles.has(file.id)) return { w: header.w, h: header.h, headerH: header.h, children: [] };
   const boxes = modules(file).slice(0, 18).map(module => {
     const size = frameModuleSize(file, module);
     return { id: module.id, item: module, w: size.w, h: size.h, size };
   });
-  const packed = packBoxes(boxes, { gap: 10, pad: 12, maxWidth: 640 });
-  return { w: Math.max(240, packed.w + 8), h: 48 + packed.h + 10, children: packed.items };
+  const packed = packBoxes(boxes, { gap: MODULE_GAP, pad: 18, maxWidth: Math.max(720, header.w - 24), mode: layoutModes.get(file.id) || 'auto' });
+  return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 12, headerH: header.h, children: packed.items };
 }
 function frameFolderSize(item, depth = 0) {
-  if (!expandedFolders.has(item.id) || depth > 8) {
-    return { w: depth ? 196 : 210, h: 58, children: [] };
+  const header = frameLabelMetrics(item.label, { minW: depth ? 208 : 232, maxW: 460, chrome: 108, baseH: 54, lineH: 17, maxLines: 3 });
+  if ((!expandedFolders.has(item.id) && item.id !== SYNTHETIC_ROOT_ID) || depth > 8) {
+    return { w: header.w, h: header.h, headerH: header.h, children: [] };
   }
   const boxes = folderItems(item).slice(0, depth > 3 ? 20 : 36).map(child => {
     const size = child.kind === 'folder' ? frameFolderSize(child, depth + 1) : frameFileSize(child);
     return { id: child.id, item: child, w: size.w, h: size.h, children: size.children, size };
   });
-  const packed = packBoxes(boxes, { gap: 14, pad: 14, maxWidth: depth === 0 ? 980 : 720 });
-  return { w: Math.max(260, packed.w + 8), h: 48 + packed.h + 12, children: packed.items };
+  const packed = packBoxes(boxes, {
+    gap: NESTED_GAP,
+    pad: 20,
+    maxWidth: depth === 0 ? 1020 : 780,
+    mode: layoutModes.get(item.id) || 'auto'
+  });
+  return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 16, headerH: header.h, children: packed.items };
 }
-/** Shelf-pack floating boxes left→right, wrap on maxWidth. */
-function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900 } = {}) {
-  let x = pad, y = pad, rowH = 0, maxX = pad, maxY = pad;
+/** Shelf-pack floating boxes left→right, wrap on maxWidth, then separate overlaps. */
+function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto' } = {}) {
+  let x = pad, y = pad, rowH = 0;
   const items = [];
   const ordered = [...boxes].sort((a, b) => {
     const ia = a.item || node(a.id);
@@ -570,42 +1030,95 @@ function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900 } = {}) {
       || primaryTraceScore(ib) - primaryTraceScore(ia)
       || (ia?.label || '').localeCompare(ib?.label || '');
   });
+  const useRow = mode === 'row';
+  const useCol = mode === 'column';
   for (const box of ordered) {
-    if (x > pad && x + box.w > maxWidth - pad) {
+    if (!useCol && !useRow && x > pad && x + box.w > maxWidth - pad) {
       x = pad;
       y += rowH + gap;
       rowH = 0;
     }
-    items.push({ ...box, x, y });
-    x += box.w + gap;
-    rowH = Math.max(rowH, box.h);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y + box.h);
+    if (useCol && items.length) {
+      x = pad;
+      y += rowH + gap;
+      rowH = 0;
+    }
+    const local = localOffsets.get(box.id) || { x: 0, y: 0 };
+    items.push({ ...box, x: x + local.x, y: y + local.y });
+    if (useRow || !useCol) {
+      x += box.w + gap;
+      rowH = Math.max(rowH, box.h);
+    } else {
+      rowH = box.h;
+    }
   }
-  return { items, w: Math.max(maxX + pad - gap, pad * 2 + 120), h: Math.max(maxY + pad, pad * 2 + 48) };
+  separateBoxes(items, { gap, passes: 36 });
+  let boundX = pad, boundY = pad;
+  for (const item of items) {
+    boundX = Math.max(boundX, item.x + item.w);
+    boundY = Math.max(boundY, item.y + item.h);
+  }
+  return { items, w: Math.max(boundX + pad, pad * 2 + 120), h: Math.max(boundY + pad, pad * 2 + 48) };
+}
+/** Push overlapping boxes apart until they clear `gap`. */
+function separateBoxes(items, { gap = 12, passes = 28 } = {}) {
+  if (items.length < 2) return;
+  for (let pass = 0; pass < passes; pass++) {
+    let hit = false;
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const A = items[i], B = items[j];
+        const ox = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
+        const oy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
+        if (ox <= gap || oy <= gap) continue;
+        hit = true;
+        if (ox < oy) {
+          const push = (ox - gap) / 2 + .5;
+          if (A.x <= B.x) { A.x -= push; B.x += push; } else { A.x += push; B.x -= push; }
+        } else {
+          const push = (oy - gap) / 2 + .5;
+          if (A.y <= B.y) { A.y -= push; B.y += push; } else { A.y += push; B.y -= push; }
+        }
+      }
+    }
+    if (!hit) break;
+  }
+  let minX = Infinity, minY = Infinity;
+  for (const item of items) {
+    minX = Math.min(minX, item.x);
+    minY = Math.min(minY, item.y);
+  }
+  if (Number.isFinite(minX) && (minX < gap || minY < gap)) {
+    const dx = Math.max(0, gap - minX);
+    const dy = Math.max(0, gap - minY);
+    for (const item of items) { item.x += dx; item.y += dy; }
+  }
 }
 function buildFloatLayout(root) {
   floatPlacements.clear();
-  if (!root) return { w: 800, h: 480, items: [] };
-  const top = folderItems(root).map(child => {
-    const size = child.kind === 'folder' ? frameFolderSize(child, 0) : frameFileSize(child);
+  const view = root || displayRoot();
+  if (!view) return { w: 800, h: 480, items: [] };
+  const top = topLevelItems(view).map(child => {
+    const size = child.kind === 'folder' || child.synthetic ? frameFolderSize(child, 0) : frameFileSize(child);
     return { id: child.id, item: child, w: size.w, h: size.h, size };
   });
-  const packed = packBoxes(top, { gap: 22, pad: 28, maxWidth: Math.max(920, board.clientWidth - 80) });
-  relaxTopLevel(packed.items, 28);
+  const packed = packBoxes(top, { gap: ISLAND_GAP + 16, pad: 40, maxWidth: Math.max(960, board.clientWidth - 60) });
+  relaxTopLevel(packed.items, ISLAND_GAP);
   let maxX = 0, maxY = 0;
   for (const entry of packed.items) {
     maxX = Math.max(maxX, entry.x + entry.w);
     maxY = Math.max(maxY, entry.y + entry.h);
   }
-  packed.w = Math.max(packed.w, maxX + 28);
-  packed.h = Math.max(packed.h, maxY + 28);
+  packed.w = Math.max(packed.w, maxX + 36);
+  packed.h = Math.max(packed.h, maxY + 36);
   return packed;
 }
 function relaxTopLevel(items, pad) {
   if (items.length < 2) return;
   const byId = new Map(items.map(item => [item.id, item]));
-  for (let pass = 0; pass < 18; pass++) {
+  const focusSeeds = new Set(sourceSeeds(selected()));
+  const passes = traceActive() ? 32 : 22;
+  for (let pass = 0; pass < passes; pass++) {
     for (const edge of edgeTypes()) {
       if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
       const aFile = fileOf(node(edge.from));
@@ -614,47 +1127,44 @@ function relaxTopLevel(items, pad) {
       const aTop = topLevelOwner(aFile);
       const bTop = topLevelOwner(bFile);
       if (!aTop || !bTop || aTop.id === bTop.id) continue;
+      if (pinnedLayout.has(aTop.id) && pinnedLayout.has(bTop.id)) continue;
       const A = byId.get(aTop.id), B = byId.get(bTop.id);
       if (!A || !B) continue;
+      const related = focusSeeds.has(edge.from) || focusSeeds.has(edge.to) || hasTrace(aTop) || hasTrace(bTop);
       const ax = A.x + A.w / 2, ay = A.y + A.h / 2;
       const bx = B.x + B.w / 2, by = B.y + B.h / 2;
       const dx = bx - ax, dy = by - ay;
       const dist = Math.hypot(dx, dy) || 1;
-      const desired = 180 + (A.w + B.w) * .2;
-      const pull = Math.min(10, (dist - desired) * .08);
+      const desired = related && traceActive()
+        ? 150 + (A.w + B.w) * .14
+        : 210 + (A.w + B.w) * .2;
+      const pull = Math.min(related ? 14 : 10, (dist - desired) * (related ? .11 : .08));
       const ux = dx / dist, uy = dy / dist;
-      A.x += ux * pull * .5; A.y += uy * pull * .5;
-      B.x -= ux * pull * .5; B.y -= uy * pull * .5;
+      const level = related && traceActive() ? (ay - by) * .04 : 0;
+      if (!pinnedLayout.has(aTop.id)) { A.x += ux * pull * .5; A.y += uy * pull * .5 - level; }
+      if (!pinnedLayout.has(bTop.id)) { B.x -= ux * pull * .5; B.y -= uy * pull * .5 + level; }
     }
-    // Simple overlap resolve
-    for (let i = 0; i < items.length; i++) {
-      for (let j = i + 1; j < items.length; j++) {
-        const A = items[i], B = items[j];
-        const ox = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
-        const oy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
-        if (ox <= 0 || oy <= 0) continue;
-        if (ox < oy) {
-          const push = ox / 2 + 6;
-          if (A.x < B.x) { A.x -= push; B.x += push; } else { A.x += push; B.x -= push; }
-        } else {
-          const push = oy / 2 + 6;
-          if (A.y < B.y) { A.y -= push; B.y += push; } else { A.y += push; B.y -= push; }
-        }
-      }
-    }
+    separateBoxes(items, { gap: ISLAND_GAP, passes: 12 });
   }
   let minX = Infinity, minY = Infinity;
   for (const item of items) { minX = Math.min(minX, item.x); minY = Math.min(minY, item.y); }
   for (const item of items) { item.x += pad - minX; item.y += pad - minY; }
 }
 function topLevelOwner(item) {
-  const root = rootFolder();
+  const root = displayRoot();
+  if (!item || !root) return null;
+  // Loose files belong to the synthetic root island.
+  if (item.kind === 'file' && item.parentId === root.id) return node(SYNTHETIC_ROOT_ID);
+  if (item.id === SYNTHETIC_ROOT_ID) return item;
   let cursor = item;
-  while (cursor && cursor.parentId && cursor.parentId !== root?.id) cursor = node(cursor.parentId);
-  return cursor?.parentId === root?.id ? cursor : null;
+  while (cursor && cursor.parentId && cursor.parentId !== root.id) {
+    if (cursor.parentId === SYNTHETIC_ROOT_ID) return node(SYNTHETIC_ROOT_ID);
+    cursor = node(cursor.parentId);
+  }
+  return cursor?.parentId === root.id ? cursor : null;
 }
 function automaticLayout() {
-  const root = rootFolder();
+  const root = displayRoot() || rootFolder();
   const packed = buildFloatLayout(root);
   const viewportWidth = Math.max(980, board.clientWidth);
   const viewportHeight = Math.max(680, board.clientHeight);
@@ -666,7 +1176,7 @@ function automaticLayout() {
   basePlacementKey = `float:${root?.id}:${expandedFolders.size}:${expandedFiles.size}:${expandedModules.size}`;
   return {
     placements: packed.items,
-    chrome: [{ kind: 'stage', mode: 'frames', title: root?.label || 'repository', path: '/', w: worldW, h: worldH }],
+    chrome: [{ kind: 'stage', mode: 'frames', title: root?.label || 'repository', path: root?.path || '/', w: worldW, h: worldH }],
     root,
     mode: 'frames',
     w: worldW,
@@ -722,10 +1232,22 @@ function moduleSourceHtml(file, module) {
   }).join('');
   return `<section class="source module-source" data-module-source="${module.id}"><header><b>${escape(module.label)}()</b><span>source lines ${start}–${end}</span></header><pre>${lines || '<span class="line"><i>—</i><code>No source range found.</code><span></span></span>'}</pre></section>`;
 }
+function formatDiffHtml(file, limit = 120) {
+  const diff = file?.git?.diff;
+  if (!diff) return '<span class="diff-line meta">New or untracked file — full source is in the canvas.</span>';
+  return diff.split('\n').slice(0, limit).map(line => {
+    let cls = 'diff-line';
+    if (line.startsWith('+++') || line.startsWith('---')) cls += ' meta';
+    else if (line.startsWith('@@')) cls += ' hunk';
+    else if (line.startsWith('+')) cls += ' add';
+    else if (line.startsWith('-')) cls += ' remove';
+    return `<span class="${cls}">${escape(line) || ' '}</span>`;
+  }).join('');
+}
 function diffHtml(file) {
-  const diff = file.git?.diff; if (!file.git?.change) return '';
+  const diff = file.git?.diff; if (!file.git?.change && !recentFor(file)) return '';
   if (!diff) return `<section class="diff"><header><b>LOCAL CHANGE</b></header><pre>New or untracked file. Source is available above.</pre></section>`;
-  return `<section class="diff"><header><b>LOCAL DIFF</b></header><pre>${diff.split('\n').slice(0, 90).map(line => `<span class="${line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : ''}">${escape(line)}</span>`).join('')}</pre></section>`;
+  return `<section class="diff"><header><b>LOCAL DIFF</b></header><pre>${formatDiffHtml(file, 90)}</pre></section>`;
 }
 function diffPreviewHtml(file) {
   return '';
@@ -733,15 +1255,18 @@ function diffPreviewHtml(file) {
 function framePorts(id) {
   return `<span class="port edge-port in endpoint-port ${pinned.has(id) ? 'pinned' : ''}" data-pin="${id}" data-port-for="${id}" data-port-side="in" title="Trace in"></span><span class="port edge-port out endpoint-port ${pinned.has(id) ? 'pinned' : ''}" data-pin="${id}" data-port-for="${id}" data-port-side="out" title="Trace out"></span>`;
 }
-function frameStyle(placement, tint, id, { depth = 0 } = {}) {
-  const off = offsets.get(id) || { x: 0, y: 0 };
+function frameStyle(placement, tint, id, { depth = 0, inertia = 0 } = {}) {
+  // Only top-level islands carry world offsets; nested frames stay inside the parent canvas.
+  const island = dragIslandId(id);
+  const off = island === id ? (offsets.get(id) || { x: 0, y: 0 }) : { x: 0, y: 0 };
   const glass = Math.min(78, 16 + depth * 14);
-  return `left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;translate:${off.x}px ${off.y}px;--node:${tint};--depth:${depth};--glass:${glass}%`;
+  const delay = hashHue(id) % 900;
+  return `left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;translate:${off.x}px ${off.y}px;--ox:${off.x}px;--oy:${off.y}px;--node:${tint};--accent:${tint};--depth:${depth};--glass:${glass}%;--float-delay:${delay};--inertia:${inertia}`;
 }
-function frameModuleHtml(file, module, placement, depth = 0) {
+function frameModuleHtml(file, module, placement, depth = 0, inertia = 0) {
   const hot = hoverId === module.id ? 'hot' : '';
   const tint = fileTint(file);
-  return `<section class="frame frame-fn float ${selectedId === module.id ? 'selected' : ''} ${hot}" data-module-box="${module.id}" data-hover="${module.id}" data-drag-id="${module.id}" data-open-flow="${module.id}" style="${frameStyle(placement, tint, module.id, { depth: depth + 1 })}">
+  return `<section class="frame frame-fn float ${selectedId === module.id ? 'selected' : ''} ${hot}" data-module-box="${module.id}" data-hover="${module.id}" data-drag-id="${module.id}" data-open-flow="${module.id}" style="${frameStyle(placement, tint, module.id, { depth: depth + 1, inertia })}">
     <header class="frame-bar" data-outline-row="${module.id}" data-hover="${module.id}">
       ${framePorts(module.id)}
       <button class="frame-title" data-module="${module.id}" data-open-flow="${module.id}" type="button">
@@ -756,10 +1281,11 @@ function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
   const expanded = expandedFiles.has(file.id);
   const hot = hoverId === file.id ? 'hot' : '';
   const tint = fileTint(file);
+  const glyph = fileGlyph(file);
   const kids = expanded
-    ? (size.children || []).map(child => {
+    ? (size.children || []).map((child, index) => {
       const module = child.item || node(child.id);
-      return module ? frameModuleHtml(file, module, child, depth) : '';
+      return module ? frameModuleHtml(file, module, child, depth, index % 6) : '';
     }).join('')
     : '';
   return `<section class="frame frame-file float ${expanded ? 'expanded' : ''} ${selectedId === file.id || fileOf(selected())?.id === file.id ? 'selected' : ''} ${recentFor(file) ? 'live-changed' : ''} ${file.orphan ? 'orphan' : ''} ${file.entrypoint ? 'entrypoint' : ''} ${hot}" data-id="${file.id}" data-inline="${file.id}" data-inline-file="${file.id}" data-kind="file" data-hover="${file.id}" data-drag-id="${file.id}" data-depth="${depth}" style="${frameStyle(placement, tint, file.id, { depth })}">
@@ -767,19 +1293,20 @@ function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
       ${framePorts(file.id)}
       <button class="frame-toggle" data-expand="${file.id}" type="button">${expanded ? '⌄' : '›'}</button>
       <button class="frame-title outline-label" data-inline="${file.id}" data-kind="file" data-focus-file="${file.id}" type="button">
+        <span class="file-glyph" style="--glyph:${glyph.c}" title="${escape(file.extension || '')}">${escape(glyph.g)}</span>
         <b title="${escape(file.path)}">${escape(file.label)}</b>
         <span>${modules(file).length || '—'}</span>
       </button>
       <button class="port pin-btn ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" type="button" title="Pin"></button>
     </header>
-    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(64, placement.h - 48)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
+    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(64, placement.h - (size.headerH || 54) - 10)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
   </section>`;
 }
 function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth = 0) {
-  const expanded = expandedFolders.has(item.id);
-  const files = filesBelow(item).length;
-  const region = mapRegion(item);
-  const copy = railCopy(region);
+  const expanded = item.id === SYNTHETIC_ROOT_ID || item.synthetic || expandedFolders.has(item.id);
+  const files = item.id === SYNTHETIC_ROOT_ID ? syntheticRootFiles.length : filesBelow(item).length;
+  const region = item.synthetic ? 'context' : mapRegion(item);
+  const copy = item.synthetic ? { title: 'root' } : railCopy(region);
   const hot = hoverId === item.id ? 'hot' : '';
   const tint = folderTint(item);
   const kids = expanded
@@ -792,10 +1319,10 @@ function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth
         : frameFileHtml(childItem, child, childSize, depth + 1);
     }).join('')
     : '';
-  return `<section class="frame frame-folder float ${expanded ? 'expanded' : ''} ${selectedId === item.id ? 'selected' : ''} ${hot}" data-id="${item.id}" data-inline="${item.id}" data-kind="folder" data-region="${region}" data-depth="${depth}" data-hover="${item.id}" data-drag-id="${item.id}" style="${frameStyle(placement, tint, item.id, { depth })}">
+  return `<section class="frame frame-folder float ${expanded ? 'expanded' : ''} ${item.synthetic ? 'synthetic-root' : ''} ${selectedId === item.id ? 'selected' : ''} ${hot}" data-id="${item.id}" data-inline="${item.id}" data-kind="folder" data-region="${region}" data-depth="${depth}" data-hover="${item.id}" data-drag-id="${item.id}" style="${frameStyle(placement, tint, item.id, { depth })}">
     <header class="frame-bar" data-outline-row="${item.id}" data-hover="${item.id}">
       ${framePorts(item.id)}
-      <button class="frame-toggle" data-folder-expand="${item.id}" type="button">${expanded ? '⌄' : '›'}</button>
+      <button class="frame-toggle" data-folder-expand="${item.id}" type="button" ${item.synthetic ? 'disabled' : ''}>${expanded ? '⌄' : '›'}</button>
       <button class="frame-title outline-label" data-inline="${item.id}" data-kind="folder" type="button">
         <em class="frame-kind">${escape(copy.title)}</em>
         <b>${escape(item.label)}</b>
@@ -803,7 +1330,7 @@ function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth
       </button>
       <button class="port pin-btn ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" type="button" title="Pin"></button>
     </header>
-    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(72, placement.h - 48)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
+    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(72, placement.h - (size.headerH || 54) - 10)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
   </section>`;
 }
 function frameTreeHtml(root, packed) {
@@ -922,19 +1449,26 @@ function chromeHtml(layout) {
 }
 function render() {
   if (!graph) return;
+  // Nested frames must not keep independent world offsets — they live inside folders.
+  for (const id of [...offsets.keys()]) {
+    if (dragIslandId(id) !== id) offsets.delete(id);
+  }
+  const before = captureFlip();
   rememberLayoutPositions();
   const layout = automaticLayout();
   world.style.width = `${layout.w}px`;
   world.style.height = `${layout.h}px`;
   world.dataset.layoutMode = 'frames';
-  world.classList.toggle('previewing', !!hoverId && hoverId !== selectedId);
+  world.classList.toggle('previewing', traceMode && !!hoverId && hoverId !== selectedId);
   scene.innerHTML = `${chromeHtml(layout)}<div class="frame-stage" style="width:${layout.contentWidth || layout.w - 80}px;height:${layout.contentHeight || layout.h - 100}px">${frameTreeHtml(layout.root, layout.packed)}</div>`;
   bindScene();
   bindHoverTrace();
   applyCanvas();
   refreshFocusClasses();
   drawEdges();
-  animateReflowEdges(360);
+  playFlip(before);
+  animateReflowEdges(920);
+  scheduleGravityDrift();
   renderMinimap();
   renderActivityFeed();
 }
@@ -1032,6 +1566,18 @@ function moduleBusPath(a, b, spread, cross, backwards) {
   const midY = (a.y + b.y) / 2 + cross;
   return `M ${a.x} ${a.y + spread * .18} C ${sourceLaneX} ${a.y + spread * .18}, ${sourceLaneX} ${midY}, ${sourceLaneX} ${midY} L ${targetLaneX} ${midY} C ${targetLaneX} ${midY}, ${targetLaneX} ${b.y + spread * .18}, ${b.x} ${b.y + spread * .18}`;
 }
+/** Wires always leave the out-port going outward and enter the in-port from outside. */
+function directedWirePath(a, b, spread = 0, cross = 0) {
+  const outStub = 44; // exit to the right of out-port
+  const inStub = 44;  // approach from the left of in-port
+  const span = Math.max(80, Math.abs(b.x - a.x));
+  const c1x = a.x + outStub + span * .22;
+  const c2x = b.x - inStub - span * .22;
+  const c1y = a.y + spread * .12;
+  const c2y = b.y + spread * .12 + cross;
+  // Horizontal stubs so the tangent at each node faces the port direction.
+  return `M ${a.x} ${a.y} L ${a.x + outStub} ${a.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${b.x - inStub} ${b.y} L ${b.x} ${b.y}`;
+}
 function drawEdges() {
   wires.innerHTML = '';
   scene.querySelectorAll('.connected-port').forEach(port => port.classList.remove('connected-port'));
@@ -1065,25 +1611,37 @@ function drawEdges() {
     const total = pairCounts.get(pairKey) || 1;
     const spread = (pairIndex - (total - 1) / 2) * Math.min(14, Math.max(6, 36 / total));
     const cross = crossOffsets.get(edge.id) || 0;
-    const focusHandle = Math.max(64, Math.min(260, Math.abs(b.x - a.x) * .42));
-    const focusDirection = b.x >= a.x ? 1 : -1;
-    const pathData = `M ${a.x} ${a.y} C ${a.x + focusDirection * focusHandle} ${a.y + spread}, ${b.x - focusDirection * focusHandle} ${b.y + spread * .2 + cross}, ${b.x} ${b.y}`;
+    const pathData = directedWirePath(a, b, spread, cross);
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', pathData);
-    path.setAttribute('class', `wire moving ${edge.type} flow-stage ${previewing ? 'preview' : 'committed'}`);
+    const origin = originTintForEdge(edge);
+    path.setAttribute('class', `wire ${traceMode ? 'moving' : 'static'} ${edge.type} flow-stage ${previewing ? 'preview' : 'committed'}`);
+    if (origin) {
+      path.style.stroke = origin;
+      path.style.setProperty('--wire', origin);
+    }
     path.style.setProperty('--delay', `${index * -0.1}s`);
     path.append(Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'title'), { textContent: `${edge.type}: ${edge.evidence}` }));
     wires.append(path);
   });
 }
+function originTintForEdge(edge) {
+  const from = node(edge.from);
+  if (!from) return null;
+  if (from.kind === 'folder') return folderTint(from);
+  const file = fileOf(from) || (from.kind === 'file' ? from : null);
+  if (file) return fileTint(file);
+  return null;
+}
 function bindHoverTrace() {
   const setHover = id => {
     if (hoverId === id) return;
     hoverId = id;
-    world.classList.toggle('previewing', !!id && id !== selectedId);
+    world.classList.toggle('previewing', traceMode && !!id && id !== selectedId);
     scene.querySelectorAll('.frame.hot').forEach(el => el.classList.remove('hot'));
     if (id) scene.querySelector(`[data-id="${CSS.escape(id)}"],[data-module-box="${CSS.escape(id)}"]`)?.classList.add('hot');
-    drawEdges();
+    // Live hover traces only when the Live toggle is on.
+    if (traceMode) drawEdges();
     refreshFocusClasses();
   };
   scene.querySelectorAll('.frame.float').forEach(frame => {
@@ -1119,6 +1677,85 @@ function nearestVisibleFolder(item) {
   return null;
 }
 function applyCanvas() { world.style.transform = `translate(${canvas.x}px,${canvas.y}px) scale(${canvas.scale})`; scheduleMinimap(); }
+function canvasFocusTarget(element) {
+  if (!element) return null;
+  const worldRect = world.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
+  const left = (rect.left - worldRect.left) / canvas.scale;
+  const top = (rect.top - worldRect.top) / canvas.scale;
+  const right = (rect.right - worldRect.left) / canvas.scale;
+  const bottom = (rect.bottom - worldRect.top) / canvas.scale;
+  const scale = Math.min(1.18, Math.max(.5, Math.min((board.clientWidth - 220) / Math.max(1, right - left), (board.clientHeight - 180) / Math.max(1, bottom - top))));
+  return {
+    x: board.clientWidth / 2 - (left + right) / 2 * scale,
+    y: board.clientHeight / 2 - (top + bottom) / 2 * scale,
+    scale
+  };
+}
+function smoothFocusSelection({ duration = 1300 } = {}) {
+  const element = elementForSelection();
+  const target = canvasFocusTarget(element);
+  if (!target) return fitMap();
+  if (document.body.classList.contains('reduce-motion')) {
+    canvas.x = target.x; canvas.y = target.y; canvas.scale = target.scale;
+    applyCanvas();
+    return;
+  }
+  const start = { x: canvas.x, y: canvas.y, scale: canvas.scale };
+  const t0 = performance.now();
+  if (canvasAnim) cancelAnimationFrame(canvasAnim);
+  board.classList.add('camera-animating');
+  const step = now => {
+    const t = Math.min(1, (now - t0) / duration);
+    const ease = 1 - Math.pow(1 - t, 3);
+    canvas.x = start.x + (target.x - start.x) * ease;
+    canvas.y = start.y + (target.y - start.y) * ease;
+    canvas.scale = start.scale + (target.scale - start.scale) * ease;
+    applyCanvas();
+    if (t < 1) canvasAnim = requestAnimationFrame(step);
+    else { canvasAnim = 0; board.classList.remove('camera-animating'); }
+  };
+  canvasAnim = requestAnimationFrame(step);
+}
+function dismissAgentEditReveal() {
+  clearTimeout(agentRevealTimer);
+  agentRevealTimer = 0;
+  const id = agentRevealExpandedId;
+  agentRevealExpandedId = null;
+  agentRevealPath = null;
+  if (id && expandedFiles.has(id) && selectedId === id) expandedFiles.delete(id);
+  render();
+  updateInspector();
+}
+function playAgentEditReveal(path) {
+  if (!autoRevealChanges || !graph || !path) return;
+  const normalized = String(path).replaceAll('\\', '/');
+  const file = fileByPath(normalized);
+  if (!file) return;
+  if (agentRevealPath && agentRevealPath !== normalized) dismissAgentEditReveal();
+  clearTimeout(agentRevealTimer);
+  agentRevealPath = normalized;
+  agentRevealExpandedId = file.id;
+  expandAncestors(file);
+  pruneFolderDepth();
+  expandedFiles.add(file.id);
+  selectedId = file.id;
+  layoutAnchorFileId = file.id;
+  focusedFileId = file.id;
+  flowMode = true;
+  rebuildTrace();
+  render();
+  updateInspector();
+  requestAnimationFrame(() => {
+    smoothFocusSelection({ duration: 1400 });
+    pulseSelection();
+    $('#diff-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+  agentRevealTimer = setTimeout(() => {
+    if (agentRevealPath !== normalized) return;
+    dismissAgentEditReveal();
+  }, agentRevealDwellMs);
+}
 function directManipulation() {
   board.classList.add('panning', 'zooming');
   clearTimeout(directManipulationTimer);
@@ -1151,15 +1788,61 @@ function bindFrameDrag(frame) {
   const id = frame.dataset.dragId;
   if (!id) return;
   let drag;
-  // Drag from the chrome only — buttons (title / expand / pin) stay clickable.
+  let raf = 0;
   const onBar = event => event.target.closest('.frame-bar') && !event.target.closest('button,a,[data-pin]');
+  const applyDragVisual = () => {
+    raf = 0;
+    if (!drag) return;
+    const { dx, dy } = drag;
+    if (drag.nested && drag.parentId) {
+      // Visual-only during drag; commit localOffsets on pointerup.
+      frame.style.translate = `${dx}px ${dy}px`;
+      if (drag.parentEl) {
+        drag.parentEl.style.width = `${drag.parentBaseW + Math.abs(dx) * .4}px`;
+      }
+      if (drag.canvasEl) {
+        drag.canvasEl.style.height = `${drag.canvasBaseH + Math.abs(dy) * .4}px`;
+      }
+    } else {
+      const allowOver = markDropTarget(drag.pointerX, drag.pointerY, drag.islandId);
+      const resolved = resolveIslandOverlapDrag(drag.islandId, drag.islandEl, drag.ox, drag.oy, dx, dy, allowOver);
+      drag.dx = resolved.x - drag.ox;
+      drag.dy = resolved.y - drag.oy;
+      const value = { x: resolved.x, y: resolved.y };
+      offsets.set(drag.islandId, value);
+      drag.islandEl.style.translate = `${value.x}px ${value.y}px`;
+      drag.islandEl.style.setProperty('--ox', `${value.x}px`);
+      drag.islandEl.style.setProperty('--oy', `${value.y}px`);
+    }
+    scheduleDraw();
+  };
   frame.addEventListener('pointerdown', event => {
     if (event.button !== 0 || !onBar(event)) return;
     event.stopPropagation();
-    const current = offsets.get(id) || { x: 0, y: 0 };
-    drag = { x: event.clientX, y: event.clientY, ox: current.x, oy: current.y, moved: false, remembered: false };
-    draggingTraceAnchorId = id;
+    clearTimeout(gravityTimer);
+    const islandId = dragIslandId(id);
+    const islandEl = scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`) || frame;
+    const current = offsets.get(islandId) || { x: 0, y: 0 };
+    const parentId = parentCanvasId(id);
+    const parentEl = parentId ? scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`) : null;
+    const local = localOffsets.get(id) || { x: 0, y: 0 };
+    const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
+    drag = {
+      id, islandId, islandEl, parentId, parentEl, canvasEl,
+      nested: islandId !== id,
+      parentBaseW: parentEl?.offsetWidth || 0,
+      canvasBaseH: canvasEl?.offsetHeight || 0,
+      x: event.clientX, y: event.clientY,
+      ox: current.x, oy: current.y,
+      lx: local.x, ly: local.y,
+      dx: 0, dy: 0,
+      pointerX: event.clientX, pointerY: event.clientY,
+      moved: false, remembered: false
+    };
+    draggingTraceAnchorId = islandId;
     frame.classList.add('dragging');
+    islandEl.classList.add('dragging');
+    parentEl?.classList.add('deforming');
     app.classList.add('dragging');
     frame.setPointerCapture(event.pointerId);
   });
@@ -1169,15 +1852,44 @@ function bindFrameDrag(frame) {
     const dy = (event.clientY - drag.y) / canvas.scale;
     drag.moved ||= Math.abs(dx) + Math.abs(dy) > 3;
     if (drag.moved && !drag.remembered) { remember(); drag.remembered = true; }
-    const value = { x: drag.ox + dx, y: drag.oy + dy };
-    offsets.set(id, value);
-    frame.style.translate = `${value.x}px ${value.y}px`;
-    scheduleDraw();
-    animateReflowEdges(160);
+    drag.dx = dx; drag.dy = dy;
+    drag.pointerX = event.clientX;
+    drag.pointerY = event.clientY;
+    if (!raf) raf = requestAnimationFrame(applyDragVisual);
   });
   const end = () => {
     if (!drag) return;
-    if (drag.moved) frame.dataset.dragged = String(Date.now());
+    if (raf) { cancelAnimationFrame(raf); raf = 0; applyDragVisual(); }
+    const parentId = drag.parentId;
+    const nested = drag.nested;
+    const dx = drag.dx || 0, dy = drag.dy || 0;
+    const draggedId = drag.id;
+    const islandId = drag.islandId;
+    const lx = drag.lx, ly = drag.ly;
+    drag.parentEl?.classList.remove('deforming');
+    clearDropTargets();
+    if (drag.moved) {
+      frame.dataset.dragged = String(Date.now());
+      pinnedLayout.add(islandId);
+      if (nested && parentId) {
+        // Keep visual translate until render() rebuilds — clearing it first snaps back.
+        localOffsets.set(draggedId, { x: lx + dx, y: ly + dy });
+        skipFlipOnce = true;
+        render();
+        requestAnimationFrame(() => animateReflowEdges(1400));
+      } else {
+        const settled = resolveIslandOverlapDrag(islandId, drag.islandEl, drag.ox, drag.oy, dx, dy, null);
+        offsets.set(islandId, { x: settled.x, y: settled.y });
+        drag.islandEl.style.translate = `${settled.x}px ${settled.y}px`;
+        drag.islandEl.style.setProperty('--ox', `${settled.x}px`);
+        drag.islandEl.style.setProperty('--oy', `${settled.y}px`);
+        animateReflowEdges(900);
+        scheduleGravityDrift(1200);
+      }
+    } else {
+      scheduleGravityDrift();
+    }
+    drag.islandEl?.classList.remove('dragging');
     drag = null;
     frame.classList.remove('dragging');
     app.classList.remove('dragging');
@@ -1188,9 +1900,41 @@ function bindFrameDrag(frame) {
   frame.addEventListener('pointerup', end);
   frame.addEventListener('pointercancel', end);
 }
-function focusFileFrame(file, { expand = true } = {}) {
-  if (!file) return;
+function focusFolderFrame(folder, { expand = true, event = null } = {}) {
+  if (!folder || folder.kind !== 'folder') return;
+  if (agentRevealPath) {
+    clearTimeout(agentRevealTimer);
+    agentRevealPath = null;
+    agentRevealExpandedId = null;
+  }
   remember();
+  if (event) captureClickAnchor(folder.id, event);
+  activateFocus(folder);
+  layoutAnchorFileId = folder.id;
+  if (expand && folder.id !== displayRoot()?.id) {
+    expandedFolders.add(folder.id);
+    pruneFolderDepth();
+  }
+  selectItem(folder.id);
+  flowMode = true;
+  rebuildTrace();
+  render();
+  updateInspector();
+  requestAnimationFrame(() => {
+    stabilizeClickAnchor();
+    animateReflowEdges(1400);
+    pulseSelection();
+  });
+}
+function focusFileFrame(file, { expand = true, event = null } = {}) {
+  if (!file) return;
+  if (agentRevealPath && file.id !== agentRevealExpandedId) {
+    clearTimeout(agentRevealTimer);
+    agentRevealPath = null;
+    agentRevealExpandedId = null;
+  }
+  remember();
+  if (event) captureClickAnchor(file.id, event);
   activateFocus(file);
   layoutAnchorFileId = file.id;
   if (expand) expandedFiles.add(file.id);
@@ -1200,36 +1944,84 @@ function focusFileFrame(file, { expand = true } = {}) {
   render();
   updateInspector();
   requestAnimationFrame(() => {
+    stabilizeClickAnchor();
     animateReflowEdges(900);
     pulseSelection();
   });
+}
+function highlightLine(text, language = '') {
+  let html = escape(text || ' ');
+  const py = /python/i.test(language);
+  const comment = py
+    ? html.replace(/(#.*)$/g, '<span class="tok-cm">$1</span>')
+    : html.replace(/(\/\/.*)$/g, '<span class="tok-cm">$1</span>');
+  html = comment
+    .replace(/(&quot;.*?&quot;|&#39;.*?&#39;|`.*?`)/g, '<span class="tok-str">$1</span>')
+    .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-num">$1</span>');
+  const keywords = py
+    ? /\b(def|class|return|import|from|as|if|elif|else|for|while|with|try|except|yield|async|await|True|False|None|self|pass|raise|and|or|not|in|is)\b/g
+    : /\b(function|const|let|var|return|import|from|export|default|class|extends|if|else|for|while|try|catch|async|await|new|typeof|interface|type|enum|public|private|protected|static|void|null|undefined|true|false)\b/g;
+  html = html.replace(keywords, '<span class="tok-kw">$1</span>');
+  html = html.replace(/\b([A-Za-z_][\w]*)\s*(?=\()/g, '<span class="tok-fn">$1</span>');
+  return html;
+}
+function connectWindow(file, edge, role) {
+  const source = file?.meta?.source || '';
+  const lines = source.split('\n');
+  if (!lines.length) return '';
+  const hit = Math.max(1, Math.min(lines.length, edge?.line || (role === 'here' ? 1 : 1)));
+  const start = Math.max(1, hit - 2);
+  const end = Math.min(lines.length, Math.max(start + 4, hit + 2));
+  const body = lines.slice(start - 1, end).map((text, index) => {
+    const line = start + index;
+    const cls = line === hit ? 'flow-line hit-edge' : 'flow-line';
+    return `<span class="${cls}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
+  }).join('');
+  return `<div class="flow-connect hit" data-connect-line="${hit}">
+    <header>${escape(edge?.type || 'trace')} · L${hit} · ±2 context</header>
+    <pre class="flow-code">${body}</pre>
+  </div>`;
 }
 function codeBlockHtml(item, { edge, role } = {}) {
   const file = fileOf(item) || (item.kind === 'file' ? item : null);
   const source = file?.meta?.source || '';
   const lines = source.split('\n');
-  let start = 1, end = Math.min(lines.length, 20);
+  let start = 1, end = Math.min(lines.length, 24);
+  let hitStart = null, hitEnd = null;
   if (item.kind === 'module' && item.loc) {
     start = item.loc.start;
-    end = Math.min(lines.length, Math.max(start, Math.min(item.loc.end || start, start + 36)));
+    end = Math.min(lines.length, Math.max(start, Math.min(item.loc.end || start, start + 40)));
+    hitStart = item.loc.start;
+    hitEnd = item.loc.end || item.loc.start;
+  }
+  if (edge?.line && role !== 'here') {
+    hitStart = edge.line;
+    hitEnd = edge.line;
   }
   const code = lines.slice(start - 1, end).map((text, index) => {
     const line = start + index;
-    return `<span class="flow-line"><i>${line}</i><code>${escape(text) || ' '}</code></span>`;
+    const hit = hitStart != null && line >= hitStart && line <= hitEnd;
+    return `<span class="flow-line${hit ? ' hit' : ''}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
   }).join('') || '<span class="flow-line"><i>—</i><code>No source</code></span>';
+  const glyph = file ? fileGlyph(file) : { g: '·', c: 'var(--muted)' };
   const title = item.kind === 'module' ? `${item.label}()` : item.label;
   const meta = edge ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}` : (item.kind === 'module' ? `L${start}–${end}` : file?.path || '');
-  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}">
-    <header><b>${escape(title)}</b><span>${escape(meta)}</span></header>
+  const connect = edge && file ? connectWindow(file, edge, role) : (role === 'here' && file && hitStart ? connectWindow(file, { type: 'focus', line: hitStart }, role) : '');
+  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}" data-flow-role="${role || ''}" data-flow-edge="${edge?.id || ''}">
+    <div class="flow-card-head">
+      <span class="file-glyph" style="--glyph:${glyph.c}">${escape(glyph.g)}</span>
+      <b>${escape(title)}</b>
+      <span>${escape(meta)}</span>
+    </div>
     <small>${escape(file?.path || item.path || '')}</small>
-    <pre>${code}</pre>
+    <pre class="flow-code">${code}</pre>
+    ${connect}
   </article>`;
 }
 function flowNeighbors(focus) {
   const seeds = new Set(sourceSeeds(focus));
   const upstream = [];
   const downstream = [];
-  // Overlay shows full static flow regardless of ribbon edge toggles.
   for (const edge of (graph?.edges || []).filter(e => FLOW_TYPES.has(e.type))) {
     if (seeds.has(edge.to) && !seeds.has(edge.from)) {
       const other = node(edge.from);
@@ -1246,6 +2038,36 @@ function flowNeighbors(focus) {
     .sort((a, b) => rank(a.edge.type) - rank(b.edge.type) || (a.other.label || '').localeCompare(b.other.label || ''))
     .slice(0, 16);
   return { upstream: dedupe(upstream), downstream: dedupe(downstream) };
+}
+function drawFlowOverlayWires(upstream, downstream) {
+  const svg = $('#flow-wires');
+  const body = svg?.closest('.flow-body');
+  if (!svg || !body) return;
+  const bodyRect = body.getBoundingClientRect();
+  const focusCard = $('#flow-focus')?.querySelector('.flow-card.here');
+  if (!focusCard) { svg.innerHTML = ''; return; }
+  const focusRect = focusCard.getBoundingClientRect();
+  const fx = focusRect.left - bodyRect.left;
+  const fy = focusRect.top - bodyRect.top + focusRect.height * .35;
+  const paths = [];
+  const link = (card, side, type) => {
+    if (!card) return;
+    const rect = card.getBoundingClientRect();
+    const x1 = side === 'from' ? rect.right - bodyRect.left : fx;
+    const y1 = rect.top - bodyRect.top + Math.min(rect.height * .4, 48);
+    const x2 = side === 'from' ? fx : rect.left - bodyRect.left;
+    const y2 = side === 'from' ? fy : rect.top - bodyRect.top + Math.min(rect.height * .4, 48);
+    const mid = (x1 + x2) / 2;
+    paths.push(`<path class="flow-wire ${escape(type || '')}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" />`);
+  };
+  $('#flow-upstream')?.querySelectorAll('.flow-card').forEach((card, index) => {
+    link(card, 'from', upstream[index]?.edge?.type || 'calls');
+  });
+  $('#flow-downstream')?.querySelectorAll('.flow-card').forEach((card, index) => {
+    link(card, 'to', downstream[index]?.edge?.type || 'calls');
+  });
+  svg.setAttribute('viewBox', `0 0 ${bodyRect.width} ${bodyRect.height}`);
+  svg.innerHTML = paths.join('');
 }
 function openFlowOverlay(item, { narrative } = {}) {
   const focus = item?.kind === 'file' ? (modules(item)[0] || item) : item;
@@ -1267,7 +2089,8 @@ function openFlowOverlay(item, { narrative } = {}) {
   $('#flow-upstream').innerHTML = upstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'from' })).join('') || '<p class="flow-empty">Nothing feeds into this node statically.</p>';
   $('#flow-focus').innerHTML = codeBlockHtml(focus, { role: 'here' });
   $('#flow-downstream').innerHTML = downstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'to' })).join('') || '<p class="flow-empty">Nothing consumes this node statically.</p>';
-  dialog?.querySelectorAll('[data-flow-jump]').forEach(card => card.addEventListener('click', () => {
+  dialog?.querySelectorAll('[data-flow-jump]').forEach(card => card.addEventListener('click', event => {
+    if (event.target.closest('.flow-code, .flow-connect')) return;
     const target = node(card.dataset.flowJump);
     if (!target) return;
     closeFlowOverlay();
@@ -1280,7 +2103,13 @@ function openFlowOverlay(item, { narrative } = {}) {
   if (file) expandedFiles.add(file.id);
   rebuildTrace();
   render();
-  requestAnimationFrame(() => animateReflowEdges(1000));
+  requestAnimationFrame(() => {
+    stabilizeClickAnchor();
+    animateReflowEdges(1000);
+    drawFlowOverlayWires(upstream, downstream);
+    const columns = dialog?.querySelector('.flow-columns');
+    columns?.addEventListener('scroll', () => drawFlowOverlayWires(upstream, downstream), { passive: true });
+  });
 }
 function closeFlowOverlay() {
   const dialog = $('#flow-overlay');
@@ -1291,11 +2120,21 @@ function bindScene() {
   scene.querySelectorAll('[data-folder-expand]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation();
     const id = button.dataset.folderExpand;
+    const item = node(id);
+    if (!item) return;
     remember();
-    expandedFolders.has(id) ? expandedFolders.delete(id) : expandedFolders.add(id);
+    captureClickAnchor(id, event);
+    toggleFolder(id);
     selectItem(id);
+    flowMode = true;
+    rebuildTrace();
     render();
     updateInspector();
+    requestAnimationFrame(() => {
+      stabilizeClickAnchor();
+      animateReflowEdges(1400);
+      pulseSelection();
+    });
   }));
   scene.querySelectorAll('[data-expand]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation();
@@ -1303,18 +2142,23 @@ function bindScene() {
     if (!file) return;
     if (expandedFiles.has(file.id)) {
       remember();
+      captureClickAnchor(file.id, event);
       expandedFiles.delete(file.id);
       selectItem(file.id);
       render();
       updateInspector();
+      requestAnimationFrame(() => {
+        stabilizeClickAnchor();
+        animateReflowEdges(720);
+      });
     } else {
-      focusFileFrame(file, { expand: true });
+      focusFileFrame(file, { expand: true, event });
     }
   }));
   scene.querySelectorAll('[data-focus-file]').forEach(button => button.addEventListener('click', event => {
     if (Date.now() - Number(button.closest('.frame')?.dataset.dragged || 0) < 220) return;
     event.stopPropagation();
-    focusFileFrame(node(button.dataset.focusFile), { expand: true });
+    focusFileFrame(node(button.dataset.focusFile), { expand: true, event });
   }));
   scene.querySelectorAll('.outline-label[data-inline]:not([data-focus-file])').forEach(row => {
     row.addEventListener('click', event => {
@@ -1322,20 +2166,23 @@ function bindScene() {
       event.stopPropagation();
       const item = node(row.dataset.inline);
       if (!item) return;
-      if (item.kind === 'file') return focusFileFrame(item, { expand: true });
+      if (item.kind === 'file') return focusFileFrame(item, { expand: true, event });
+      if (item.kind === 'folder') return focusFolderFrame(item, { expand: true, event });
       activateFocus(item);
+      captureClickAnchor(item.id, event);
       selectItem(item.id);
       render();
       updateInspector();
+      requestAnimationFrame(() => stabilizeClickAnchor());
     });
     row.addEventListener('dblclick', event => {
       event.stopPropagation();
       const item = node(row.dataset.inline);
       if (!item || item.kind !== 'folder') return;
       remember();
-      expandedFolders.has(item.id) ? expandedFolders.delete(item.id) : expandedFolders.add(item.id);
-      selectItem(item.id);
-      render();
+      captureClickAnchor(item.id, event);
+      toggleFolder(item.id);
+      focusFolderFrame(item, { expand: false, event });
     });
   });
   scene.querySelectorAll('.frame-fn[data-open-flow]').forEach(element => element.addEventListener('click', event => {
@@ -1367,9 +2214,13 @@ function initFlowOverlay() {
 }
 function bindActivityFeed() {
   $('#activity-list')?.querySelectorAll('[data-open-change]').forEach(button => button.addEventListener('click', event => {
-    event.stopPropagation(); const file = fileForPath(button.dataset.openChange); if (!file) return;
-    remember(); selectedId = file.id; layoutAnchorFileId = file.id; activateFocus(file); expandAncestors(file); expandedFiles.add(file.id);
-    rebuildTrace(); render(); updateInspector();
+    event.stopPropagation();
+    const path = button.dataset.openChange;
+    if (!path) return;
+    clearTimeout(agentRevealTimer);
+    agentRevealPath = null;
+    agentRevealExpandedId = null;
+    playAgentEditReveal(path);
   }));
   $('#activity-list')?.querySelectorAll('[data-review-change]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation();
@@ -1391,6 +2242,7 @@ function refreshFocusClasses() {
     frame.classList.toggle('focus-anchor', frame.dataset.id === focusedFileId);
     frame.classList.toggle('dim', outlineDim(item));
     frame.classList.toggle('trace-lit', lit.has(frame.dataset.id));
+    frame.classList.toggle('agent-editing', frame.dataset.id === agentRevealExpandedId);
   });
   scene.querySelectorAll('.frame-fn').forEach(box => {
     const item = node(box.dataset.moduleBox);
@@ -1404,20 +2256,67 @@ function selectItem(id) {
   selectedId = id; selectedImportEdgeId = undefined; rebuildTrace(); refreshFocusClasses(); drawEdges(); renderMinimap(); updateInspector(); writeDeepLink();
 }
 function updateInspector() {
-  const item = selected() || entryFile(); if (!item) return; const file = fileOf(item) || item; const related = edgeTypes().filter(edge => edge.from === item.id || edge.to === item.id || edge.from === file.id || edge.to === file.id);
+  const item = selected() || entryFile(); if (!item) return;
+  const file = fileOf(item) || (item.kind === 'file' ? item : null);
+  const related = edgeTypes().filter(edge => edge.from === item.id || edge.to === item.id || (file && (edge.from === file.id || edge.to === file.id)));
   const region = mapRegion(file || item);
   $('#inspect-kind').textContent = `${item.kind.toUpperCase()} · FRAME · ${region.toUpperCase()}`;
   $('#inspect-title').textContent = item.kind === 'module' ? `${item.label}()` : item.label;
-  $('#inspect-path').textContent = item.path || '/';
+  $('#inspect-path').textContent = item.path || file?.path || '/';
   $('#inspect-trace').textContent = related.length
-    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}. Open nested frames to push wires onto deeper ports.`
+    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}. Focused nodes slowly drift into a shared band.`
     : 'No direct relationships with the current edge filters.';
+  const structure = $('#inspect-structure');
+  if (structure) {
+    const glyph = file?.kind === 'file' ? fileGlyph(file) : null;
+    const mods = file?.kind === 'file' ? modules(file).slice(0, 8) : [];
+    const folderKids = item.kind === 'folder' ? folderItems(item).slice(0, 8) : [];
+    structure.innerHTML = [
+      glyph ? `<div class="struct-row"><span class="file-glyph" style="--glyph:${glyph.c}">${escape(glyph.g)}</span><span>${escape(file.extension || 'file')} · ${file.language || 'asset'}</span></div>` : '',
+      item.kind === 'folder' ? `<div class="struct-row muted">${folderKids.length} direct · ${filesBelow(item).length} files · depth cap 2</div>` : '',
+      ...folderKids.map(child => {
+        const g = child.kind === 'file' ? fileGlyph(child) : null;
+        return `<button type="button" class="struct-jump" data-jump="${child.id}">${g ? `<span class="file-glyph" style="--glyph:${g.c}">${escape(g.g)}</span>` : (() => { const fi = folderIcon(child); return `<span class="folder-glyph compact" style="--accent:${fi.c}">${fi.g}</span>`; })()}<span>${escape(child.label)}</span></button>`;
+      }),
+      ...mods.map(module => `<button type="button" class="struct-jump" data-jump="${module.id}" data-open-flow-jump="${module.id}"><em>fn</em><span>${escape(module.label)}()</span></button>`)
+    ].filter(Boolean).join('') || '<div class="struct-row muted">Select a frame to see its contents.</div>';
+    structure.querySelectorAll('[data-jump]').forEach(button => button.addEventListener('click', () => {
+      const target = node(button.dataset.jump);
+      if (!target) return;
+      clearTimeout(agentRevealTimer);
+      agentRevealPath = null;
+      agentRevealExpandedId = null;
+      if (button.dataset.openFlowJump) return openFlowOverlay(target);
+      if (target.kind === 'file') return focusFileFrame(target);
+      remember();
+      if (target.kind === 'folder') { toggleFolder(target.id); selectItem(target.id); }
+      else selectItem(target.id);
+      render();
+      updateInspector();
+    }));
+  }
   $('#inspect-edges').innerHTML = related.slice(0, 9).map(edge => `<div><code>${edge.from === item.id ? '→' : '←'}</code> ${escape(edge.type)} · ${escape(edge.evidence)}${edge.line ? ` · line ${edge.line}` : ''}</div>`).join('') || '<div>No direct relationships.</div>';
   const sourcePanel = $('#source-panel'), sourceTarget = $('#inspect-source');
   if (file?.kind === 'file' && file.meta?.source) { sourcePanel.hidden = false; sourceTarget.innerHTML = sourceHtml(file); bindInspectorSource(); }
   else { sourcePanel.hidden = true; sourceTarget.innerHTML = ''; }
   if (item.kind === 'module') requestAnimationFrame(() => $('#inspect-source .line.active-module')?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
-  const panel = $('#diff-panel'); panel.hidden = !file.git?.change; $('#diff-code').textContent = file.git?.diff || 'New or untracked file. Full source is available in the canvas.';
+  const panel = $('#diff-panel');
+  const diffEl = $('#diff-code');
+  const showDiff = file && (file.git?.change || recentFor(file));
+  if (panel && diffEl) {
+    panel.hidden = !showDiff;
+    panel.classList.toggle('live', showDiff && agentRevealPath === file.path);
+    if (showDiff) {
+      $('#diff-meta').textContent = file.git?.change || 'live edit';
+      diffEl.innerHTML = formatDiffHtml(file);
+      if (agentRevealPath === file.path) {
+        requestAnimationFrame(() => panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+      }
+    } else {
+      $('#diff-meta').textContent = '';
+      diffEl.innerHTML = '';
+    }
+  }
 }
 function bindInspectorSource() {
   $('#inspect-source').querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.pin; remember(); pinned.has(id) ? pinned.delete(id) : pinned.add(id); rebuildTrace(); render(); updateInspector(); }));
@@ -1492,7 +2391,19 @@ function keepSelectionVisible() {
   canvas.y += dy;
   applyCanvas();
 }
-function resetPresentation() { remember(); exitFlow(); offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; render(); requestAnimationFrame(fitMap); }
+function resetPresentation() {
+  remember();
+  exitFlow();
+  offsets.clear();
+  localOffsets.clear();
+  layoutModes.clear();
+  pinnedLayout.clear();
+  basePlacements.clear();
+  layoutMemory.clear();
+  basePlacementKey = '';
+  render();
+  requestAnimationFrame(fitMap);
+}
 function canvasControls() {
   let pan, lastPanMoved = false, wheelRemainder = 0;
   const stopPan = () => { lastPanMoved = !!pan?.moved; pan = null; board.classList.remove('panning'); setTimeout(() => { lastPanMoved = false; }, 0); };
@@ -1554,13 +2465,24 @@ function showOpenDialog() {
   else openWorkspace();
 }
 function initSettings() {
-  const theme = localStorage.getItem('deepflow-theme') || 'aurora';
+  const savedTheme = localStorage.getItem('deepflow-theme') || 'aurora';
+  const knownThemes = new Set([...($('#theme-grid')?.querySelectorAll('[data-theme-choice]') || [])].map(button => button.dataset.themeChoice));
+  const theme = knownThemes.has(savedTheme) ? savedTheme : 'aurora';
+  if (theme !== savedTheme) localStorage.setItem('deepflow-theme', theme);
   const motion = localStorage.getItem('deepflow-motion') !== 'reduced';
-  autoRevealChanges = localStorage.getItem('deepflow-auto-reveal') === 'true';
+  autoRevealChanges = localStorage.getItem('deepflow-auto-reveal') !== 'false';
+  agentRevealDwellMs = Math.max(3000, Math.min(20000, Number(localStorage.getItem('deepflow-reveal-dwell') || 8000)));
+  traceMode = localStorage.getItem('deepflow-live-trace') !== 'false';
   document.body.dataset.theme = theme;
   document.body.classList.toggle('reduce-motion', !motion);
   $('#motion-toggle').checked = motion;
   $('#auto-reveal-toggle').checked = autoRevealChanges;
+  const dwell = $('#reveal-dwell');
+  const dwellOut = $('#reveal-dwell-value');
+  if (dwell) {
+    dwell.value = String(Math.round(agentRevealDwellMs / 1000));
+    if (dwellOut) dwellOut.textContent = `${dwell.value}s`;
+  }
   const syncThemeButtons = () => $('#theme-grid')?.querySelectorAll('[data-theme-choice]').forEach(button => button.classList.toggle('active', button.dataset.themeChoice === document.body.dataset.theme));
   syncThemeButtons();
   $('#settings-open')?.addEventListener('click', () => $('#settings-dialog')?.showModal?.());
@@ -1568,7 +2490,8 @@ function initSettings() {
     document.body.dataset.theme = button.dataset.themeChoice;
     localStorage.setItem('deepflow-theme', button.dataset.themeChoice);
     syncThemeButtons();
-    renderMinimap();
+    if (graph) render();
+    else renderMinimap();
   }));
   $('#motion-toggle')?.addEventListener('change', event => {
     document.body.classList.toggle('reduce-motion', !event.target.checked);
@@ -1577,6 +2500,11 @@ function initSettings() {
   $('#auto-reveal-toggle')?.addEventListener('change', event => {
     autoRevealChanges = event.target.checked;
     localStorage.setItem('deepflow-auto-reveal', String(autoRevealChanges));
+  });
+  $('#reveal-dwell')?.addEventListener('input', event => {
+    agentRevealDwellMs = Number(event.target.value) * 1000;
+    localStorage.setItem('deepflow-reveal-dwell', String(agentRevealDwellMs));
+    if ($('#reveal-dwell-value')) $('#reveal-dwell-value').textContent = `${event.target.value}s`;
   });
 }
 function syncToolbar() {
@@ -1603,14 +2531,11 @@ function markRecent(paths = []) {
 }
 function revealRecentChanges() {
   if (!autoRevealChanges || !recentPaths.size || !graph) return;
-  const fresh = [...recentPaths.entries()].filter(([, at]) => Date.now() - at < 12_000).map(([path]) => path);
+  const fresh = [...recentPaths.entries()]
+    .filter(([, at]) => Date.now() - at < 12_000)
+    .sort((a, b) => b[1] - a[1]);
   if (!fresh.length) return;
-  const changedFiles = fresh.map(path => graph.nodes.find(item => item.kind === 'file' && item.path === path)).filter(Boolean);
-  const target = changedFiles.find(file => SOURCE_EXTENSIONS.has(file.extension)) || changedFiles[0];
-  if (!target) return;
-  for (const parent of ancestors(target).filter(item => item.kind === 'folder').slice(-3)) expandedFolders.add(parent.id);
-  if (SOURCE_EXTENSIONS.has(target.extension)) expandedFiles.add(target.id);
-  selectedId = target.id; layoutAnchorFileId = target.id; flowMode = true;
+  playAgentEditReveal(fresh[0][0]);
 }
 function fileByPath(path) {
   return graph?.nodes.find(item => item.kind === 'file' && item.path === String(path || '').replaceAll('\\', '/'));
@@ -1642,7 +2567,7 @@ function revealItem(item, { moduleName, line, pin = false, pulse = false, enterF
   if (enterFlow) flowMode = true;
   rebuildTrace(); render(); updateInspector(); syncToolbar();
   requestAnimationFrame(() => {
-    focusSelection();
+    keepSelectionVisible();
     if (pulse) pulseSelection();
     writeDeepLink();
   });
@@ -1865,12 +2790,12 @@ function initSearch() {
 }
 function applyGraph(next, { preserve = false } = {}) {
   const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
-  if (!preserve) { offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
+  if (!preserve) { offsets.clear(); localOffsets.clear(); layoutModes.clear(); pinnedLayout.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
   scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id;
   selectedId = preserve && node(previousSelected) ? previousSelected : rootFolder().id;
   layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
   if (!preserve) ensureDefaultOutlineExpanded();
-  if (preserve) revealRecentChanges();
+  if (preserve) requestAnimationFrame(() => revealRecentChanges());
   $('#repo-name').textContent = graph.roots.map(root => root.label).join(' + ');
   updateRepoStats();
   rebuildTrace(); render(); updateInspector(); updateHistory(); renderActivityFeed(); syncToolbar();
@@ -1890,7 +2815,10 @@ $('#focus-selection')?.addEventListener('click', focusSelection);
 window.addEventListener('hashchange', () => applyDeepLink());
 document.querySelectorAll('[data-toolbar-toggle]').forEach(button => button.addEventListener('click', () => {
   remember();
-  if (button.dataset.toolbarToggle === 'trace') traceMode = !traceMode;
+  if (button.dataset.toolbarToggle === 'trace') {
+    traceMode = !traceMode;
+    localStorage.setItem('deepflow-live-trace', String(traceMode));
+  }
   if (button.dataset.toolbarToggle === 'presentation') presentationMode = !presentationMode;
   rebuildTrace(); render(); updateInspector(); syncToolbar();
 }));

@@ -12,39 +12,16 @@ Tree-sitter parses JS/TS + Python on your machine. An MCP bridge lets any agent 
 Paste the block below into an agent chat (Cursor / Claude / Codex / etc.). It is enough to install, start, and wire DeepFlow.
 
 ```text
-You are setting up DeepFlow, a local repo architecture map with MCP tools.
-
-CHECKOUT: use the absolute path of this DeepFlow repo (the folder that contains package.json and mcp-server.js).
-
-Do exactly this:
-
-1. cd <CHECKOUT>
-2. Run: bash scripts/agent-bootstrap.sh
-   - This runs npm install, starts the viewer on http://127.0.0.1:4317 if needed,
-     and writes .deepflow.mcp.generated.json with an absolute MCP path.
-3. Add the generated MCP server to the IDE MCP config (merge mcpServers.deepflow).
-4. Confirm with MCP tool deepflow_status → ok:true.
-5. Demo (TypeScript monorepo fixture):
-   - deepflow_open_workspace
-     { "root": "<CHECKOUT>/fixtures/atlas-workspace" }
-   - Open http://127.0.0.1:4317 in the browser if it is not already open.
-   - deepflow_tour
-     { "root": "<CHECKOUT>/fixtures/atlas-workspace", "autoPlay": true }
-6. Python demo (optional):
-   - deepflow_open_workspace
-     { "root": "<CHECKOUT>/fixtures/python-mini" }
-   - deepflow_summary { "root": "<CHECKOUT>/fixtures/python-mini" }
-   - deepflow_jump_to { "root": "<CHECKOUT>/fixtures/python-mini", "path": "main.py", "module": "main" }
-7. For the user’s real project:
-   - deepflow_open_workspace { "root": "<ABSOLUTE_PATH_TO_THEIR_REPO>" }
-   - After every edit batch: deepflow_after_edit with changed relative paths
-   - Narrate with deepflow_jump_to / deepflow_impact / deepflow_explain
-
-Rules while coding with DeepFlow:
-- Always keep `npm run dev` (viewer) running before MCP viewer tools.
-- Prefer deepflow_summary over full analyze for planning.
-- After writes: deepflow_after_edit, then deepflow_jump_to on the changed file.
-- Never upload repo contents; DeepFlow is local-only.
+Setup DeepFlow (local codebase visualizer + MCP):
+1. Clone & Bootstrap:
+   git clone https://github.com/vanshksingh/DeepFlow.git && cd DeepFlow && bash scripts/agent-bootstrap.sh
+   (Installs deps, starts viewer on http://127.0.0.1:4317, generates config in .deepflow.mcp.generated.json)
+2. Connect: Merge generated config into your IDE's MCP settings. Verify via `deepflow_status`.
+3. Usage in any repo:
+   - Connect workspace: `deepflow_open_workspace {"root": "<ABS_PATH>"}`
+   - Sync writes: `deepflow_after_edit {"paths": ["rel/path/to/edited"]}`
+   - Trace/Explain: `deepflow_jump_to`, `deepflow_impact`, or `deepflow_summary` for maps/signals.
+   - Keep `npm run dev` running in DeepFlow checkout.
 ```
 
 One-liner if you are already in the checkout:

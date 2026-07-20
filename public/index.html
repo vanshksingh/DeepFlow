@@ -19,6 +19,7 @@
           <button class="toolbar-toggle active" data-edge-toggle="imports">Imports</button>
           <button class="toolbar-toggle" data-edge-toggle="dataflow">Data</button>
           <button class="toolbar-toggle" data-edge-toggle="events">Events</button>
+          <button class="toolbar-toggle active" data-toolbar-toggle="trace" title="Live hover traces">Live</button>
           <button id="history-back" title="Back" aria-label="Back">←</button>
           <button id="history-forward" title="Forward" aria-label="Forward">→</button>
           <button id="reset-view" title="Reset presentation" aria-label="Reset presentation">↺</button>
@@ -36,7 +37,7 @@
           <span class="leg events"><i></i>events</span>
           <span class="leg orphan"><i></i>orphan</span>
         </div>
-        <div class="canvas-hint">Drag islands · click a file to focus + open modules · click a module for the flow overlay</div>
+        <div class="canvas-hint">Drag islands · click folders/files to focus · opens under the pointer · Live = hover traces</div>
         <div id="tour-card" class="tour-card" hidden>
           <span class="tour-kicker">Live tour</span>
           <b id="tour-title">Architecture rails</b>
@@ -51,10 +52,14 @@
         <h2 id="inspect-title">Choose a frame</h2>
         <p id="inspect-path">Folders encapsulate files; files encapsulate functions.</p>
         <section><b>Trace</b><p id="inspect-trace">Wires connect the deepest open frame ports.</p></section>
+        <section><b>Structure</b><div id="inspect-structure" class="inspect-structure"></div></section>
         <section id="source-panel" hidden><b>Source</b><div id="inspect-source"></div></section>
         <section><b>Activity</b><div id="activity-list" class="activity-list"></div></section>
         <section><b>Why this connects</b><div id="inspect-edges" class="edge-list"></div></section>
-        <section id="diff-panel" hidden><b>Local change</b><pre id="diff-code"></pre></section>
+        <section id="diff-panel" class="inspect-diff-panel" hidden>
+          <header class="diff-head"><b>Local change</b><span id="diff-meta"></span></header>
+          <pre id="diff-code" class="inspect-diff"></pre>
+        </section>
       </div>
     </aside>
   </main>
@@ -100,7 +105,8 @@
       </section>
       <section>
         <label class="setting-row"><span>Luxury motion</span><input id="motion-toggle" type="checkbox" checked></label>
-        <label class="setting-row"><span>Auto reveal agent edits</span><input id="auto-reveal-toggle" type="checkbox"></label>
+        <label class="setting-row"><span>Auto reveal agent edits</span><input id="auto-reveal-toggle" type="checkbox" checked></label>
+        <label class="setting-row"><span>Edit preview dwell</span><input id="reveal-dwell" type="range" min="3" max="20" step="1" value="8"><output id="reveal-dwell-value" for="reveal-dwell">8s</output></label>
       </section>
     </form>
   </dialog>
@@ -115,19 +121,22 @@
         <button type="button" id="flow-close" aria-label="Close flow">×</button>
       </header>
       <p class="flow-narrative" id="flow-narrative" hidden></p>
-      <div class="flow-columns">
-        <section class="flow-col upstream">
-          <header><b>Comes from</b><span>inherits · callers · imports</span></header>
-          <div class="flow-stack" id="flow-upstream"></div>
-        </section>
-        <section class="flow-col focus">
-          <header><b>You are here</b><span id="flow-focus-meta"></span></header>
-          <div class="flow-stack" id="flow-focus"></div>
-        </section>
-        <section class="flow-col downstream">
-          <header><b>Goes to</b><span>calls · emits · consumers</span></header>
-          <div class="flow-stack" id="flow-downstream"></div>
-        </section>
+      <div class="flow-body">
+        <svg class="flow-wires" id="flow-wires" aria-hidden="true"></svg>
+        <div class="flow-columns">
+          <section class="flow-col upstream">
+            <header><b>Comes from</b><span>inherits · callers · imports</span></header>
+            <div class="flow-stack" id="flow-upstream"></div>
+          </section>
+          <section class="flow-col focus">
+            <header><b>You are here</b><span id="flow-focus-meta"></span></header>
+            <div class="flow-stack" id="flow-focus"></div>
+          </section>
+          <section class="flow-col downstream">
+            <header><b>Goes to</b><span>calls · emits · consumers</span></header>
+            <div class="flow-stack" id="flow-downstream"></div>
+          </section>
+        </div>
       </div>
     </div>
   </dialog>

@@ -201,12 +201,23 @@ body[data-theme="everforest"] {
   color: var(--ink);
 }
 
-/* Give the map the foreground — slim chrome, compact inspector. */
+/* Give the map the foreground — slim chrome, full-height collapsible inspector. */
 #app {
-  grid-template-columns: minmax(0, 1fr) 236px;
+  height: 100vh;
+  min-height: 100vh;
+  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr) 248px;
 }
 #inspector {
-  padding: 22px 14px;
+  align-self: stretch;
+  height: 100%;
+  max-height: 100vh;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 22px 14px 28px;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
 }
 #minimap {
   width: 132px;
@@ -1102,19 +1113,40 @@ body[data-theme]:not([data-theme="aurora"]) .inline-import .import-kind {
 }
 
 #inspector {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 #inspector-toggle {
   position: fixed;
   top: 43px;
-  right: 286px;
+  right: 262px;
   left: auto;
+  z-index: 20;
   transform: none;
 }
 
+#app.inspector-closed {
+  grid-template-columns: minmax(0, 1fr) 0 !important;
+}
+
+#app.inspector-closed #inspector {
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  max-height: none;
+}
+
+#app.inspector-closed #inspector-body {
+  display: none;
+}
+
 #app.inspector-closed #inspector-toggle {
+  position: fixed;
+  top: 43px;
   right: 12px;
+  left: auto;
   transform: rotate(180deg);
 }
 
@@ -1145,10 +1177,18 @@ body[data-theme]:not([data-theme="aurora"]) .inline-import .import-kind {
   stroke-width: 2.35;
   stroke-linecap: round;
   stroke-linejoin: round;
+  stroke-linecap: round;
   stroke-dasharray: 5 8;
-  animation: trace-drift 1.25s linear infinite;
-  animation-delay: var(--delay, 0s);
   filter: none;
+}
+.wire.moving {
+  animation: trace-drift 2.8s linear infinite;
+  animation-delay: var(--delay, 0s);
+}
+.wire.static {
+  animation: none;
+  stroke-dasharray: 4 7;
+  opacity: .88;
 }
 
 .wire.calls,
@@ -1167,7 +1207,7 @@ body[data-theme]:not([data-theme="aurora"]) .inline-import .import-kind {
   opacity: .72;
 }
 
-.wire.flow-stage {
+.wire.flow-stage.moving {
   opacity: .94;
   stroke-width: 2.85;
   animation-duration: 1.05s;
@@ -1453,7 +1493,6 @@ body[data-theme]:not([data-theme="aurora"]) .inline-import .import-kind {
 
 .frame.float:hover,
 .frame.float.hot {
-  transform: translateY(-1px);
   z-index: 5;
 }
 
@@ -1603,7 +1642,8 @@ body[data-theme]:not([data-theme="aurora"]) .inline-import .import-kind {
 .frame-canvas.float-canvas {
   position: relative;
   padding: 8px;
-  overflow: visible;
+  overflow: hidden;
+  min-width: 0;
 }
 .frame-source { padding: 8px 10px 10px; }
 .frame-fn .source,
@@ -1705,6 +1745,10 @@ body[data-theme]:not([data-theme="aurora"]) .frame-title b { color: var(--ink); 
   z-index: 40;
   transition: none;
   box-shadow: 0 22px 48px color-mix(in srgb, var(--ink) 18%, transparent);
+}
+.frame.float.drop-target {
+  outline: 2px solid color-mix(in srgb, var(--green) 55%, transparent);
+  outline-offset: 3px;
 }
 
 /* —— Code-flow overlay (near full-bleed) —— */
@@ -1896,4 +1940,232 @@ body[data-theme]:not([data-theme="aurora"]) .frame-title b { color: var(--ink); 
   }
   .flow-col { min-height: 200px; }
   .flow-overlay { height: calc(100vh - 8px); width: calc(100vw - 8px); border-radius: 10px; }
+}
+
+/* —— Calm island motion: slow, no bounce —— */
+/* Position offsets use CSS `translate` only — never re-apply --ox/--oy in
+   transform keyframes (that doubled the offset and jumped when drag paused animation). */
+@keyframes float-breathe {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+@keyframes calm-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes jelly-wobble {
+  0% { transform: scale(1, 1); }
+  35% { transform: scale(calc(1 + 0.018 * var(--jelly, 1)), calc(1 - 0.014 * var(--jelly, 1))); }
+  70% { transform: scale(calc(1 - 0.01 * var(--jelly, 1)), calc(1 + 0.008 * var(--jelly, 1))); }
+  100% { transform: scale(1, 1); }
+}
+.frame.float {
+  animation: float-breathe 16s ease-in-out infinite;
+  animation-delay: calc(var(--float-delay, 0) * 1ms);
+  transition:
+    left 2.8s cubic-bezier(.2, .05, .2, 1),
+    top 2.8s cubic-bezier(.2, .05, .2, 1),
+    width 2.4s cubic-bezier(.2, .05, .2, 1),
+    height 2.4s cubic-bezier(.2, .05, .2, 1),
+    box-shadow .7s ease,
+    border-color .55s ease,
+    background .8s ease,
+    transform 2.8s cubic-bezier(.2, .05, .2, 1);
+}
+.frame.float.flipping {
+  animation: none;
+  transition: transform 2.4s cubic-bezier(.22, .08, .25, 1) !important;
+  will-change: transform;
+}
+.frame.float.calm-in {
+  animation: calm-in 1.6s ease both;
+}
+.frame.float.jelly-wobble {
+  animation: jelly-wobble 1.25s ease-in-out both;
+}
+.frame.float.dragging {
+  animation: none !important;
+  transition: none !important;
+}
+.frame.float.deforming,
+.frame-folder.deforming {
+  transition:
+    width 1.8s cubic-bezier(.22, .08, .25, 1),
+    height 1.8s cubic-bezier(.22, .08, .25, 1),
+    box-shadow .5s ease;
+}
+.frame.float.trace-lit {
+  animation: float-breathe 18s ease-in-out infinite;
+}
+.frame-folder.synthetic-root {
+  border-style: dashed;
+}
+.frame-canvas.float-canvas {
+  transition: height 2.1s cubic-bezier(.22, .08, .25, 1);
+}
+body.reduce-motion .frame.float,
+body.reduce-motion .frame.float.trace-lit,
+body.reduce-motion .frame.float.jelly-wobble,
+body.reduce-motion .frame.float.calm-in {
+  animation: none !important;
+  transition: opacity .2s ease, box-shadow .2s ease !important;
+}
+body.reduce-motion .wire {
+  animation: none !important;
+}
+
+.wire {
+  stroke: color-mix(in srgb, var(--wire, var(--green)) 82%, var(--ink));
+}
+.wire.moving {
+  animation: trace-drift 2.8s linear infinite;
+}
+
+/* —— Structure / diff / agent reveal —— */
+.inspect-structure {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+.struct-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.struct-row.muted { opacity: .75; }
+.struct-jump {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper) 70%, transparent);
+  text-align: left;
+  font: 600 11px/1.3 Sora, sans-serif;
+}
+.struct-jump span { min-width: 0; overflow-wrap: anywhere; }
+.struct-jump em {
+  font: 800 9px/1 "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--muted);
+  font-style: normal;
+}
+.file-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 18px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--glyph, var(--node)) 18%, transparent);
+  color: color-mix(in srgb, var(--glyph, var(--node)) 80%, var(--ink));
+  font: 800 8px/1 "IBM Plex Mono", ui-monospace, monospace;
+  flex-shrink: 0;
+}
+.folder-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  color: var(--accent, var(--green));
+  flex-shrink: 0;
+}
+.inspect-diff-panel {
+  margin-top: 4px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.diff-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  background: color-mix(in srgb, var(--paper) 55%, transparent);
+}
+.diff-head b {
+  font: 800 9px/1 "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: .08em;
+}
+#diff-meta {
+  font: 600 9px/1.3 "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+.inspect-diff {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  font: 500 10px/1.45 "IBM Plex Mono", ui-monospace, monospace;
+  white-space: pre-wrap;
+}
+.diff-line { display: block; }
+.diff-line.add { background: color-mix(in srgb, var(--green) 14%, transparent); }
+.diff-line.remove { background: color-mix(in srgb, #c0392b 12%, transparent); }
+.diff-line.hunk { color: var(--blue); }
+.frame-file.agent-editing {
+  animation: pulse-hit 1.4s ease-out infinite;
+}
+.setting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+}
+.setting-row output { min-width: 28px; text-align: right; }
+
+/* —— Flow overlay body + wires —— */
+.flow-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.flow-wires {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+.flow-body .flow-columns {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+}
+.tok-kw { color: var(--green); font-weight: 700; }
+.tok-str { color: var(--amber); }
+.tok-cm { color: var(--muted); }
+.tok-num { color: var(--blue); }
+.tok-fn { color: color-mix(in srgb, var(--teal) 70%, var(--ink)); }
+.flow-line.hit-edge {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  box-shadow: inset 3px 0 var(--green);
+}
+.flow-connect {
+  margin-top: 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.flow-connect header {
+  padding: 4px 8px;
+  font: 700 9px/1 "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--paper) 60%, transparent);
+}
+.flow-connect .flow-code {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 6px 8px;
 }

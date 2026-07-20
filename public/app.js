@@ -72,6 +72,10 @@ let layoutAnchorIds = new Set();
 /** Focus/trace align owns motion - skip pack snap, FLIP, and soft-settle fights. */
 let alignMotionPending = false;
 let softSettleToken = 0;
+/** Trail of nodes visited inside the three-plane flow overlay. */
+let flowTrail = [];
+let flowTrailIndex = -1;
+let flowNavCache = { upstream: [], downstream: [] };
 
 const FLOW_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits', 'imports', 'references', 'reexports']);
 const WALK_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits']);
@@ -271,10 +275,16 @@ function hasTrace(item) {
   if (item.kind === 'folder') return filesBelow(item).some(hasTrace);
   return false;
 }
-// Selection, pins, or hover preview drive which wires are live.
+// Selection or pins drive committed flow. Hover never counts (preview wires only).
 function traceActive() {
   const item = selected();
   return !!(item && (item.kind === 'file' || item.kind === 'module' || item.kind === 'folder')) || pinned.size > 0 || !!hoverId;
+}
+/** True only for click/pin focus — never for hover preview. */
+function hasCommittedTraceFocus() {
+  if (pinned.size) return true;
+  const item = selected();
+  return !!(item && (item.kind === 'file' || item.kind === 'module' || item.kind === 'folder'));
 }
 function exitFlow() {
   flowMode = false;
@@ -613,14 +623,14 @@ function requestLayoutSettle(item) {
   basePlacements.clear();
   basePlacementKey = '';
 }
-function expandAncestors(item, { autoReveal = true } = {}) {
+function expandAncestors(item) {
   if (!item) return;
-  // Only open ancestor folders so a collapse isn't immediately undone.
+  // Open the full ancestor chain so deep files (and their modules) stay visible.
   for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
   const root = displayRootRaw();
   if (item.kind === 'file' && item.parentId === root?.id) expandedFolders.add(SYNTHETIC_ROOT_ID);
-  // Depth prune is for auto-reveal only. Manual open can go as deep as needed.
-  if (autoReveal) pruneFolderDepth(2);
+  // Keep root + top-level shelves open; never collapse deep folders we just revealed.
+  ensureTopLevelFoldersOpen();
 }
 /** Prefer the inner workspace when a single wrapper folder was uploaded. */
 function displayRoot() {
@@ -651,8 +661,8 @@ function folderDepthFrom(root, item) {
   for (let cursor = item; cursor && cursor.id !== root.id; cursor = node(cursor.parentId)) depth += 1;
   return depth;
 }
-/** Keep level-1 open. Optional maxDepth is only for auto-reveal paths. */
-function pruneFolderDepth(maxDepth = null) {
+/** Keep the display root and its immediate folder shelves open. No depth ceiling. */
+function ensureTopLevelFoldersOpen() {
   const root = displayRoot();
   if (!root) return;
   expandedFolders.add(root.id);
@@ -660,13 +670,10 @@ function pruneFolderDepth(maxDepth = null) {
   for (const child of topLevelItems(root)) {
     if (child.kind === 'folder') expandedFolders.add(child.id);
   }
-  if (maxDepth == null) return;
-  for (const id of [...expandedFolders]) {
-    if (id === SYNTHETIC_ROOT_ID) continue;
-    const item = node(id);
-    if (!item || item.kind !== 'folder') continue;
-    if (folderDepthFrom(root, item) > maxDepth) expandedFolders.delete(id);
-  }
+}
+/** @deprecated Use ensureTopLevelFoldersOpen — kept as alias for older call sites. */
+function pruneFolderDepth(_maxDepth = null) {
+  ensureTopLevelFoldersOpen();
 }
 function toggleFolder(id) {
   const item = node(id);
@@ -681,7 +688,6 @@ function toggleFolder(id) {
       if (child.kind === 'folder') expandedFolders.delete(child.id);
     }
   } else {
-    // Manual open: no depth cap. Auto-reveal still uses pruneFolderDepth(2).
     expandedFolders.add(id);
   }
 }
@@ -696,13 +702,21 @@ function ensureDefaultOutlineExpanded() {
 }
 function captureFlip() {
   // Clear in-flight FLIP transforms so we don't sample mid-animation positions.
-  scene.querySelectorAll('.frame.float.flipping').forEach(el => {
-    el.classList.remove('flipping');
+  scene.querySelectorAll('.frame.float.flipping, .frame.float.size-morph').forEach(el => {
+    el.classList.remove('flipping', 'size-morph');
     el.style.transform = '';
   });
   const map = new Map();
   scene.querySelectorAll('.frame.float[data-drag-id]').forEach(el => {
-    map.set(el.dataset.dragId, el.getBoundingClientRect());
+    const rect = el.getBoundingClientRect();
+    const canvas = el.querySelector(':scope > .frame-canvas');
+    map.set(el.dataset.dragId, {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+      canvasH: canvas ? canvas.offsetHeight : 0
+    });
   });
   return map;
 }
@@ -712,30 +726,60 @@ function playFlip(before) {
     return;
   }
   if (!before?.size || document.body.classList.contains('reduce-motion')) return;
+  const scale = Math.max(0.01, canvas?.scale || 1);
   scene.querySelectorAll('.frame.float[data-drag-id]').forEach((el, index) => {
     const id = el.dataset.dragId;
+    const nested = el.classList.contains('frame-fn') || el.parentElement?.classList.contains('frame-canvas');
     el.style.setProperty('--float-delay', String((hashHue(id) % 1200)));
     el.style.setProperty('--inertia', String(index % 7));
     const prev = before.get(id);
     if (!prev) {
-      el.classList.add('calm-in');
+      // Fresh modules/files fade in instead of popping.
+      el.classList.add(nested ? 'nest-arrive' : 'calm-in');
       return;
     }
     const next = el.getBoundingClientRect();
     const dx = prev.left - next.left;
     const dy = prev.top - next.top;
-    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+    const prevW = prev.width / scale;
+    const prevH = prev.height / scale;
+    const nextW = el.offsetWidth;
+    const nextH = el.offsetHeight;
+    const moved = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
+    const resized = Math.abs(prevW - nextW) >= 2 || Math.abs(prevH - nextH) >= 2;
+    if (!moved && !resized) return;
+    const canvasEl = el.querySelector(':scope > .frame-canvas');
+    const nextCanvasH = canvasEl ? canvasEl.offsetHeight : 0;
     el.classList.add('flipping');
-    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    if (resized) {
+      el.classList.add('size-morph');
+      el.style.width = `${prevW}px`;
+      el.style.height = `${prevH}px`;
+      if (canvasEl && prev.canvasH > 0) {
+        canvasEl.style.height = `${prev.canvasH}px`;
+      }
+    }
+    if (moved) el.style.transform = `translate(${dx}px, ${dy}px)`;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        if (resized) {
+          el.style.width = `${nextW}px`;
+          el.style.height = `${nextH}px`;
+          if (canvasEl) {
+            canvasEl.style.height = nextCanvasH ? `${nextCanvasH}px` : '';
+          }
+        }
         el.style.transform = '';
-        const done = () => {
-          el.classList.remove('flipping');
+        const done = (event) => {
+          if (event?.propertyName && event.propertyName !== 'transform'
+            && event.propertyName !== 'width' && event.propertyName !== 'height') return;
+          el.classList.remove('flipping', 'size-morph');
           el.removeEventListener('transitionend', done);
         };
         el.addEventListener('transitionend', done);
-        setTimeout(done, 4000);
+        setTimeout(() => {
+          el.classList.remove('flipping', 'size-morph');
+        }, 5000);
       });
     });
   });
@@ -888,6 +932,8 @@ function softSettleNeighbors(islandId, islandEl, { duration = 1600 } = {}) {
   for (const other of topLevelIslandElements()) {
     const otherId = other.dataset.dragId;
     if (otherId === islandId) continue;
+    // Focused parent island never yields — others assemble around it.
+    if (isLockedFocusIsland(otherId)) continue;
     const cur = offsets.get(otherId) || { x: 0, y: 0 };
     movers.push({ id: otherId, el: other, from: { ...cur }, to: { ...cur } });
   }
@@ -1017,11 +1063,28 @@ function softSettleNested(draggedId, parentId, { duration = 1500 } = {}) {
     }
     if (!hit) break;
   }
-  // Keep chips inside the canvas with a little pad.
+  // Grow parent around the dragged chip — do not clamp it back inside.
   const pad = 12;
-  const maxX = Math.max(canvasEl.clientWidth, ...movers.map(m => m.to.x + m.el.offsetWidth), (parseFloat(mine.style.left) || 0) + mine.offsetWidth) + pad;
-  const maxY = Math.max(canvasEl.clientHeight, ...movers.map(m => m.to.y + m.el.offsetHeight), (parseFloat(mine.style.top) || 0) + mine.offsetHeight) + pad;
+  let mineX = parseFloat(mine.style.left) || 0;
+  let mineY = parseFloat(mine.style.top) || 0;
+  const enc = encapsulateNestedChild(parentEl, canvasEl, mine, mineX, mineY, { skipId: draggedId });
+  mineX = enc.x ?? mineX;
+  mineY = enc.y ?? mineY;
+  mine.style.left = `${mineX}px`;
+  mine.style.top = `${mineY}px`;
+  nestedSeats.set(draggedId, { x: mineX, y: mineY });
+  const maxX = Math.max(
+    canvasEl.clientWidth,
+    ...movers.map(m => m.to.x + m.el.offsetWidth),
+    mineX + mine.offsetWidth
+  ) + pad;
+  const maxY = Math.max(
+    canvasEl.clientHeight,
+    ...movers.map(m => m.to.y + m.el.offsetHeight),
+    mineY + mine.offsetHeight
+  ) + pad;
   for (const m of movers) {
+    // Siblings may sit near the rim; keep a little pad without yanking the dragged chip.
     m.to.x = Math.max(pad, m.to.x);
     m.to.y = Math.max(pad, m.to.y);
   }
@@ -1067,10 +1130,68 @@ function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH) {
   const headerH = header?.offsetHeight || 54;
   const pad = 16;
   const needW = Math.max(parentEl.offsetWidth, Math.ceil((contentW || canvasEl.scrollWidth) + pad));
-  const needH = Math.ceil(headerH + (contentH || canvasEl.scrollHeight) + 12);
+  const needH = Math.ceil(headerH + Math.max(64, contentH || canvasEl.scrollHeight) + 12);
   parentEl.style.width = `${needW}px`;
   canvasEl.style.height = `${Math.max(64, needH - headerH - 10)}px`;
   canvasEl.style.minHeight = canvasEl.style.height;
+}
+/** Shift nested seats/DOM when the canvas origin moves left/up to encapsulate a child. */
+function shiftNestedCanvasOrigin(parentEl, canvasEl, skipId, shiftX, shiftY) {
+  if (!parentEl || !canvasEl || (!shiftX && !shiftY)) return;
+  for (const el of canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')) {
+    const kidId = el.dataset.dragId;
+    const left = (parseFloat(el.style.left) || 0) + shiftX;
+    const top = (parseFloat(el.style.top) || 0) + shiftY;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    if (kidId === skipId) continue;
+    const seat = nestedSeats.get(kidId);
+    if (seat) nestedSeats.set(kidId, { x: seat.x + shiftX, y: seat.y + shiftY });
+    else if (userArranged.has(kidId)) nestedSeats.set(kidId, { x: left, y: top });
+  }
+  // Parent island moves opposite so the rest of the world stays put while the
+  // canvas grows left/up around the dragged chip.
+  const parentId = parentEl.dataset.dragId;
+  if (!parentId) return;
+  const islandId = dragIslandId(parentId);
+  if (islandId === parentId) {
+    const off = offsets.get(islandId) || { x: 0, y: 0 };
+    const next = { x: off.x - shiftX, y: off.y - shiftY };
+    offsets.set(islandId, next);
+    parentEl.style.translate = `${next.x}px ${next.y}px`;
+    parentEl.style.setProperty('--ox', `${next.x}px`);
+    parentEl.style.setProperty('--oy', `${next.y}px`);
+  } else {
+    // Parent itself is nested — nudge its seat the same way.
+    const seat = nestedSeats.get(parentId) || {
+      x: parseFloat(parentEl.style.left) || 0,
+      y: parseFloat(parentEl.style.top) || 0
+    };
+    const next = { x: seat.x - shiftX, y: seat.y - shiftY };
+    userArranged.add(parentId);
+    nestedSeats.set(parentId, next);
+    parentEl.style.left = `${next.x}px`;
+    parentEl.style.top = `${next.y}px`;
+  }
+}
+/** Grow/shift the parent folder so a nested child stays encapsulated. */
+function encapsulateNestedChild(parentEl, canvasEl, childEl, childX, childY, { skipId = null } = {}) {
+  if (!parentEl || !canvasEl || !childEl) return { shiftX: 0, shiftY: 0 };
+  const pad = 14;
+  let shiftX = 0;
+  let shiftY = 0;
+  if (childX < pad) shiftX = pad - childX;
+  if (childY < pad) shiftY = pad - childY;
+  if (shiftX || shiftY) shiftNestedCanvasOrigin(parentEl, canvasEl, skipId, shiftX, shiftY);
+  const x = childX + shiftX;
+  const y = childY + shiftY;
+  reshapeParentCanvas(
+    parentEl,
+    canvasEl,
+    x + childEl.offsetWidth + pad,
+    y + childEl.offsetHeight + pad
+  );
+  return { shiftX, shiftY, x, y };
 }
 function clearNestDragChrome() {
   scene.querySelectorAll('.nest-drop-active, .nest-canvas-active').forEach(el => {
@@ -1112,15 +1233,22 @@ function softGravityStep(pass) {
     return;
   }
   const scale = Math.max(.35, canvas.scale || 1);
+  const lockedId = lockedFocusIslandId();
   for (const A of centers) {
     A.far = islandFarFromView(A.rect);
+    A.locked = lockedId && A.item.id === lockedId;
     // Only far-off islands drift to the park rim just outside the view.
     // Never park-pull anything still in (or near) the viewfinder.
-    if (!A.far) continue;
+    // Focused parent island never parks or drifts.
+    if (!A.far || A.locked) continue;
     const { pullX, pullY } = pullTowardViewField(A.rect);
     if (Math.abs(pullX) < 2 && Math.abs(pullY) < 2) continue;
-    const stepX = clampGravityStep(pullX, scale, 0.032, 2.4);
-    const stepY = clampGravityStep(pullY, scale, 0.032, 2.4);
+    // Long-distance strays catch the rim faster; near-rim stays gentle.
+    const dist = Math.hypot(pullX, pullY);
+    const speed = dist > 900 ? 0.09 : dist > 420 ? 0.055 : 0.034;
+    const maxStep = dist > 900 ? 9.5 : dist > 420 ? 5.2 : 2.6;
+    const stepX = clampGravityStep(pullX, scale, speed, maxStep);
+    const stepY = clampGravityStep(pullY, scale, speed, maxStep);
     if (Math.abs(stepX) < 0.05 && Math.abs(stepY) < 0.05) continue;
     applyIslandTranslate(A, { x: A.off.x + stepX, y: A.off.y + stepY });
     A.far = islandFarFromView(A.rect);
@@ -1134,9 +1262,22 @@ function softGravityStep(pass) {
       if (!rectsOverlap(A.rect, B.rect, ISLAND_GAP)) continue;
       const { dx, dy } = separationPush(A.rect, B.rect);
       if (!dx && !dy) continue;
-      const aPinned = pinnedLayout.has(A.item.id);
-      const bPinned = pinnedLayout.has(B.item.id);
+      const aPinned = pinnedLayout.has(A.item.id) || A.locked;
+      const bPinned = pinnedLayout.has(B.item.id) || B.locked;
       const aFar = A.far, bFar = B.far;
+      // Focused island never moves — the other yields fully.
+      if (A.locked && !B.locked) {
+        applyIslandTranslate(B, { x: B.off.x - dx / scale, y: B.off.y - dy / scale });
+        B.far = islandFarFromView(B.rect);
+        moved = true;
+        continue;
+      }
+      if (B.locked && !A.locked) {
+        applyIslandTranslate(A, { x: A.off.x + dx / scale, y: A.off.y + dy / scale });
+        A.far = islandFarFromView(A.rect);
+        moved = true;
+        continue;
+      }
       // Stray vs view: park physics owns the stray - don't migrate the view island.
       if (aFar !== bFar) {
         const stray = aFar ? A : B;
@@ -1144,7 +1285,7 @@ function softGravityStep(pass) {
         const sx = (dx / scale) * sign;
         const sy = (dy / scale) * sign;
         if (Math.abs(sx) < 0.04 && Math.abs(sy) < 0.04) continue;
-        if (!pinnedLayout.has(stray.item.id)) {
+        if (!pinnedLayout.has(stray.item.id) && !stray.locked) {
           applyIslandTranslate(stray, { x: stray.off.x + sx, y: stray.off.y + sy });
           stray.far = islandFarFromView(stray.rect);
           moved = true;
@@ -1176,8 +1317,105 @@ function softGravityStep(pass) {
       B.far = islandFarFromView(B.rect);
     }
   }
-  // No continuous attract inside the viewfinder - that was yanking seated
-  // islands toward strays / each other and felt like reversed park gravity.
+  // Pull along committed trace only (never hover). Keep partners on the
+  // correct side of focus and stop yanking when already close.
+  if (hasCommittedTraceFocus() && !hoverPreviewTrace()) {
+    const byId = new Map(centers.map(c => [c.item.id, c]));
+    const focusTopId = lockedFocusIslandId() || topLevelOwner(fileOf(selected()) || selected())?.id || null;
+    const focusC = focusTopId ? byId.get(focusTopId) : null;
+    const live = traceEdges;
+    const MIN_GAP = 56;   // stop pulling once this close
+    const COMFORT = 110;  // start pulling when farther than this
+    const seen = new Set();
+    if (focusC && !focusC.far) {
+      for (const edge of edgeTypes()) {
+        if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
+        if (!live.has(edge.id)) continue;
+        const aTop = topLevelOwner(fileOf(node(edge.from)) || node(edge.from));
+        const bTop = topLevelOwner(fileOf(node(edge.to)) || node(edge.to));
+        if (!aTop || !bTop || aTop.id === bTop.id) continue;
+        // Only edges that touch the focused island — avoid scrambling side chains.
+        const focusIsEmitter = aTop.id === focusTopId;
+        const focusIsReceiver = bTop.id === focusTopId;
+        if (!focusIsEmitter && !focusIsReceiver) continue;
+        const partnerTop = focusIsEmitter ? bTop : aTop;
+        const pairKey = `${focusTopId}:${partnerTop.id}:${focusIsEmitter ? 'out' : 'in'}`;
+        if (seen.has(pairKey)) continue;
+        seen.add(pairKey);
+        const partner = byId.get(partnerTop.id);
+        if (!partner || partner.far) continue;
+        if (partner.locked || pinnedLayout.has(partner.item.id)) continue;
+        const wantRight = focusIsEmitter; // focus emits → partner is receiver → right
+        const fCx = focusC.rect.left + focusC.rect.width / 2;
+        const pCx = partner.rect.left + partner.rect.width / 2;
+        const fCy = focusC.rect.top + focusC.rect.height / 2;
+        const pCy = partner.rect.top + partner.rect.height / 2;
+        const gap = wantRight
+          ? partner.rect.left - focusC.rect.right
+          : focusC.rect.left - partner.rect.right;
+        const onWrongSide = wantRight ? pCx <= fCx + 12 : pCx >= fCx - 12;
+        // 1) Full-ish side repair when clearly on the wrong side of focus.
+        if (onWrongSide) {
+          const fix = Math.min(4.5, 1.6 + Math.abs(pCx - fCx) * 0.02) / scale;
+          applyIslandTranslate(partner, {
+            x: partner.off.x + (wantRight ? fix : -fix),
+            y: partner.off.y + Math.max(-0.8, Math.min(0.8, (fCy - pCy) * 0.01 / scale))
+          });
+          moved = true;
+          continue; // don't also pull this frame — avoids jumble
+        }
+        // 2) Pull closer only when there's clear air; never when overlapping/tight.
+        if (gap > COMFORT) {
+          const step = Math.min(1.8, (gap - COMFORT) * 0.02) / scale;
+          const vy = Math.max(-0.9, Math.min(0.9, (fCy - pCy) * 0.012 / scale));
+          applyIslandTranslate(partner, {
+            x: partner.off.x + (wantRight ? -step : step),
+            y: partner.off.y + vy
+          });
+          moved = true;
+        } else if (gap < MIN_GAP && gap > -40) {
+          // Gentle breathe apart when too tight (no thrash on deep overlap).
+          const step = Math.min(1.2, (MIN_GAP - gap) * 0.04) / scale;
+          applyIslandTranslate(partner, {
+            x: partner.off.x + (wantRight ? step : -step),
+            y: partner.off.y
+          });
+          moved = true;
+        }
+      }
+      // 3) Non-trace islands in a wide focus↔partner corridor yield aside.
+      for (const partner of centers) {
+        if (partner.item.id === focusTopId || partner.far) continue;
+        if (!hasTrace(partner.item)) continue;
+        const gap = Math.min(
+          Math.abs(partner.rect.left - focusC.rect.right),
+          Math.abs(focusC.rect.left - partner.rect.right)
+        );
+        if (gap < MIN_GAP) continue; // corridor too tight — don't shove extras
+        const left = Math.min(focusC.rect.left, partner.rect.left) - 4;
+        const right = Math.max(focusC.rect.right, partner.rect.right) + 4;
+        const top = Math.min(focusC.rect.top, partner.rect.top) + 8;
+        const bottom = Math.max(focusC.rect.bottom, partner.rect.bottom) - 8;
+        if (bottom - top < 40) continue;
+        for (const mid of centers) {
+          if (mid.item.id === focusTopId || mid.item.id === partner.item.id) continue;
+          if (mid.far || mid.locked || pinnedLayout.has(mid.item.id)) continue;
+          if (hasTrace(mid.item)) continue;
+          const mx = mid.rect.left + mid.rect.width / 2;
+          const my = mid.rect.top + mid.rect.height / 2;
+          if (mx < left || mx > right || my < top || my > bottom) continue;
+          const up = my - top;
+          const down = bottom - my;
+          const push = Math.min(1.8, 0.8 + Math.min(up, down) * 0.015) / scale;
+          applyIslandTranslate(mid, {
+            x: mid.off.x,
+            y: mid.off.y + (up <= down ? -push : push)
+          });
+          moved = true;
+        }
+      }
+    }
+  }
   if (moved) scheduleDraw();
   gravityTimer = setTimeout(() => softGravityStep(0), moved ? 110 : 280);
 }
@@ -1210,17 +1448,24 @@ function cancelTraceAlign() {
     el.style.zIndex = '';
   });
   scene?.classList.remove('trace-aligning');
+  // Viewfinder park gravity must keep running after align is cancelled.
+  scheduleGravityDrift(220);
 }
 function stripFlipTransforms() {
-  scene?.querySelectorAll('.frame.flipping, .frame.jelly-wobble').forEach(el => {
-    el.classList.remove('flipping', 'jelly-wobble');
+  scene?.querySelectorAll('.frame.flipping, .frame.size-morph, .frame.jelly-wobble').forEach(el => {
+    el.classList.remove('flipping', 'size-morph', 'jelly-wobble');
     el.style.transform = '';
   });
 }
 /** Directed island→island links from the live trace (for flow ranking). */
-function traceIslandLinks(islandIds) {
-  const live = activeTraceEdges();
-  const idSet = islandIds instanceof Set ? islandIds : new Set(islandIds);
+function traceIslandLinks(islandIds, edgeSet = null) {
+  // Layout always uses committed trace edges — never hover preview.
+  const live = edgeSet || traceEdges;
+  const idSet = islandIds instanceof Set
+    ? islandIds
+    : islandIds instanceof Map
+      ? new Set(islandIds.keys())
+      : new Set(islandIds);
   const links = [];
   for (const edge of edgeTypes()) {
     if (!live.has(edge.id)) continue;
@@ -1247,7 +1492,8 @@ function bfsDist(adj, start) {
 }
 /**
  * Slow post-click layout: rank traced islands upstream←focus→downstream,
- * stack columns to cut crossings, ease offsets (focus stays put).
+ * barycenter-sort to cut crossings, compact hop distances, ease offsets
+ * (focus stays put). Blends ideal seats with current seats so travel stays calm.
  */
 function computeTraceAlignMovers() {
   const focus = selected();
@@ -1267,24 +1513,51 @@ function computeTraceAlignMovers() {
   const links = traceIslandLinks(byId);
   const outAdj = new Map(boxes.map(box => [box.id, []]));
   const inAdj = new Map(boxes.map(box => [box.id, []]));
+  const linkCount = new Map(boxes.map(box => [box.id, 0]));
   for (const link of links) {
     outAdj.get(link.from)?.push(link.to);
     inAdj.get(link.to)?.push(link.from);
+    linkCount.set(link.from, (linkCount.get(link.from) || 0) + 1);
+    linkCount.set(link.to, (linkCount.get(link.to) || 0) + 1);
   }
   const outDist = bfsDist(outAdj, focusTop.id);
   const inDist = bfsDist(inAdj, focusTop.id);
   const focusBox = byId.get(focusTop.id);
   const focusCx = focusBox.x + focusBox.w / 2;
+  const focusCy = focusBox.y + focusBox.h / 2;
+  // Directed roles vs focus: emitters (feed into focus) LEFT, receivers RIGHT.
+  const emitsIntoFocus = new Set(); // other → focus
+  const receivesFromFocus = new Set(); // focus → other
+  for (const link of links) {
+    if (link.to === focusTop.id) emitsIntoFocus.add(link.from);
+    if (link.from === focusTop.id) receivesFromFocus.add(link.to);
+  }
   const rank = new Map();
   for (const box of boxes) {
     if (box.id === focusTop.id) {
       rank.set(box.id, 0);
       continue;
     }
-    const hasOut = outDist.has(box.id);
-    const hasIn = inDist.has(box.id);
-    if (hasOut || hasIn) {
-      rank.set(box.id, (hasOut ? outDist.get(box.id) : 0) - (hasIn ? inDist.get(box.id) : 0));
+    const od = outDist.get(box.id);
+    const id = inDist.get(box.id);
+    const isEmitter = emitsIntoFocus.has(box.id);
+    const isReceiver = receivesFromFocus.has(box.id);
+    // Prefer directed reachability from focus over current geometry so wrong-side
+    // nodes actually get a corrective seat instead of locking in place.
+    if (isEmitter && !isReceiver) {
+      rank.set(box.id, -(id || 1));
+    } else if (isReceiver && !isEmitter) {
+      rank.set(box.id, od || 1);
+    } else if (id != null && od == null) {
+      rank.set(box.id, -id);
+    } else if (od != null && id == null) {
+      rank.set(box.id, od);
+    } else if (isEmitter && isReceiver) {
+      // Bidirectional with focus: keep current side so we don't thrash.
+      rank.set(box.id, box.x + box.w / 2 <= focusCx ? -1 : 1);
+    } else if (od != null && id != null) {
+      // Multi-hop both ways: prefer upstream (left) when hops are equal.
+      rank.set(box.id, id <= od ? -id : od);
     } else {
       rank.set(box.id, box.x + box.w / 2 < focusCx ? -1 : 1);
     }
@@ -1296,7 +1569,8 @@ function computeTraceAlignMovers() {
     list.push(box);
     columns.set(r, list);
   }
-  const neighborY = id => {
+  // Barycenter sort using live neighbor centers (then world seats once placed).
+  const neighborY = (id, seats) => {
     const neigh = [...(outAdj.get(id) || []), ...(inAdj.get(id) || [])];
     if (!neigh.length) {
       const box = byId.get(id);
@@ -1304,21 +1578,46 @@ function computeTraceAlignMovers() {
     }
     let sum = 0, n = 0;
     for (const nid of neigh) {
+      const seat = seats?.get(nid);
       const nb = byId.get(nid);
-      if (!nb) continue;
-      sum += nb.y + nb.h / 2;
-      n += 1;
+      if (seat) {
+        sum += seat.y + seat.h / 2;
+        n += 1;
+      } else if (nb) {
+        sum += nb.y + nb.h / 2;
+        n += 1;
+      }
     }
-    return n ? sum / n : byId.get(id).y;
+    return n ? sum / n : byId.get(id).y + byId.get(id).h / 2;
   };
-  for (let iter = 0; iter < 5; iter++) {
+  for (let iter = 0; iter < 8; iter++) {
     for (const col of columns.values()) {
-      col.sort((a, b) => neighborY(a.id) - neighborY(b.id) || a.y - b.y || a.id.localeCompare(b.id));
+      col.sort((a, b) => neighborY(a.id) - neighborY(b.id)
+        || (linkCount.get(b.id) || 0) - (linkCount.get(a.id) || 0)
+        || a.y - b.y
+        || a.id.localeCompare(b.id));
     }
   }
-  const colGap = 64;
-  const rowGap = 40;
   const ranks = [...columns.keys()].sort((a, b) => a - b);
+  const hopSpan = Math.max(1, ...ranks.map(Math.abs));
+  // Closer hops sit nearer the focus; keep enough air so close packs don't thrash.
+  const colGapFor = r => {
+    const hop = Math.abs(r) || 1;
+    return Math.round(64 + hop * 12 + (hopSpan > 2 ? 8 : 0));
+  };
+  const rowGap = 40;
+  const enforceSideSeat = (seat, r) => {
+    if (!r) return seat;
+    const gap = colGapFor(r);
+    if (r < 0) {
+      const maxRight = focusBox.x - gap;
+      if (seat.x + seat.w > maxRight) seat.x = maxRight - seat.w;
+    } else {
+      const minLeft = focusBox.x + focusBox.w + gap;
+      if (seat.x < minLeft) seat.x = minLeft;
+    }
+    return seat;
+  };
   const colMeta = new Map();
   for (const r of ranks) {
     const col = columns.get(r);
@@ -1330,15 +1629,16 @@ function computeTraceAlignMovers() {
     colMeta.set(r, { w, h: Math.max(0, h - rowGap), col });
   }
   const colX = new Map([[0, focusBox.x]]);
-  let cursor = focusBox.x + focusBox.w + colGap;
+  let cursor = focusBox.x + focusBox.w;
   for (const r of ranks.filter(value => value > 0)) {
+    cursor += colGapFor(r);
     colX.set(r, cursor);
-    cursor += colMeta.get(r).w + colGap;
+    cursor += colMeta.get(r).w;
   }
   cursor = focusBox.x;
   for (const r of ranks.filter(value => value < 0).sort((a, b) => b - a)) {
     const meta = colMeta.get(r);
-    cursor -= colGap + meta.w;
+    cursor -= colGapFor(r) + meta.w;
     colX.set(r, cursor);
   }
   const world = new Map();
@@ -1359,23 +1659,80 @@ function computeTraceAlignMovers() {
       }
       continue;
     }
+    // Seed column vertically around focus, biased by barycenter of links.
     const meta = colMeta.get(r);
-    let y = focusBox.y + focusBox.h / 2 - meta.h / 2;
+    let bary = 0, bw = 0;
+    for (const box of col) {
+      bary += neighborY(box.id) * ((linkCount.get(box.id) || 0) + 1);
+      bw += (linkCount.get(box.id) || 0) + 1;
+    }
+    const targetMid = bw ? bary / bw : focusCy;
+    let y = targetMid - meta.h / 2;
+    // Prefer keeping the pack near the focus band when the column is short.
+    if (meta.h < focusBox.h * 2.4) {
+      y = focusCy - meta.h / 2;
+    }
     const x = colX.get(r);
     for (const box of col) {
       world.set(box.id, { x, y, w: box.w, h: box.h });
       y += box.h + rowGap;
     }
   }
+  // Wire-length refine: nudge each non-focus seat toward linked neighbors.
+  for (let pass = 0; pass < 10; pass++) {
+    for (const box of boxes) {
+      if (box.id === focusTop.id) continue;
+      const seat = world.get(box.id);
+      if (!seat) continue;
+      const neigh = [...(outAdj.get(box.id) || []), ...(inAdj.get(box.id) || [])];
+      if (!neigh.length) continue;
+      let sx = 0, sy = 0, n = 0;
+      for (const nid of neigh) {
+        const ns = world.get(nid);
+        if (!ns) continue;
+        sx += ns.x + ns.w / 2;
+        sy += ns.y + ns.h / 2;
+        n += 1;
+      }
+      if (!n) continue;
+      const tx = sx / n - seat.w / 2;
+      const ty = sy / n - seat.h / 2;
+      // Keep column X mostly intact; never let refine cross the focus column.
+      const r = rank.get(box.id) || 0;
+      const idealX = colX.get(r) ?? seat.x;
+      seat.x = idealX * 0.88 + tx * 0.12;
+      seat.y = seat.y * 0.45 + ty * 0.55;
+      enforceSideSeat(seat, r);
+      world.set(box.id, seat);
+    }
+    // Re-pack each column vertically after Y nudges (no overlap inside column).
+    for (const r of ranks) {
+      if (r === 0) continue;
+      const col = columns.get(r);
+      const seats = col.map(box => ({ id: box.id, ...world.get(box.id) }))
+        .sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
+      if (!seats.length) continue;
+      let y = seats[0].y;
+      for (let i = 0; i < seats.length; i++) {
+        if (i) y = Math.max(y, seats[i - 1].y + seats[i - 1].h + rowGap);
+        seats[i].y = y;
+        y = seats[i].y + seats[i].h + rowGap;
+        world.set(seats[i].id, { x: seats[i].x, y: seats[i].y, w: seats[i].w, h: seats[i].h });
+      }
+    }
+  }
   // Keep traced targets clear of each other after ranking.
   const movable = [...world.entries()].map(([id, box]) => ({ id, ...box }));
-  separateBoxes(movable, { gap: ISLAND_GAP + 8, passes: 24 });
+  separateBoxes(movable, { gap: ISLAND_GAP + 10, passes: 32, anchors: new Set([focusTop.id]) });
   for (const box of movable) world.set(box.id, { x: box.x, y: box.y, w: box.w, h: box.h });
-  // Focus island stays anchored (separateBoxes may have nudged it).
+  // Focus island stays anchored.
   world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
-  // Keep non-focus targets from overlapping the focus seat so they don't animate
-  // "into" it and linger underneath.
-  const focusPad = ISLAND_GAP + 12;
+  // Hard side lock (pass 1): emitters left of focus, receivers right.
+  for (const [id, seat] of [...world.entries()]) {
+    if (id === focusTop.id) continue;
+    world.set(id, enforceSideSeat(seat, rank.get(id) || 0));
+  }
+  const focusPad = ISLAND_GAP + 16;
   for (const [id, seat] of world) {
     if (id === focusTop.id) continue;
     const box = { ...seat };
@@ -1384,23 +1741,44 @@ function computeTraceAlignMovers() {
     if (ox <= -focusPad || oy <= -focusPad) continue;
     const penX = ox + focusPad;
     const penY = oy + focusPad;
-    if (penX < penY) {
-      box.x += (box.x + box.w / 2 <= focusBox.x + focusBox.w / 2) ? -(penX + .5) : (penX + .5);
+    const r = rank.get(id) || 0;
+    if (penX < penY || r) {
+      // Prefer correct flow side over nearest exit when role is known.
+      box.x += r < 0 ? -(penX + .5) : (penX + .5);
     } else {
       box.y += (box.y + box.h / 2 <= focusBox.y + focusBox.h / 2) ? -(penY + .5) : (penY + .5);
     }
-    world.set(id, box);
+    world.set(id, enforceSideSeat(box, r));
+  }
+  // Hard side lock (pass 2): re-assert after focus pad / separation drift.
+  for (const [id, seat] of [...world.entries()]) {
+    if (id === focusTop.id) continue;
+    world.set(id, enforceSideSeat({ ...seat }, rank.get(id) || 0));
   }
   const movers = [];
   for (const box of boxes) {
     if (box.id === focusTop.id) continue;
-    const target = world.get(box.id);
-    if (!target) continue;
-    const tx = target.x, ty = target.y;
+    const r = rank.get(box.id) || 0;
+    const ideal = enforceSideSeat({ ...(world.get(box.id) || box) }, r);
+    world.set(box.id, ideal);
+    const curCx = box.x + box.w / 2;
+    const idealCx = ideal.x + ideal.w / 2;
+    const wantSign = Math.sign(r) || Math.sign(idealCx - focusCx);
+    const curSign = Math.sign(curCx - focusCx);
+    // Near-center is NOT "ok" — wrong-side nodes need a full seat, not a soft blend.
+    const sideOk = !wantSign || curSign === wantSign;
+    const yErr = Math.abs((box.y + box.h / 2) - (ideal.y + ideal.h / 2));
+    const xErr = Math.abs(curCx - idealCx);
+    let blend = sideOk ? 0.72 : 1;
+    if (sideOk && xErr < 90 && yErr < 70) blend = 0.48;
+    else if (sideOk && xErr < 160) blend = 0.62;
+    const tx = sideOk ? box.x + (ideal.x - box.x) * blend : ideal.x;
+    const ty = sideOk ? box.y + (ideal.y - box.y) * blend : ideal.y;
     const dist = Math.hypot(tx - box.x, ty - box.y);
-    if (dist < 3) continue;
+    if (sideOk && dist < 4) continue;
+    if (!sideOk && dist < 1) continue;
     const to = { x: tx - box.left, y: ty - box.top };
-    if (Math.abs(to.x - box.off.x) < 2 && Math.abs(to.y - box.off.y) < 2) continue;
+    if (sideOk && Math.abs(to.x - box.off.x) < 2 && Math.abs(to.y - box.off.y) < 2) continue;
     movers.push({
       id: box.id,
       el: box.el,
@@ -1457,6 +1835,7 @@ function runTraceAlign(token) {
       if (focusEl) focusEl.style.zIndex = '';
       scene.classList.remove('trace-aligning');
       traceAlignRaf = 0;
+      scheduleGravityDrift(280);
       return;
     }
     const t = Math.min(1, (now - start) / duration);
@@ -1617,7 +1996,8 @@ function frameFileSize(file) {
     maxWidth: Math.max(720, header.w - 24),
     mode: layoutModes.get(file.id) || 'auto',
     persistLocals: true,
-    anchors: layoutAnchorIds
+    // Never pin modules to file/folder expand anchors - that skewed the shelf.
+    anchors: null
   });
   return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 12, headerH: header.h, children: packed.items };
 }
@@ -1633,7 +2013,8 @@ function frameFolderSize(item, depth = 0) {
   const packed = packBoxes(boxes, {
     gap: NESTED_GAP,
     pad: 20,
-    maxWidth: depth === 0 ? 1020 : 780,
+    // Prefer wide shelves so nested trees read left→right, not a deep stack.
+    maxWidth: depth === 0 ? 1280 : depth === 1 ? 980 : 760,
     mode: layoutModes.get(item.id) || 'auto',
     persistLocals: true,
     anchors: layoutAnchorIds
@@ -1788,6 +2169,15 @@ function softSettleAfterExpand(id, { duration = 1800 } = {}) {
   if (!islandEl) return;
   softSettleNeighbors(islandId, islandEl, { duration });
 }
+/** Shelf width that prefers a near-square grid of top-level islands. */
+function preferredShelfWidth(boxes, { gap = 28, pad = 40 } = {}) {
+  const n = Math.max(1, boxes.length);
+  const cols = Math.max(2, Math.ceil(Math.sqrt(n * 1.15)));
+  const avgW = boxes.reduce((sum, box) => sum + (box.w || 220), 0) / n;
+  const byContent = cols * (avgW + gap) + pad * 2;
+  const byViewport = Math.max(1100, (board?.clientWidth || 1100) * 1.45);
+  return Math.max(byContent, byViewport);
+}
 function buildFloatLayout(root) {
   floatPlacements.clear();
   const view = root || displayRoot();
@@ -1802,7 +2192,8 @@ function buildFloatLayout(root) {
     const size = child.kind === 'folder' || child.synthetic ? frameFolderSize(child, 0) : frameFileSize(child);
     return { id: child.id, item: child, w: size.w, h: size.h, size };
   });
-  const packed = packBoxes(top, { gap: ISLAND_GAP + 16, pad: 40, maxWidth: Math.max(960, board.clientWidth - 60) });
+  const shelfW = preferredShelfWidth(top, { gap: ISLAND_GAP + 16, pad: 40 });
+  const packed = packBoxes(top, { gap: ISLAND_GAP + 16, pad: 40, maxWidth: shelfW });
   for (const entry of packed.items) {
     const frozen = prevPacked.get(entry.id);
     // Preserve prior island seats across focus/defocus so related nodes don't
@@ -1813,10 +2204,13 @@ function buildFloatLayout(root) {
   // Focus/trace align owns sibling motion via offsets - keep shelf seats still
   // so pack/FLIP don't snap away then fight the slow align.
   if (!alignMotionPending) {
-    // Only the expanding frame (and its ancestors) stay fixed. Pinning must NOT
-    // freeze every island or expand/overlap physics dies after a few drags.
-    const topAnchors = layoutAnchorIds.size ? new Set(layoutAnchorIds) : null;
-    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 40, anchors: topAnchors });
+    // Focused parent island (and expand anchors) stay fixed; others yield.
+    const locked = lockedFocusIslandId();
+    const topAnchors = new Set([
+      ...(layoutAnchorIds.size ? layoutAnchorIds : []),
+      ...(locked ? [locked] : [])
+    ]);
+    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 40, anchors: topAnchors.size ? topAnchors : null });
     relaxTopLevel(packed.items, ISLAND_GAP);
   }
   let maxX = 0, maxY = 0;
@@ -1832,10 +2226,11 @@ function relaxTopLevel(items, pad) {
   if (items.length < 2) return;
   const byId = new Map(items.map(item => [item.id, item]));
   const focusSeeds = new Set(sourceSeeds(selected()));
+  const locked = lockedFocusIslandId();
   // Gentle clustering only - hard pulls made focus feel like a snap, and
   // clearing the trace made related islands jump away / off-screen.
   const passes = traceActive() ? 10 : 8;
-  const pinnedXY = new Map(items.filter(item => pinnedLayout.has(item.id)).map(item => [item.id, { x: item.x, y: item.y }]));
+  const pinnedXY = new Map(items.filter(item => pinnedLayout.has(item.id) || item.id === locked).map(item => [item.id, { x: item.x, y: item.y }]));
   for (let pass = 0; pass < passes; pass++) {
     for (const edge of edgeTypes()) {
       if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
@@ -1845,7 +2240,7 @@ function relaxTopLevel(items, pad) {
       const aTop = topLevelOwner(aFile);
       const bTop = topLevelOwner(bFile);
       if (!aTop || !bTop || aTop.id === bTop.id) continue;
-      if (pinnedLayout.has(aTop.id) && pinnedLayout.has(bTop.id)) continue;
+      if ((pinnedLayout.has(aTop.id) || aTop.id === locked) && (pinnedLayout.has(bTop.id) || bTop.id === locked)) continue;
       const A = byId.get(aTop.id), B = byId.get(bTop.id);
       if (!A || !B) continue;
       const related = focusSeeds.has(edge.from) || focusSeeds.has(edge.to) || hasTrace(aTop) || hasTrace(bTop);
@@ -1861,15 +2256,19 @@ function relaxTopLevel(items, pad) {
       if (pull < 0.15) continue;
       const ux = dx / dist, uy = dy / dist;
       const level = related && traceActive() ? (ay - by) * .01 : 0;
-      if (!pinnedLayout.has(aTop.id)) { A.x += ux * pull * .5; A.y += uy * pull * .5 - level; }
-      if (!pinnedLayout.has(bTop.id)) { B.x -= ux * pull * .5; B.y -= uy * pull * .5 + level; }
+      if (!pinnedLayout.has(aTop.id) && aTop.id !== locked) { A.x += ux * pull * .5; A.y += uy * pull * .5 - level; }
+      if (!pinnedLayout.has(bTop.id) && bTop.id !== locked) { B.x -= ux * pull * .5; B.y -= uy * pull * .5 + level; }
     }
     // During expand, separate everyone (anchors stay put). Otherwise keep
     // user-pinned seats and only pack the free islands.
-    if (layoutAnchorIds.size) {
-      separateBoxes(items, { gap: ISLAND_GAP, passes: 14, anchors: layoutAnchorIds });
+    const anchors = new Set([
+      ...(layoutAnchorIds.size ? layoutAnchorIds : []),
+      ...(locked ? [locked] : [])
+    ]);
+    if (anchors.size) {
+      separateBoxes(items, { gap: ISLAND_GAP, passes: 14, anchors });
       for (const [id, xy] of pinnedXY) {
-        if (!layoutAnchorIds.has(id)) continue; // let non-anchor pins yield
+        if (!anchors.has(id)) continue; // let non-anchor pins yield
         const item = byId.get(id);
         if (item) { item.x = xy.x; item.y = xy.y; }
       }
@@ -1885,9 +2284,9 @@ function relaxTopLevel(items, pad) {
   for (const item of items) { minX = Math.min(minX, item.x); minY = Math.min(minY, item.y); }
   const shiftX = pad - minX, shiftY = pad - minY;
   for (const item of items) {
-    // Keep expand anchors (and idle pinned seats) fixed; everyone else can shift.
-    if (layoutAnchorIds.has(item.id)) continue;
-    if (!layoutAnchorIds.size && pinnedLayout.has(item.id)) continue;
+    // Keep expand anchors, locked focus, and idle pinned seats fixed.
+    if (layoutAnchorIds.has(item.id) || item.id === locked) continue;
+    if (!layoutAnchorIds.size && !locked && pinnedLayout.has(item.id)) continue;
     item.x += shiftX;
     item.y += shiftY;
   }
@@ -2005,17 +2404,19 @@ function frameStyle(placement, tint, id, { depth = 0, inertia = 0 } = {}) {
   const off = island === id ? (offsets.get(id) || { x: 0, y: 0 }) : { x: 0, y: 0 };
   const glass = Math.min(78, 16 + depth * 14);
   const delay = hashHue(id) % 900;
-  return `left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;translate:${off.x}px ${off.y}px;--ox:${off.x}px;--oy:${off.y}px;--node:${tint};--accent:${tint};--depth:${depth};--glass:${glass}%;--float-delay:${delay};--inertia:${inertia}`;
+  const h = placement.h ? `height:${placement.h}px;` : '';
+  return `left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;${h}translate:${off.x}px ${off.y}px;--ox:${off.x}px;--oy:${off.y}px;--node:${tint};--accent:${tint};--depth:${depth};--glass:${glass}%;--float-delay:${delay};--inertia:${inertia}`;
 }
 function frameModuleHtml(file, module, placement, depth = 0, inertia = 0) {
   const hot = hoverId === module.id ? 'hot' : '';
   const tint = fileTint(file);
-  return `<section class="frame frame-fn float ${selectedId === module.id ? 'selected' : ''} ${hot}" data-module-box="${module.id}" data-hover="${module.id}" data-drag-id="${module.id}" data-open-flow="${module.id}" style="${frameStyle(placement, tint, module.id, { depth: depth + 1, inertia })}">
+  return `<section class="frame frame-fn float ${selectedId === module.id ? 'selected' : ''} ${hot}" data-module-box="${module.id}" data-hover="${module.id}" data-drag-id="${module.id}" data-open-flow="${module.id}" title="Open code flow" style="${frameStyle(placement, tint, module.id, { depth: depth + 1, inertia })}">
     <header class="frame-bar" data-outline-row="${module.id}" data-hover="${module.id}">
       ${framePorts(module.id)}
-      <button class="frame-title" data-module="${module.id}" data-open-flow="${module.id}" type="button">
+      <button class="frame-title" data-module="${module.id}" data-open-flow="${module.id}" type="button" title="Open code flow: ${escape(module.label)}()">
         <em class="fn-kind">${module.moduleKind === 'class' ? 'class' : 'fn'}</em>
         <b>${escape(module.label)}()</b>
+        <span class="fn-flow-hint">flow</span>
       </button>
       <button class="port pin-btn ${pinned.has(module.id) ? 'pinned' : ''}" data-pin="${module.id}" type="button" title="Pin"></button>
     </header>
@@ -2040,6 +2441,7 @@ function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
         <span class="file-glyph" style="--glyph:${glyph.c}" title="${escape(file.extension || '')}">${escape(glyph.g)}</span>
         <b title="${escape(file.path)}">${escape(file.label)}</b>
         <span>${modules(file).length || '-'}</span>
+        <span class="fn-flow-hint" data-open-file-flow="${file.id}" title="Open code flow">flow</span>
       </button>
       <button class="port pin-btn ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" type="button" title="Pin"></button>
     </header>
@@ -2178,28 +2580,40 @@ function renderActivityFeed() {
     bindActivityFeed();
   });
 }
-function chromeHtml(layout) {
-  return (layout.chrome || []).map(piece => {
-    if (piece.kind !== 'stage') return '';
-    const stats = graph?.stats || {};
-    return `<div class="stage-banner frames minimal" data-stage="frames">
-      <div class="stage-banner-copy">
-        <span class="stage-kicker">Hover to trace · click to pin focus</span>
-        <h2>${escape(piece.title)}</h2>
-      </div>
-      <p class="stage-hint">${stats.files || 0} files · ${stats.modules || 0} fn</p>
-    </div>`;
-  }).join('');
+function chromeHtml(_layout) {
+  return '';
+}
+/** Top-level island that must stay put while its subtree is the focus. */
+function lockedFocusIslandId() {
+  const focus = selected();
+  if (!focus) return null;
+  const top = topLevelOwner(fileOf(focus) || focus);
+  return top?.id || null;
+}
+function isLockedFocusIsland(id) {
+  const locked = lockedFocusIslandId();
+  return !!(locked && id === locked);
 }
 function render() {
   if (!graph) return;
   // Never rebuild DOM mid-drag - that orphans the pointer capture and jumps nodes.
   if (app.classList.contains('dragging')) return;
-  const alignOwned = alignMotionPending;
-  if (alignOwned) {
+  const overlayOpen = !!$('#flow-overlay')?.open;
+  const alignOwned = alignMotionPending && !overlayOpen;
+  // Expanding a folder/file should morph — never quiet/skip FLIP on open.
+  const expanding = layoutAnchorIds.size > 0;
+  if (overlayOpen) {
     skipFlipOnce = true;
     cancelSoftSettle();
+    quietLayoutMotion(280);
+  } else if (alignOwned || expanding) {
+    // Keep size/position morph alive for focus + expand.
+    skipFlipOnce = false;
+    app.classList.remove('layout-quiet');
+    clearTimeout(quietLayoutMotion._t);
+    cancelSoftSettle();
   }
+  if (overlayOpen) alignMotionPending = false;
   // Nested frames must not keep independent world offsets - they live inside folders.
   for (const id of [...offsets.keys()]) {
     if (dragIslandId(id) !== id) offsets.delete(id);
@@ -2217,12 +2631,12 @@ function render() {
   applyCanvas();
   refreshFocusClasses();
   // Keep click under pointer before FLIP samples positions (avoids animate-then-snap).
-  if (clickAnchor) stabilizeClickAnchor();
+  if (clickAnchor && !overlayOpen) stabilizeClickAnchor();
   drawEdges();
   playFlip(before);
-  animateReflowEdges(alignOwned ? 400 : 920);
+  animateReflowEdges(overlayOpen ? 400 : expanding ? 1100 : alignOwned ? 400 : 920);
   // Soft-settle fights trace align (snap away → glitch home → slow arrive).
-  if (layoutAnchorIds.size && !alignOwned) {
+  if (layoutAnchorIds.size && !alignOwned && !overlayOpen) {
     const settleId = [...layoutAnchorIds].find(id => {
       const island = dragIslandId(id);
       return scene.querySelector(`[data-drag-id="${CSS.escape(island)}"]`);
@@ -2230,9 +2644,13 @@ function render() {
     requestAnimationFrame(() => softSettleAfterExpand(settleId, { duration: 1800 }));
   }
   clearExpandAnchor();
-  if (alignOwned) {
+  // Always keep viewfinder park gravity alive — focus/align only delays it.
+  if (overlayOpen) {
     alignMotionPending = false;
     clearTimeout(gravityTimer);
+  } else if (alignOwned || expanding) {
+    alignMotionPending = false;
+    scheduleGravityDrift(1200);
   } else {
     scheduleGravityDrift();
   }
@@ -2321,7 +2739,9 @@ function crossingOffsets(edges) {
   const offsets = new Map();
   const groups = new Map();
   for (const edge of edges) {
-    const key = edge.b.x >= edge.a.x ? 'forward' : 'backward';
+    // Resolve crossings within the same family so calls/imports don't share a lane.
+    const family = wireFamily(edge.edge.type);
+    const key = `${edge.b.x >= edge.a.x ? 'forward' : 'backward'}:${family}`;
     const list = groups.get(key) || []; list.push(edge); groups.set(key, list);
   }
   for (const list of groups.values()) {
@@ -2349,6 +2769,13 @@ function showOverviewEdge() {
   // Outline canvas always draws the active trace edges to visible ports.
   return true;
 }
+function wireFamily(type) {
+  return CONTEXT_TYPES.has(type) ? 'context' : 'flow';
+}
+/** Calls ride above; imports ride below — keeps stacked corridors readable. */
+function familyLaneBias(type) {
+  return CONTEXT_TYPES.has(type) ? 28 : -18;
+}
 function moduleBusPath(a, b, spread, cross, backwards) {
   const lanePad = 34 + Math.min(46, Math.abs(cross) * .55);
   const sourceLaneX = a.x + (backwards ? -lanePad : lanePad);
@@ -2359,23 +2786,29 @@ function moduleBusPath(a, b, spread, cross, backwards) {
 /** Out ports leave right, in ports arrive from the left.
  *  One cubic (or a U-loop of two) with horizontal end tangents — no stub L segments,
  *  which were causing a visible kink at the ports. */
-function directedWirePath(a, b, spread = 0, cross = 0) {
+function directedWirePath(a, b, spread = 0, cross = 0, family = 'flow') {
   const ay = a.y + spread * .1;
   const by = b.y + spread * .1 + cross;
   const dx = b.x - a.x;
+  // Imports bow farther out and sit lower so they don't paint over call traces.
+  const familyY = family === 'context' ? 16 : -10;
+  const familyBow = family === 'context' ? 32 : 0;
 
   // Nearby or backwards: soft outer loop, still horizontal at both ports.
   if (dx < 72) {
-    const bow = Math.max(56, Math.min(120, 64 + Math.abs(dx) * .25 + Math.abs(cross) * .4));
-    const midY = (ay + by) / 2 + (Math.abs(ay - by) < 24 ? (cross >= 0 ? bow * .42 : -bow * .42) : cross * .08);
+    const bow = Math.max(56, Math.min(140, 64 + Math.abs(dx) * .25 + Math.abs(cross) * .4)) + familyBow;
+    const midY = (ay + by) / 2 + familyY
+      + (Math.abs(ay - by) < 24 ? (cross >= 0 ? bow * .42 : -bow * .42) : cross * .08);
     const right = Math.max(a.x, b.x) + bow;
     const left = Math.min(a.x, b.x) - bow;
     const midX = (a.x + b.x) / 2;
     return `M ${a.x} ${ay} C ${a.x + bow * .55} ${ay}, ${right} ${midY}, ${midX} ${midY} C ${left} ${midY}, ${b.x - bow * .55} ${by}, ${b.x} ${by}`;
   }
 
-  const reach = Math.min(Math.max(dx * .4, 48), 120);
-  return `M ${a.x} ${ay} C ${a.x + reach} ${ay}, ${b.x - reach} ${by}, ${b.x} ${by}`;
+  const reach = Math.min(Math.max(dx * .4, 48), 120) + (family === 'context' ? 22 : 0);
+  const c1y = ay + familyY;
+  const c2y = by + familyY;
+  return `M ${a.x} ${ay} C ${a.x + reach} ${c1y}, ${b.x - reach} ${c2y}, ${b.x} ${by}`;
 }
 function drawEdges() {
   scene.querySelectorAll('.connected-port').forEach(port => port.classList.remove('connected-port'));
@@ -2402,18 +2835,43 @@ function drawEdges() {
   }
   const rendered = [...unique.values()].map((edge, index) => ({ edge, index, a: point(edge.from, 'out'), b: point(edge.to, 'in') })).filter(item => item.a && item.b);
   const crossOffsets = crossingOffsets(rendered);
+  // Fan within the same endpoint pair + family; families already sit on separate lanes.
   const pairCounts = new Map();
-  rendered.forEach(({ edge }) => { const key = `${edge.from}:${edge.to}`; pairCounts.set(key, (pairCounts.get(key) || 0) + 1); });
+  rendered.forEach(({ edge }) => {
+    const key = `${edge.from}:${edge.to}:${wireFamily(edge.type)}`;
+    pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+  });
   const pairSeen = new Map();
+  // Also fan when call+import share an island corridor (different ports, same path).
+  const corridorCounts = new Map();
+  const corridorSeen = new Map();
+  const corridorKeyFor = (edge, a, b) => {
+    const ax = Math.round(a.x / 40);
+    const bx = Math.round(b.x / 40);
+    const ay = Math.round(a.y / 48);
+    const by = Math.round(b.y / 48);
+    return `${ax}:${bx}:${ay}:${by}:${wireFamily(edge.type)}`;
+  };
+  rendered.forEach(({ edge, a, b }) => {
+    const key = corridorKeyFor(edge, a, b);
+    corridorCounts.set(key, (corridorCounts.get(key) || 0) + 1);
+  });
   rendered.forEach(({ edge, index, a, b }) => {
     markEndpoint(edge.from, 'out'); markEndpoint(edge.to, 'in');
-    const pairKey = `${edge.from}:${edge.to}`;
+    const family = wireFamily(edge.type);
+    const pairKey = `${edge.from}:${edge.to}:${family}`;
     const pairIndex = pairSeen.get(pairKey) || 0;
     pairSeen.set(pairKey, pairIndex + 1);
     const total = pairCounts.get(pairKey) || 1;
-    const spread = (pairIndex - (total - 1) / 2) * Math.min(14, Math.max(6, 36 / total));
-    const cross = crossOffsets.get(edge.id) || 0;
-    const pathData = directedWirePath(a, b, spread, cross);
+    const cKey = corridorKeyFor(edge, a, b);
+    const cIndex = corridorSeen.get(cKey) || 0;
+    corridorSeen.set(cKey, cIndex + 1);
+    const cTotal = corridorCounts.get(cKey) || 1;
+    const pairSpread = (pairIndex - (total - 1) / 2) * Math.min(16, Math.max(8, 40 / total));
+    const corridorSpread = (cIndex - (cTotal - 1) / 2) * Math.min(12, Math.max(6, 28 / cTotal));
+    const spread = pairSpread + corridorSpread + familyLaneBias(edge.type);
+    const cross = (crossOffsets.get(edge.id) || 0) + (family === 'context' ? 10 : -6);
+    const pathData = directedWirePath(a, b, spread, cross, family);
     const wireKey = edge.id;
     keep.add(wireKey);
     let path = wires.querySelector(`[data-wire="${CSS.escape(wireKey)}"]`);
@@ -2426,7 +2884,7 @@ function drawEdges() {
       const orphaned = fromFile?.orphan || toFile?.orphan;
       dialect = orphaned ? 'dialect-removed' : hot ? 'dialect-live' : 'dialect-unreviewed';
     }
-    const cls = `wire ${traceMode ? 'moving' : 'static'} ${edge.type} flow-stage ${previewing ? 'preview' : 'committed'} ${dialect}`.trim();
+    const cls = `wire ${traceMode ? 'moving' : 'static'} ${edge.type} flow-stage wire-${family} ${previewing ? 'preview' : 'committed'} ${dialect}`.trim();
     if (!path) {
       path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       path.setAttribute('data-wire', wireKey);
@@ -2458,6 +2916,20 @@ function originTintForEdge(edge) {
   const file = fileOf(from) || (from.kind === 'file' ? from : null);
   if (file) return fileTint(file);
   return null;
+}
+function destinationTintForEdge(edge) {
+  const to = node(edge.to);
+  if (!to) return null;
+  if (to.kind === 'folder') return folderTint(to);
+  const file = fileOf(to) || (to.kind === 'file' ? to : null);
+  if (file) return fileTint(file);
+  return null;
+}
+function itemTint(item) {
+  if (!item) return null;
+  if (item.kind === 'folder') return folderTint(item);
+  const file = fileOf(item) || (item.kind === 'file' ? item : null);
+  return file ? fileTint(file) : null;
 }
 function bindHoverTrace() {
   const setHover = id => {
@@ -2511,7 +2983,12 @@ function nearestVisibleFolder(item) {
   }
   return null;
 }
-function applyCanvas() { world.style.transform = `translate(${canvas.x}px,${canvas.y}px) scale(${canvas.scale})`; scheduleMinimap(); }
+function applyCanvas() {
+  world.style.transform = `translate(${canvas.x}px,${canvas.y}px) scale(${canvas.scale})`;
+  scheduleMinimap();
+  // Pan/zoom changes the viewfinder — wake park gravity for long-distance strays.
+  scheduleGravityDrift(90);
+}
 function canvasFocusTarget(element) {
   if (!element) return null;
   const worldRect = world.getBoundingClientRect();
@@ -2572,7 +3049,6 @@ function playAgentEditReveal(path, { theater = false } = {}) {
   agentRevealPath = normalized;
   agentRevealExpandedId = file.id;
   expandAncestors(file);
-  pruneFolderDepth(2);
   expandedFiles.add(file.id);
   selectedId = file.id;
   layoutAnchorFileId = file.id;
@@ -2696,16 +3172,34 @@ function bindFrameDrag(frame) {
   if (!id) return;
   let drag;
   let raf = 0;
-  const onBar = event => event.target.closest('.frame-bar') && !event.target.closest('button,a,[data-pin]');
+  // Titles / pins / flow entry stay clickable - never start a drag from them.
+  const onBar = event => event.target.closest('.frame-bar')
+    && !event.target.closest('button,a,[data-pin],[data-open-flow],[data-open-file-flow],.frame-title,.fn-kind,.fn-flow-hint');
   const applyDragVisual = () => {
     raf = 0;
     if (!drag) return;
     const { dx, dy } = drag;
     if (drag.nested && drag.parentId) {
-      // Free nested drag from the chip's current seat (local + delta).
-      frame.style.translate = `${dx}px ${dy}px`;
-      frame.style.setProperty('--ox', `${dx}px`);
-      frame.style.setProperty('--oy', `${dy}px`);
+      // Free nested drag — overflow is unlocked; parent grows/shifts to encapsulate.
+      let x = drag.baseLeft + dx;
+      let y = drag.baseTop + dy;
+      if (drag.parentEl && drag.canvasEl) {
+        const enc = encapsulateNestedChild(drag.parentEl, drag.canvasEl, frame, x, y, { skipId: drag.id });
+        if (enc.shiftX || enc.shiftY) {
+          drag.baseLeft += enc.shiftX;
+          drag.baseTop += enc.shiftY;
+          // Keep the chip under the pointer after origin shift.
+          drag.x += enc.shiftX * canvas.scale;
+          drag.y += enc.shiftY * canvas.scale;
+          frame.style.left = `${drag.baseLeft}px`;
+          frame.style.top = `${drag.baseTop}px`;
+          x = enc.x;
+          y = enc.y;
+        }
+      }
+      frame.style.translate = `${x - drag.baseLeft}px ${y - drag.baseTop}px`;
+      frame.style.setProperty('--ox', `${x - drag.baseLeft}px`);
+      frame.style.setProperty('--oy', `${y - drag.baseTop}px`);
     } else {
       // Free island drag: no collision while held; neighbors yield only after drop.
       markDropTarget(drag.pointerX, drag.pointerY, drag.islandId);
@@ -2768,7 +3262,7 @@ function bindFrameDrag(frame) {
     if (!drag) return;
     const dx = (event.clientX - drag.x) / canvas.scale;
     const dy = (event.clientY - drag.y) / canvas.scale;
-    drag.moved ||= Math.abs(dx) + Math.abs(dy) > 6;
+    drag.moved ||= Math.abs(dx) + Math.abs(dy) > 10;
     if (drag.moved && !drag.remembered) { remember(); drag.remembered = true; }
     drag.dx = dx; drag.dy = dy;
     drag.pointerX = event.clientX;
@@ -2795,8 +3289,11 @@ function bindFrameDrag(frame) {
       frame.dataset.dragged = String(Date.now());
       if (!nested) pinnedLayout.add(islandId);
       if (nested && parentId) {
-        const dropX = baseLeft + dx;
-        const dropY = baseTop + dy;
+        let dropX = baseLeft + dx;
+        let dropY = baseTop + dy;
+        const enc = encapsulateNestedChild(parentEl, canvasEl, frame, dropX, dropY, { skipId: draggedId });
+        dropX = enc.x ?? dropX;
+        dropY = enc.y ?? dropY;
         userArranged.add(draggedId);
         nestedSeats.set(draggedId, { x: dropX, y: dropY });
         localOffsets.delete(draggedId);
@@ -2812,12 +3309,6 @@ function bindFrameDrag(frame) {
         app.classList.remove('dragging');
         draggingTraceAnchorId = null;
         drag = null;
-        reshapeParentCanvas(
-          parentEl,
-          canvasEl,
-          dropX + frame.offsetWidth + 20,
-          dropY + frame.offsetHeight + 20
-        );
         softSettleNested(draggedId, parentId, { duration: 1500 });
         scheduleDraw();
         scheduleGravityDrift(900);
@@ -2856,13 +3347,38 @@ function bindFrameDrag(frame) {
   frame.addEventListener('pointerup', end);
   frame.addEventListener('pointercancel', end);
 }
-function beginFocusAlignMotion() {
+function quietLayoutMotion(ms = 160) {
+  app.classList.add('layout-quiet');
+  clearTimeout(quietLayoutMotion._t);
+  quietLayoutMotion._t = setTimeout(() => app.classList.remove('layout-quiet'), ms);
+}
+/** Drop stale nested seats so a fresh expand packs modules on the shelf. */
+function clearNestedSeatsFor(file) {
+  if (!file) return;
+  for (const mod of modules(file)) {
+    userArranged.delete(mod.id);
+    nestedSeats.delete(mod.id);
+    localOffsets.delete(mod.id);
+  }
+}
+/**
+ * Prepare for focus/trace align. Opens keep FLIP + size morph — never snap.
+ */
+function beginFocusAlignMotion({ animateOpen = true } = {}) {
   cancelTraceAlign();
   cancelSoftSettle();
   stripFlipTransforms();
   alignMotionPending = true;
-  skipFlipOnce = true;
-  clearTimeout(gravityTimer);
+  if (animateOpen) {
+    skipFlipOnce = false;
+    app.classList.remove('layout-quiet');
+    clearTimeout(quietLayoutMotion._t);
+  } else {
+    skipFlipOnce = true;
+    quietLayoutMotion(280);
+  }
+  // Don't kill park gravity — delay it so open/align can finish first.
+  scheduleGravityDrift(animateOpen ? 1300 : 700);
 }
 function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   if (!folder || folder.kind !== 'folder') return;
@@ -2873,13 +3389,14 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   }
   remember();
   if (event) captureClickAnchor(folder.id, event);
-  beginFocusAlignMotion();
+  const opening = expand && folder.id !== displayRoot()?.id && !expandedFolders.has(folder.id);
+  beginFocusAlignMotion({ animateOpen: opening || !!expand });
   markExpandAnchor(folder.id);
   activateFocus(folder);
   layoutAnchorFileId = folder.id;
   if (expand && folder.id !== displayRoot()?.id) {
     expandedFolders.add(folder.id);
-    pruneFolderDepth(); // keep level-1 open only; no depth cap on manual focus
+    ensureTopLevelFoldersOpen();
   }
   selectItem(folder.id, { record: false });
   flowMode = true;
@@ -2887,9 +3404,10 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    animateReflowEdges(1400);
+    animateReflowEdges(opening ? 1100 : 900);
     pulseSelection();
-    scheduleTraceAlign(32);
+    // Wait for size morph to finish before sibling trace pull.
+    scheduleTraceAlign(opening ? 980 : 48);
   });
 }
 function focusFileFrame(file, { expand = true, event = null } = {}) {
@@ -2901,20 +3419,25 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
   }
   remember();
   if (event) captureClickAnchor(file.id, event);
-  beginFocusAlignMotion();
+  const opening = expand && !expandedFiles.has(file.id);
+  beginFocusAlignMotion({ animateOpen: opening || !!expand });
   markExpandAnchor(file.id);
   activateFocus(file);
   layoutAnchorFileId = file.id;
-  if (expand) expandedFiles.add(file.id);
+  if (expand) {
+    if (opening) clearNestedSeatsFor(file);
+    expandedFiles.add(file.id);
+  }
   selectItem(file.id, { record: false });
   flowMode = true;
   rebuildTrace();
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    animateReflowEdges(900);
+    animateReflowEdges(opening ? 1100 : 900);
     pulseSelection();
-    scheduleTraceAlign(32);
+    // Let the expand morph finish before sibling islands ease over.
+    scheduleTraceAlign(opening ? 980 : 48);
   });
 }
 function highlightLine(text, language = '') {
@@ -2933,110 +3456,216 @@ function highlightLine(text, language = '') {
   html = html.replace(/\b([A-Za-z_][\w]*)\s*(?=\()/g, '<span class="tok-fn">$1</span>');
   return html;
 }
-function connectWindow(file, edge, role) {
-  const source = file?.meta?.source || '';
-  const lines = source.split('\n');
-  if (!lines.length) return '';
-  const hit = Math.max(1, Math.min(lines.length, edge?.line || (role === 'here' ? 1 : 1)));
-  const start = Math.max(1, hit - 2);
-  const end = Math.min(lines.length, Math.max(start + 4, hit + 2));
-  const body = lines.slice(start - 1, end).map((text, index) => {
-    const line = start + index;
-    const cls = line === hit ? 'flow-line hit-edge' : 'flow-line';
-    return `<span class="${cls}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
+function flowCodeLinesHtml(file, start, end, hitStart, hitEnd) {
+  const lines = (file?.meta?.source || '').split('\n');
+  if (!lines.length || start > end) {
+    return '<span class="flow-line"><i>-</i><code>No source</code></span>';
+  }
+  const from = Math.max(1, start);
+  const to = Math.min(lines.length, end);
+  return lines.slice(from - 1, to).map((text, index) => {
+    const line = from + index;
+    const hit = hitStart != null && line >= hitStart && line <= (hitEnd ?? hitStart);
+    const edgeHit = hit && hitStart === hitEnd && line === hitStart;
+    return `<span class="flow-line${hit ? ' hit' : ''}${edgeHit ? ' hit-edge' : ''}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
   }).join('');
-  return `<div class="flow-connect hit" data-connect-line="${hit}">
-    <header>${escape(edge?.type || 'trace')} · L${hit} · ±2 context</header>
-    <pre class="flow-code">${body}</pre>
+}
+/** Line window for a flow card — full relevant source; panel scroll handles overflow. */
+function flowCodeRanges(item, file, edge) {
+  const lines = (file?.meta?.source || '').split('\n');
+  const total = lines.length;
+  let hitStart = null;
+  let hitEnd = null;
+  let start = 1;
+  let end = Math.min(total, 120);
+  if (item.kind === 'module' && item.loc) {
+    start = item.loc.start;
+    end = Math.min(total, Math.max(start, item.loc.end || start));
+  }
+  if (edge?.line) {
+    const line = Math.max(1, Math.min(total, edge.line));
+    hitStart = line;
+    hitEnd = line;
+    if (item.kind === 'module' && item.loc) {
+      start = item.loc.start;
+      end = Math.min(total, Math.max(start, item.loc.end || start));
+    } else {
+      start = Math.max(1, line - 40);
+      end = Math.min(total, line + 80);
+    }
+  }
+  if (!total) return { start: 1, end: 1, hitStart, hitEnd };
+  return { start, end, hitStart, hitEnd };
+}
+function flowModuleRailHtml(file) {
+  if (!file || file.kind !== 'file') return '';
+  const mods = modules(file).slice(0, 28);
+  if (!mods.length) return '';
+  return `<div class="flow-module-rail" role="list" aria-label="Modules in file">
+    ${mods.map(mod => `<button type="button" class="flow-mod-chip" data-flow-mod="${mod.id}" title="Open ${escape(mod.label)}() flow">${escape(mod.label)}()</button>`).join('')}
   </div>`;
 }
 function codeBlockHtml(item, { edge, role } = {}) {
   const file = fileOf(item) || (item.kind === 'file' ? item : null);
-  const source = file?.meta?.source || '';
-  const lines = source.split('\n');
-  let start = 1, end = Math.min(lines.length, 24);
-  let hitStart = null, hitEnd = null;
-  if (item.kind === 'module' && item.loc) {
-    start = item.loc.start;
-    end = Math.min(lines.length, Math.max(start, Math.min(item.loc.end || start, start + 40)));
-    hitStart = item.loc.start;
-    hitEnd = item.loc.end || item.loc.start;
-  }
-  if (edge?.line && role !== 'here') {
-    hitStart = edge.line;
-    hitEnd = edge.line;
-  }
-  const code = lines.slice(start - 1, end).map((text, index) => {
-    const line = start + index;
-    const hit = hitStart != null && line >= hitStart && line <= hitEnd;
-    return `<span class="flow-line${hit ? ' hit' : ''}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
-  }).join('') || '<span class="flow-line"><i>-</i><code>No source</code></span>';
+  const ranges = flowCodeRanges(item, file, edge);
+  const code = flowCodeLinesHtml(file, ranges.start, ranges.end, ranges.hitStart, ranges.hitEnd);
   const glyph = file ? fileGlyph(file) : { g: '·', c: 'var(--muted)' };
   const title = item.kind === 'module' ? `${item.label}()` : item.label;
-  const meta = edge ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}` : (item.kind === 'module' ? `L${start}-${end}` : file?.path || '');
-  const connect = edge && file ? connectWindow(file, edge, role) : (role === 'here' && file && hitStart ? connectWindow(file, { type: 'focus', line: hitStart }, role) : '');
-  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}" data-flow-role="${role || ''}" data-flow-edge="${edge?.id || ''}">
+  const meta = edge
+    ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}`
+    : (item.kind === 'module' ? `L${ranges.start}-${ranges.end}` : file?.path || '');
+  const tint = itemTint(item) || glyph.c || 'var(--green)';
+  const originTint = edge ? (originTintForEdge(edge) || tint) : tint;
+  const destTint = edge ? (destinationTintForEdge(edge) || tint) : tint;
+  const edgeTone = role === 'from' ? originTint : role === 'to' ? destTint : tint;
+  const sideTag = role === 'from' ? 'OUT' : role === 'to' ? 'IN' : 'HERE';
+  const moduleRail = role === 'here' && item.kind === 'file' ? flowModuleRailHtml(item) : '';
+  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}" data-flow-role="${role || ''}" data-flow-edge="${edge?.id || ''}" style="--flow-tint:${escape(edgeTone)};--flow-origin:${escape(originTint)};--flow-dest:${escape(destTint)}">
     <div class="flow-card-head">
       <span class="file-glyph" style="--glyph:${glyph.c}">${escape(glyph.g)}</span>
       <b>${escape(title)}</b>
-      <span>${escape(meta)}</span>
+      <span class="flow-edge-meta">${edge ? `<i class="flow-side-tag ${role === 'from' ? 'out' : 'in'}">${sideTag}</i>${escape(meta)}` : escape(meta)}</span>
     </div>
     <small>${escape(file?.path || item.path || '')}</small>
-    <pre class="flow-code">${code}</pre>
-    ${connect}
+    ${moduleRail}
+    <div class="flow-code-wrap">
+      <pre class="flow-code">${code}</pre>
+    </div>
   </article>`;
+}
+function bindFlowCodeBlocks(root, onResize) {
+  root?.querySelectorAll('.flow-code').forEach(pre => {
+    pre.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
+    pre.addEventListener('click', event => event.stopPropagation());
+    pre.addEventListener('scroll', () => onResize?.(), { passive: true });
+    const hit = pre.querySelector('.flow-line.hit-edge, .flow-line.hit');
+    if (hit) requestAnimationFrame(() => hit.scrollIntoView({ block: 'center', behavior: 'auto' }));
+  });
+  root?.querySelectorAll('[data-flow-mod]').forEach(btn => {
+    btn.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const mod = node(btn.dataset.flowMod);
+      if (mod) openFlowOverlay(mod);
+    });
+  });
 }
 function flowNeighbors(focus) {
   const seeds = new Set(sourceSeeds(focus));
   const upstream = [];
   const downstream = [];
-  for (const edge of (graph?.edges || []).filter(e => FLOW_TYPES.has(e.type))) {
+  // Respect the ribbon edge toggles so the three planes match the map.
+  for (const edge of edgeTypes()) {
     if (seeds.has(edge.to) && !seeds.has(edge.from)) {
       const other = node(edge.from);
-      if (other) upstream.push({ edge, other });
+      if (other && (other.kind === 'file' || other.kind === 'module')) upstream.push({ edge, other });
     }
     if (seeds.has(edge.from) && !seeds.has(edge.to)) {
       const other = node(edge.to);
-      if (other) downstream.push({ edge, other });
+      if (other && (other.kind === 'file' || other.kind === 'module')) downstream.push({ edge, other });
     }
   }
   const rank = type => ({ inherits: 0, calls: 1, dataflow: 2, events: 3, imports: 4, references: 5, reexports: 6 }[type] ?? 9);
-  const dedupe = list => list
-    .filter((item, index, arr) => arr.findIndex(x => x.other.id === item.other.id && x.edge.type === item.edge.type) === index)
-    .sort((a, b) => rank(a.edge.type) - rank(b.edge.type) || (a.other.label || '').localeCompare(b.other.label || ''))
-    .slice(0, 16);
+  const dedupe = list => {
+    const best = new Map();
+    for (const entry of list) {
+      const key = entry.other.id;
+      const prev = best.get(key);
+      if (!prev || rank(entry.edge.type) < rank(prev.edge.type)) best.set(key, entry);
+    }
+    return [...best.values()]
+      .sort((a, b) => rank(a.edge.type) - rank(b.edge.type) || (a.other.label || '').localeCompare(b.other.label || ''))
+      .slice(0, 16);
+  };
   return { upstream: dedupe(upstream), downstream: dedupe(downstream) };
 }
-function drawFlowOverlayWires(upstream, downstream) {
+function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
   const svg = $('#flow-wires');
   const body = svg?.closest('.flow-body');
   if (!svg || !body) return;
   const bodyRect = body.getBoundingClientRect();
   const focusCard = $('#flow-focus')?.querySelector('.flow-card.here');
   if (!focusCard) { svg.innerHTML = ''; return; }
-  const focusRect = focusCard.getBoundingClientRect();
-  const fx = focusRect.left - bodyRect.left;
-  const fy = focusRect.top - bodyRect.top + Math.min(focusRect.height * .35, 56);
-  const paths = [];
-  const link = (card, side, type, extraClass = '') => {
-    if (!card) return;
+  const cardRect = focusCard.getBoundingClientRect();
+  // Gutter docks just outside the focus card.
+  const fxIn = cardRect.left - bodyRect.left - 6;
+  const fxOut = cardRect.right - bodyRect.left + 6;
+  const focusTint = itemTint(focusItem) || 'var(--green)';
+  const parts = ['<defs></defs>'];
+  let gradN = 0;
+  const clampCardY = (card, preferred) => {
     const rect = card.getBoundingClientRect();
-    const x1 = side === 'from' ? rect.right - bodyRect.left : fx;
-    const y1 = rect.top - bodyRect.top + Math.min(rect.height * .4, 48);
-    const x2 = side === 'from' ? fx : rect.left - bodyRect.left;
-    const y2 = side === 'from' ? fy : rect.top - bodyRect.top + Math.min(rect.height * .4, 48);
-    const mid = (x1 + x2) / 2;
-    paths.push(`<path class="flow-wire flow-wire-live ${escape(type || '')} ${extraClass}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" />`);
+    // Stay in the upper chrome band so nodes never drop under the code body.
+    const top = rect.top - bodyRect.top + 22;
+    const bot = rect.top - bodyRect.top + Math.min(72, Math.max(40, rect.height * 0.22));
+    return Math.min(Math.max(preferred, top), bot);
+  };
+  const cardDockY = card => {
+    const rect = card.getBoundingClientRect();
+    const head = card.querySelector('.flow-card-head');
+    const headRect = head?.getBoundingClientRect();
+    // Prefer the title row — hit lines inside scrolled <pre> can sit below the card.
+    const midY = headRect
+      ? headRect.top - bodyRect.top + headRect.height * 0.5
+      : rect.top - bodyRect.top + 36;
+    return clampCardY(card, midY);
+  };
+  const fy = cardDockY(focusCard);
+  const stiffLink = (card, side, entry, railIndex = 0, railCount = 1) => {
+    if (!card || !entry) return;
+    const rect = card.getBoundingClientRect();
+    const edge = entry.edge;
+    const familyLift = CONTEXT_TYPES.has(edge?.type) ? 16 : -12;
+    const otherY = cardDockY(card) + familyLift;
+    // Fan focus docks slightly so many rails don't stack on one point.
+    const spread = (railIndex - (railCount - 1) / 2) * Math.min(10, 56 / Math.max(railCount, 1));
+    const focusY = clampCardY(focusCard, fy + spread + familyLift * 0.45);
+    let x1, y1, x2, y2;
+    if (side === 'from') {
+      // Upstream card OUT → focus IN
+      x1 = rect.right - bodyRect.left + 7;
+      y1 = otherY;
+      x2 = fxIn;
+      y2 = focusY;
+    } else {
+      // Focus OUT → downstream card IN  (was wrongly using dest Y at both ends)
+      x1 = fxOut;
+      y1 = focusY;
+      x2 = rect.left - bodyRect.left - 7;
+      y2 = otherY;
+    }
+    const dx = x2 - x1;
+    const c1x = x1 + dx * 0.28;
+    const c2x = x1 + dx * 0.72;
+    const other = entry.other;
+    const kind = escape(edge?.type || 'calls');
+    const originTint = side === 'from'
+      ? (originTintForEdge(edge) || itemTint(other) || focusTint)
+      : (originTintForEdge(edge) || focusTint);
+    const destTint = side === 'from'
+      ? (destinationTintForEdge(edge) || focusTint)
+      : (destinationTintForEdge(edge) || itemTint(other) || focusTint);
+    const gid = `flow-grad-${gradN++}`;
+    parts[0] = parts[0].replace('</defs>',
+      `<linearGradient id="${gid}" gradientUnits="userSpaceOnUse" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"><stop offset="0%" stop-color="${originTint}"/><stop offset="100%" stop-color="${destTint}"/></linearGradient></defs>`);
+    parts.push(`<path class="flow-wire flow-wire-live ${kind}" stroke="url(#${gid})" d="M${x1},${y1} C${c1x},${y1} ${c2x},${y2} ${x2},${y2}" />`);
+    parts.push(`<circle class="flow-node origin out" cx="${x1}" cy="${y1}" r="4.5" stroke="${originTint}" fill="${originTint}" fill-opacity="0.22" />`);
+    parts.push(`<circle class="flow-node dest in" cx="${x2}" cy="${y2}" r="5" stroke="${destTint}" fill="${destTint}" fill-opacity="0.22" />`);
   };
   const upStack = $('#flow-upstream');
   const downStack = $('#flow-downstream');
-  upStack?.querySelectorAll('.flow-card').forEach((card, index) => {
-    link(card, 'from', upstream[index]?.edge?.type || 'calls');
+  const upById = new Map((upstream || []).map(entry => [entry.other.id, entry]));
+  const downById = new Map((downstream || []).map(entry => [entry.other.id, entry]));
+  const upCards = [...(upStack?.querySelectorAll('.flow-card') || [])];
+  const downCards = [...(downStack?.querySelectorAll('.flow-card') || [])];
+  upCards.forEach((card, index) => {
+    const entry = upById.get(card.dataset.flowJump) || upstream[index];
+    stiffLink(card, 'from', entry, index, upCards.length);
   });
-  downStack?.querySelectorAll('.flow-card').forEach((card, index) => {
-    link(card, 'to', downstream[index]?.edge?.type || 'calls');
+  downCards.forEach((card, index) => {
+    const entry = downById.get(card.dataset.flowJump) || downstream[index];
+    stiffLink(card, 'to', entry, index, downCards.length);
   });
-  // Ghost traces exiting the screen when more relationships live off the sides.
   const moreLeft = (upstream?.length || 0) >= 16
     || (upStack && (upStack.scrollTop > 8 || upStack.scrollHeight > upStack.clientHeight + 24));
   const moreRight = (downstream?.length || 0) >= 16
@@ -3045,35 +3674,65 @@ function drawFlowOverlayWires(upstream, downstream) {
     for (let i = 0; i < 3; i++) {
       const y = fy - 36 + i * 36;
       const x0 = -28;
-      const mid = (x0 + fx) / 2;
-      paths.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-left" d="M${x0},${y} C${mid},${y} ${mid},${fy} ${fx},${fy}" />`);
+      const c1x = x0 + (fxIn - x0) * 0.28;
+      const c2x = x0 + (fxIn - x0) * 0.72;
+      parts.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-left" stroke="${focusTint}" d="M${x0},${y} C${c1x},${y} ${c2x},${fy} ${fxIn},${fy}" />`);
+      parts.push(`<circle class="flow-node in exit" cx="${fxIn}" cy="${fy}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
     }
   }
   if (moreRight) {
     const xEnd = bodyRect.width + 28;
     for (let i = 0; i < 3; i++) {
       const y = fy - 36 + i * 36;
-      const mid = (fx + focusRect.width + xEnd) / 2;
-      const x1 = fx + Math.min(focusRect.width, 160);
-      paths.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-right" d="M${x1},${fy} C${mid},${fy} ${mid},${y} ${xEnd},${y}" />`);
+      const x1 = fxOut;
+      const c1x = x1 + (xEnd - x1) * 0.28;
+      const c2x = x1 + (xEnd - x1) * 0.72;
+      parts.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-right" stroke="${focusTint}" d="M${x1},${fy} C${c1x},${fy} ${c2x},${y} ${xEnd},${y}" />`);
+      parts.push(`<circle class="flow-node out exit" cx="${x1}" cy="${fy}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
     }
   }
+  if (upstream?.length || downstream?.length) {
+    parts.push(`<circle class="flow-node hub" cx="${(fxIn + fxOut) / 2}" cy="${fy}" r="6.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.28" />`);
+  }
   svg.setAttribute('viewBox', `0 0 ${Math.max(1, bodyRect.width)} ${Math.max(1, bodyRect.height)}`);
-  svg.innerHTML = paths.join('');
+  svg.innerHTML = parts.join('');
 }
-function openFlowOverlay(item, { narrative } = {}) {
-  const focus = item?.kind === 'file' ? (modules(item)[0] || item) : item;
-  if (!focus || !graph) return;
+
+function openFlowOverlay(item, { narrative, fromNav = false } = {}) {
+  if (!item || !graph) return;
+  // Keep files as FILE FLOW (don't silently swap to first module).
+  const focus = item;
   const file = fileOf(focus) || (focus.kind === 'file' ? focus : null);
   const { upstream, downstream } = flowNeighbors(focus);
+  flowNavCache = { upstream, downstream };
   const dialog = $('#flow-overlay');
   if (!dialog) return;
-  $('#flow-kicker').textContent = focus.kind === 'module' ? 'MODULE FLOW' : 'FILE FLOW';
+  cancelTraceAlign();
+  cancelSoftSettle();
+  stripFlipTransforms();
+  skipFlipOnce = true;
+  alignMotionPending = false;
+  // Maintain back/forward trail for the top nav arrows.
+  if (!fromNav) {
+    if (flowTrailIndex >= 0 && flowTrail[flowTrailIndex] === focus.id) {
+      // same node - keep trail
+    } else {
+      flowTrail = flowTrail.slice(0, Math.max(0, flowTrailIndex + 1));
+      if (flowTrail[flowTrail.length - 1] !== focus.id) flowTrail.push(focus.id);
+      flowTrailIndex = flowTrail.length - 1;
+    }
+  } else if (flowTrail[flowTrailIndex] !== focus.id) {
+    const at = flowTrail.indexOf(focus.id);
+    if (at >= 0) flowTrailIndex = at;
+  }
+  $('#flow-kicker').textContent = focus.kind === 'module' ? 'MODULE FLOW' : focus.kind === 'file' ? 'FILE FLOW' : 'CODE FLOW';
   $('#flow-title').textContent = focus.kind === 'module' ? `${focus.label}()` : focus.label;
   $('#flow-path').textContent = file?.path || focus.path || '';
   $('#flow-focus-meta').textContent = focus.kind === 'module'
     ? `lines ${focus.loc?.start || '?'}-${focus.loc?.end || '?'}`
-    : `${file ? modules(file).length : 0} modules`;
+    : focus.kind === 'file'
+      ? `${modules(focus).length} modules`
+      : `${file ? modules(file).length : 0} modules`;
   const story = narrative || [
     upstream.length ? `${upstream.length} upstream` : 'no upstream',
     downstream.length ? `${downstream.length} downstream` : 'no downstream'
@@ -3083,40 +3742,119 @@ function openFlowOverlay(item, { narrative } = {}) {
     narrativeEl.hidden = !story;
     narrativeEl.textContent = story;
   }
-  $('#flow-upstream').innerHTML = upstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'from' })).join('') || '<p class="flow-empty">Nothing feeds into this node statically.</p>';
+  $('#flow-upstream').innerHTML = upstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'from' })).join('')
+    || '<p class="flow-empty">Nothing feeds into this node with the current edge filters.</p>';
   $('#flow-focus').innerHTML = codeBlockHtml(focus, { role: 'here' });
-  $('#flow-downstream').innerHTML = downstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'to' })).join('') || '<p class="flow-empty">Nothing consumes this node statically.</p>';
-  dialog.querySelectorAll('[data-flow-jump]').forEach(card => card.addEventListener('click', event => {
-    if (event.target.closest('.flow-code, .flow-connect')) return;
-    const target = node(card.dataset.flowJump);
-    if (!target) return;
-    closeFlowOverlay();
-    if (target.kind === 'module') openFlowOverlay(target);
-    else focusFileFrame(fileOf(target) || target);
-  }));
+  $('#flow-downstream').innerHTML = downstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'to' })).join('')
+    || '<p class="flow-empty">Nothing consumes this node with the current edge filters.</p>';
+  const redrawSoon = () => requestAnimationFrame(() => drawFlowOverlayWires(upstream, downstream, focus));
+  bindFlowCodeBlocks(dialog, redrawSoon);
+  dialog.querySelectorAll('[data-flow-jump]').forEach(card => {
+    card.addEventListener('click', event => {
+      if (card.classList.contains('here')) return;
+      if (event.target.closest('.flow-code, .flow-code-wrap, .flow-module-rail, .flow-connect, [data-flow-mod]')) return;
+      const target = node(card.dataset.flowJump);
+      if (!target || target.id === focus.id) return;
+      openFlowOverlay(target);
+    });
+  });
+  updateFlowNavButtons();
+  // Competing dialogs block showModal - dismiss them first.
+  document.querySelectorAll('dialog[open]').forEach(other => {
+    if (other === dialog) return;
+    try { other.close(); } catch { other.removeAttribute('open'); }
+  });
+  try {
+    if (!dialog.open) dialog.showModal();
+  } catch {
+    dialog.setAttribute('open', '');
+  }
   selectItem(focus.id, { record: false });
   activateFocus(focus);
   if (file) expandedFiles.add(file.id);
   rebuildTrace();
-  // Refresh the map under the dialog without stealing the modal open race.
-  render();
+  if (dialog._flowWireAbort) dialog._flowWireAbort.abort();
+  dialog._flowWireAbort = new AbortController();
+  const { signal } = dialog._flowWireAbort;
+  const redraw = () => drawFlowOverlayWires(upstream, downstream, focus);
+  // Soft map sync under the glass - never FLIP/align while the overlay owns focus.
   requestAnimationFrame(() => {
-    try {
-      if (!dialog.open) dialog.showModal();
-    } catch {
-      dialog.setAttribute('open', '');
-    }
-    if (dialog._flowWireAbort) dialog._flowWireAbort.abort();
-    dialog._flowWireAbort = new AbortController();
-    const { signal } = dialog._flowWireAbort;
-    const redraw = () => drawFlowOverlayWires(upstream, downstream);
-    animateReflowEdges(1000);
-    redraw();
-    dialog.querySelectorAll('.flow-stack, .flow-columns').forEach(el => {
-      el.addEventListener('scroll', redraw, { passive: true, signal });
+    skipFlipOnce = true;
+    alignMotionPending = false;
+    try { render(); } catch (_) { /* keep overlay open */ }
+    animateReflowEdges(700);
+    requestAnimationFrame(() => {
+      redraw();
+      dialog.querySelectorAll('.flow-stack').forEach(el => {
+        el.addEventListener('scroll', redraw, { passive: true, signal });
+      });
+      dialog.querySelectorAll('.flow-columns').forEach(el => {
+        el.addEventListener('scroll', redraw, { passive: true, signal });
+      });
+      window.addEventListener('resize', redraw, { passive: true, signal });
     });
-    window.addEventListener('resize', redraw, { passive: true, signal });
   });
+}
+function flowNavTargetLabel(item) {
+  if (!item) return '—';
+  return item.kind === 'module' ? `${item.label}()` : item.label;
+}
+function flowNavPeek(dir) {
+  if (dir < 0) {
+    if (flowTrailIndex > 0) {
+      const target = node(flowTrail[flowTrailIndex - 1]);
+      return { kind: 'Back', item: target, via: 'trail' };
+    }
+    const up = flowNavCache.upstream?.[0]?.other;
+    return { kind: 'Upstream', item: up || null, via: 'edge' };
+  }
+  if (flowTrailIndex >= 0 && flowTrailIndex < flowTrail.length - 1) {
+    const target = node(flowTrail[flowTrailIndex + 1]);
+    return { kind: 'Forward', item: target, via: 'trail' };
+  }
+  const down = flowNavCache.downstream?.[0]?.other;
+  return { kind: 'Downstream', item: down || null, via: 'edge' };
+}
+function updateFlowNavButtons() {
+  const prev = $('#flow-nav-prev');
+  const next = $('#flow-nav-next');
+  if (!prev || !next) return;
+  const left = flowNavPeek(-1);
+  const right = flowNavPeek(1);
+  prev.disabled = !left.item;
+  next.disabled = !right.item;
+  const prevKind = $('#flow-nav-prev-kind');
+  const prevLabel = $('#flow-nav-prev-label');
+  const nextKind = $('#flow-nav-next-kind');
+  const nextLabel = $('#flow-nav-next-label');
+  if (prevKind) prevKind.textContent = left.item ? left.kind : 'Upstream';
+  if (prevLabel) prevLabel.textContent = left.item ? flowNavTargetLabel(left.item) : 'None';
+  if (nextKind) nextKind.textContent = right.item ? right.kind : 'Downstream';
+  if (nextLabel) nextLabel.textContent = right.item ? flowNavTargetLabel(right.item) : 'None';
+  prev.title = left.item ? `${left.kind}: ${flowNavTargetLabel(left.item)}` : 'No previous';
+  next.title = right.item ? `${right.kind}: ${flowNavTargetLabel(right.item)}` : 'No next';
+  prev.setAttribute('aria-label', prev.title);
+  next.setAttribute('aria-label', next.title);
+}
+function flowNavStep(dir) {
+  if (dir < 0) {
+    if (flowTrailIndex > 0) {
+      flowTrailIndex -= 1;
+      const target = node(flowTrail[flowTrailIndex]);
+      if (target) return openFlowOverlay(target, { fromNav: true });
+    }
+    const up = flowNavCache.upstream?.[0]?.other;
+    // Push onto trail so Forward can return.
+    if (up) return openFlowOverlay(up);
+    return;
+  }
+  if (flowTrailIndex >= 0 && flowTrailIndex < flowTrail.length - 1) {
+    flowTrailIndex += 1;
+    const target = node(flowTrail[flowTrailIndex]);
+    if (target) return openFlowOverlay(target, { fromNav: true });
+  }
+  const down = flowNavCache.downstream?.[0]?.other;
+  if (down) return openFlowOverlay(down);
 }
 function closeFlowOverlay() {
   const dialog = $('#flow-overlay');
@@ -3124,7 +3862,13 @@ function closeFlowOverlay() {
     dialog._flowWireAbort.abort();
     dialog._flowWireAbort = null;
   }
+  const svg = $('#flow-wires');
+  if (svg) svg.innerHTML = '';
   if (dialog?.open) dialog.close();
+  flowTrail = [];
+  flowTrailIndex = -1;
+  flowNavCache = { upstream: [], downstream: [] };
+  updateFlowNavButtons();
 }
 function bindScene() {
   scene.querySelectorAll('.frame.float[data-drag-id]').forEach(bindFrameDrag);
@@ -3136,15 +3880,21 @@ function bindScene() {
     remember();
     captureClickAnchor(id, event);
     markExpandAnchor(id);
+    const opening = !expandedFolders.has(id);
     toggleFolder(id);
     selectItem(id, { record: false });
     flowMode = true;
     rebuildTrace();
+    // Morph open/close — never quiet/skip FLIP.
+    skipFlipOnce = false;
+    app.classList.remove('layout-quiet');
+    clearTimeout(quietLayoutMotion._t);
     render();
     updateInspector();
     requestAnimationFrame(() => {
-      animateReflowEdges(1400);
+      animateReflowEdges(1100);
       pulseSelection();
+      if (opening) scheduleTraceAlign(980);
     });
   }));
   scene.querySelectorAll('[data-expand]').forEach(button => button.addEventListener('click', event => {
@@ -3157,18 +3907,43 @@ function bindScene() {
       markExpandAnchor(file.id);
       expandedFiles.delete(file.id);
       selectItem(file.id, { record: false });
+      skipFlipOnce = false;
+      app.classList.remove('layout-quiet');
+      clearTimeout(quietLayoutMotion._t);
       render();
       updateInspector();
-      requestAnimationFrame(() => animateReflowEdges(1200));
+      requestAnimationFrame(() => animateReflowEdges(1000));
     } else {
       focusFileFrame(file, { expand: true, event });
     }
   }));
   scene.querySelectorAll('[data-focus-file]').forEach(button => button.addEventListener('click', event => {
     if (Date.now() - Number(button.closest('.frame')?.dataset.dragged || 0) < 220) return;
+    const flowHit = event.target.closest('[data-open-file-flow]');
+    if (flowHit) {
+      event.preventDefault();
+      event.stopPropagation();
+      const file = node(flowHit.dataset.openFileFlow || button.dataset.focusFile);
+      if (file) openFlowOverlay(file);
+      return;
+    }
     event.stopPropagation();
     focusFileFrame(node(button.dataset.focusFile), { expand: true, event });
   }));
+  scene.querySelectorAll('[data-focus-file]').forEach(button => button.addEventListener('dblclick', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const file = node(button.dataset.focusFile);
+    if (file) openFlowOverlay(file);
+  }));
+  scene.querySelectorAll('[data-open-file-flow]').forEach(hint => {
+    hint.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const file = node(hint.dataset.openFileFlow);
+      if (file) openFlowOverlay(file);
+    });
+  });
   scene.querySelectorAll('.outline-label[data-inline]:not([data-focus-file])').forEach(row => {
     row.addEventListener('click', event => {
       if (event.target.closest('[data-pin]') || Date.now() - Number(row.closest('.frame')?.dataset.dragged || 0) < 220) return;
@@ -3202,9 +3977,9 @@ function bindScene() {
   scene.querySelectorAll('.frame-fn[data-open-flow]').forEach(element => {
     element.addEventListener('click', event => {
       if (event.target.closest('[data-pin]')) return;
-      const fromTitle = event.target.closest('button[data-open-flow], .frame-title, .frame-bar b, .fn-kind');
-      // Tiny bar drags used to stamp `dragged` and swallow the click that opens flow.
-      if (!fromTitle && Date.now() - Number(element.dataset.dragged || 0) < 220) return;
+      // Ignore only real drags - never swallow title / flow-hint clicks.
+      const fromEntry = event.target.closest('[data-open-flow], .frame-title, .fn-kind, .fn-flow-hint, b');
+      if (!fromEntry && element.dataset.dragged && Date.now() - Number(element.dataset.dragged) < 280) return;
       const id = element.dataset.openFlow;
       const module = node(id);
       if (!module) return;
@@ -3225,12 +4000,36 @@ function bindScene() {
 }
 function initFlowOverlay() {
   $('#flow-close')?.addEventListener('click', () => closeFlowOverlay());
+  $('#flow-nav-prev')?.addEventListener('click', event => {
+    event.stopPropagation();
+    flowNavStep(-1);
+  });
+  $('#flow-nav-next')?.addEventListener('click', event => {
+    event.stopPropagation();
+    flowNavStep(1);
+  });
   $('#flow-overlay')?.addEventListener('click', event => {
+    // Only the backdrop / empty dialog chrome closes - not the three planes.
     if (event.target === $('#flow-overlay')) closeFlowOverlay();
   });
   $('#flow-overlay')?.addEventListener('cancel', event => {
     event.preventDefault();
     closeFlowOverlay();
+  });
+  $('#flow-overlay')?.addEventListener('keydown', event => {
+    if (!$('#flow-overlay')?.open) return;
+    // Don't steal keys while the user is selecting/scrolling code.
+    if (event.target?.closest?.('.flow-code, input, textarea')) return;
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      flowNavStep(-1);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      flowNavStep(1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeFlowOverlay();
+    }
   });
 }
 function bindActivityFeed() {
@@ -3294,12 +4093,13 @@ function updateInspector() {
     const folderKids = item.kind === 'folder' ? folderItems(item).slice(0, 8) : [];
     structure.innerHTML = [
       glyph ? `<div class="struct-row"><span class="file-glyph" style="--glyph:${glyph.c}">${escape(glyph.g)}</span><span>${escape(file.extension || 'file')} · ${file.language || 'asset'}</span></div>` : '',
-      item.kind === 'folder' ? `<div class="struct-row muted">${folderKids.length} direct · ${filesBelow(item).length} files · depth cap 2</div>` : '',
+      item.kind === 'folder' ? `<div class="struct-row muted">${folderKids.length} direct · ${filesBelow(item).length} files</div>` : '',
       ...folderKids.map(child => {
         const g = child.kind === 'file' ? fileGlyph(child) : null;
         return `<button type="button" class="struct-jump" data-jump="${child.id}">${g ? `<span class="file-glyph" style="--glyph:${g.c}">${escape(g.g)}</span>` : (() => { const fi = folderIcon(child); return `<span class="folder-glyph compact" style="--accent:${fi.c}">${fi.g}</span>`; })()}<span>${escape(child.label)}</span></button>`;
       }),
-      ...mods.map(module => `<button type="button" class="struct-jump" data-jump="${module.id}" data-open-flow-jump="${module.id}"><em>fn</em><span>${escape(module.label)}()</span></button>`)
+      ...mods.map(module => `<button type="button" class="struct-jump" data-jump="${module.id}" data-open-flow-jump="${module.id}"><em>fn</em><span>${escape(module.label)}()</span></button>`),
+      file?.kind === 'file' ? `<button type="button" class="struct-jump" data-jump="${file.id}" data-open-flow-jump="${file.id}"><em>flow</em><span>Open file flow</span></button>` : ''
     ].filter(Boolean).join('') || '<div class="struct-row muted">Select a frame to see its contents.</div>';
     structure.querySelectorAll('[data-jump]').forEach(button => button.addEventListener('click', () => {
       const target = node(button.dataset.jump);

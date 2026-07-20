@@ -385,7 +385,7 @@ export const CAPABILITY_DEMO_STEPS = [
   },
   {
     title: 'Focus a service folder',
-    narrative: 'Folders open under the pointer. Level-1 stays open; depth caps at two so the map stays readable.',
+    narrative: 'Folders open under the pointer. Nested paths stay open so deep files can expand into their modules.',
     dwellMs: 6800,
     legend: { kicker: '05 · Focus', title: 'services/ingest', body: 'Spotlight dims the rest of the map.' },
     spotlight: { path: 'services/ingest' },

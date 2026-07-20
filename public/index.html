@@ -39,7 +39,6 @@
           <span class="leg unreviewed"><i></i>unreviewed</span>
           <span class="leg removed"><i></i>removed</span>
         </div>
-        <div class="canvas-hint">Drag islands · click folders/files to focus · opens under the pointer · Live = hover traces</div>
         <div id="demo-spotlight" class="demo-spotlight" hidden aria-hidden="true"></div>
         <div id="demo-legend" class="demo-legend" hidden>
           <span class="demo-legend-kicker" id="demo-legend-kicker">DeepFlow demo</span>
@@ -194,27 +193,45 @@
   <dialog id="flow-overlay" class="flow-overlay frameless">
     <div class="flow-shell">
       <header class="flow-head">
-        <div>
+        <div class="flow-head-main">
           <span class="flow-kicker" id="flow-kicker">CODE FLOW</span>
           <h2 id="flow-title">Module</h2>
           <p id="flow-path"></p>
         </div>
-        <button type="button" id="flow-close" aria-label="Close flow">×</button>
+        <div class="flow-head-actions">
+          <div class="flow-nav" role="group" aria-label="Flow navigation">
+            <button type="button" id="flow-nav-prev" class="flow-nav-btn prev" aria-label="Previous in flow">
+              <svg class="flow-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5.5 8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span class="flow-nav-copy">
+                <em id="flow-nav-prev-kind">Upstream</em>
+                <b id="flow-nav-prev-label">—</b>
+              </span>
+            </button>
+            <button type="button" id="flow-nav-next" class="flow-nav-btn next" aria-label="Next in flow">
+              <span class="flow-nav-copy">
+                <em id="flow-nav-next-kind">Downstream</em>
+                <b id="flow-nav-next-label">—</b>
+              </span>
+              <svg class="flow-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 5.5 16 12l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <button type="button" id="flow-close" aria-label="Close flow">×</button>
+        </div>
       </header>
       <p class="flow-narrative" id="flow-narrative" hidden></p>
       <div class="flow-body">
         <svg class="flow-wires" id="flow-wires" aria-hidden="true"></svg>
-        <div class="flow-columns">
+        <div class="flow-columns" role="group" aria-label="Code flow three planes">
           <section class="flow-col upstream">
-            <header><b>Upstream</b><span>inherits · callers · imports</span></header>
+            <header><b>Comes from</b><span>inherits · callers · imports</span></header>
             <div class="flow-stack" id="flow-upstream"></div>
           </section>
           <section class="flow-col focus">
-            <header><b>Focus</b><span id="flow-focus-meta"></span></header>
+            <header><b>You are here</b><span id="flow-focus-meta"></span></header>
             <div class="flow-stack" id="flow-focus"></div>
           </section>
           <section class="flow-col downstream">
-            <header><b>Downstream</b><span>calls · emits · consumers</span></header>
+            <header><b>Goes to</b><span>calls · emits · consumers</span></header>
             <div class="flow-stack" id="flow-downstream"></div>
           </section>
         </div>

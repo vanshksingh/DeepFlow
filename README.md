@@ -68,13 +68,13 @@ npm run dev          # terminal A — http://localhost:4317
 
 | Mode | Meaning |
 |------|---------|
-| **Architecture rails** | Left→right columns: Apps → Packages → Services → Platform |
-| **Signal path** | Click (or MCP jump) a file: Calls in → Signal → Calls out |
+| **Nested frames** | Figma-style encapsulation: folder frames wrap file frames wrap function frames → source |
+| **Trace focus** | Select/pin a node; unrelated rows dim; wires follow calls/imports |
 | **Live agent loop** | Watcher + `deepflow_after_edit` refreshes diffs/activity without reloading the story |
 
-Keyboard: `⌘K` / `Ctrl+K` search · `Esc` backs out of signal/source · drag to pan · wheel zoom.
+Keyboard: `⌘K` / `Ctrl+K` search · double-click function for source · `Esc` collapses · drag empty canvas to pan · wheel zoom.
 
-Deep links: `#path=apps/gateway/src/server.ts&module=start&mode=signal`
+Deep links: `#path=apps/gateway/src/documentRoutes.ts&module=startIngest&mode=signal`
 
 ---
 
@@ -98,6 +98,9 @@ Viewer must be up (`npm run dev`) for tools that animate the UI. Analysis tools 
 | `deepflow_diagnostics` | Unresolved imports / parse issues / TODOs |
 | `deepflow_after_edit` | Immediate refresh after agent writes |
 | `deepflow_jump_to` | Focus file/module/line; enter signal path; pulse |
+| `deepflow_open_flow` | Open code-flow overlay (upstream ← focus → downstream + snippets) |
+| `deepflow_explain_flow` | Structured flow story for agents; optionally opens the overlay |
+| `deepflow_close_flow` | Close the code-flow overlay |
 | `deepflow_highlight_paths` | Multi-select highlight / pin |
 | `deepflow_clear_highlights` | Clear pins; return to rails |
 | `deepflow_set_mode` | Force `rails` or `signal` |
@@ -115,6 +118,7 @@ deepflow_status
 → …edit files…
 → deepflow_after_edit { root, paths: ["…"] }
 → deepflow_jump_to { root, path, module?, pin: true }
+→ deepflow_explain_flow { root, path, module? }   # narrate inherit/call/emit with overlay
 → deepflow_impact { root, path }   # when explaining a change
 ```
 

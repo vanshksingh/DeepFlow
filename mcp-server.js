@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { createRepositoryGraph } from './src/repository-graph.js';
 import {
   summarizeGraph, stripSources, findInGraph, impactOf, pathBetween,
-  explainNode, orphans, entrypoints, DEMO_TOUR_STEPS
+  explainNode, orphans, entrypoints, DEMO_TOUR_STEPS, explainFlow
 } from './src/graph-insights.js';
 
 const run = promisify(execFile);
@@ -138,6 +138,29 @@ const tools = [
     })
   },
   {
+    name: 'deepflow_open_flow',
+    description: 'Open the DeepFlow code-flow overlay for a file/module: scrollable upstream (inherits/callers) ← focus source → downstream (calls/emits). Best way for an agent to narrate how code works.',
+    inputSchema: withRoot({
+      path: { type: 'string', description: 'Workspace-relative file path, optionally file.ts::moduleName' },
+      module: { type: 'string', description: 'Optional function/module name if not using :: in path' },
+      narrative: { type: 'string', description: 'Optional agent-written explanation shown above the flow.' }
+    }, ['root', 'path'])
+  },
+  {
+    name: 'deepflow_explain_flow',
+    description: 'Return a structured flow story (narrative + upstream/downstream snippets) and open the same overlay in the viewer so the human can follow along.',
+    inputSchema: withRoot({
+      path: { type: 'string' },
+      module: { type: 'string' },
+      openOverlay: { type: 'boolean', default: true }
+    }, ['root', 'path'])
+  },
+  {
+    name: 'deepflow_close_flow',
+    description: 'Close the code-flow overlay in the viewer.',
+    inputSchema: withRoot()
+  },
+  {
     name: 'deepflow_share_link',
     description: 'Return a shareable viewer deep-link hash for the current focus (path/module/mode).',
     inputSchema: withRoot({ path: { type: 'string' }, module: { type: 'string' }, mode: { type: 'string', enum: ['rails', 'signal'] } }, ['root', 'path'])
@@ -195,7 +218,7 @@ async function call(name, args = {}) {
         '3. npm run dev   # leaves http://127.0.0.1:4317 running',
         '4. Add MCP config pointing at this mcp-server.js (absolute path)',
         '5. Call deepflow_open_workspace with the absolute path of the repo to map',
-        '6. After edits: deepflow_after_edit; to narrate: deepflow_jump_to / deepflow_tour'
+        '6. After edits: deepflow_after_edit; to narrate: deepflow_jump_to / deepflow_explain_flow / deepflow_tour'
       ],
       mcpConfig: {
         mcpServers: {
@@ -303,6 +326,36 @@ async function call(name, args = {}) {
     }
     return { steps: DEMO_TOUR_STEPS.map((step, index) => ({ index, title: step.title, narrative: step.narrative })), tip: 'Call again with step: N or autoPlay: true' };
   }
+  if (name === 'deepflow_open_flow') {
+    await viewerRequest(viewer, '/api/track', { root });
+    const ref = args.module ? `${safePath(root, args.path)}::${args.module}` : safePathRef(root, args.path);
+    const story = explainFlow(await graphFor(root), ref);
+    return viewerRequest(viewer, '/api/mcp-command', {
+      type: 'open-flow',
+      path: story.path || safePath(root, String(args.path).split(/::|#/)[0]),
+      module: args.module || story.module,
+      narrative: args.narrative || story.narrative,
+      story
+    });
+  }
+  if (name === 'deepflow_explain_flow') {
+    const ref = args.module ? `${safePath(root, args.path)}::${args.module}` : safePathRef(root, args.path);
+    const story = explainFlow(await graphFor(root), ref);
+    if (args.openOverlay !== false) {
+      try {
+        await viewerRequest(viewer, '/api/track', { root });
+        await viewerRequest(viewer, '/api/mcp-command', {
+          type: 'open-flow',
+          path: story.path,
+          module: story.module,
+          narrative: story.narrative,
+          story
+        });
+      } catch {}
+    }
+    return story;
+  }
+  if (name === 'deepflow_close_flow') return viewerRequest(viewer, '/api/mcp-command', { type: 'close-flow' });
   if (name === 'deepflow_share_link') {
     const path = safePath(root, args.path);
     const params = new URLSearchParams();

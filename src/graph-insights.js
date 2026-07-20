@@ -240,26 +240,89 @@ export function hotFiles(graph) {
     .sort((a, b) => b.links - a.links || a.path.localeCompare(b.path));
 }
 
+function snippetFor(graph, node, maxLines = 28) {
+  const file = node.kind === 'module'
+    ? graph.nodes.find(n => n.id === node.fileId)
+    : node.kind === 'file' ? node : null;
+  const source = file?.meta?.source;
+  if (!source) return { path: node.path, label: node.label, code: '// Source unavailable in this response (stripped).', start: 1, end: 1 };
+  const lines = source.split('\n');
+  let start = 1, end = Math.min(lines.length, maxLines);
+  if (node.kind === 'module' && node.loc) {
+    start = node.loc.start;
+    end = Math.min(lines.length, Math.max(start, node.loc.end || start));
+    if (end - start > maxLines) end = start + maxLines - 1;
+  }
+  return {
+    kind: node.kind,
+    path: file.path,
+    label: node.kind === 'module' ? `${node.label}()` : node.label,
+    start,
+    end,
+    code: lines.slice(start - 1, end).join('\n')
+  };
+}
+
+/** Agent-facing flow story: upstream inherits/callers, focus code, downstream consumers. */
+export function explainFlow(graph, pathRef) {
+  const target = resolveNode(graph, pathRef);
+  if (!target) return { error: `Nothing found for: ${pathRef}` };
+  const focus = target.kind === 'file'
+    ? graph.nodes.find(n => n.fileId === target.id && n.kind === 'module') || target
+    : target;
+  const focusFile = focus.kind === 'module' ? graph.nodes.find(n => n.id === focus.fileId) : focus;
+  const focusIds = new Set(seedIds(graph, focus));
+  const upstream = [];
+  const downstream = [];
+  for (const edge of graph.edges.filter(e => FLOW.has(e.type))) {
+    if (focusIds.has(edge.to) && !focusIds.has(edge.from)) {
+      const other = graph.nodes.find(n => n.id === edge.from);
+      if (other) upstream.push({ type: edge.type, evidence: edge.evidence, line: edge.line, other: describe(graph, other.id), snippet: snippetFor(graph, other) });
+    }
+    if (focusIds.has(edge.from) && !focusIds.has(edge.to)) {
+      const other = graph.nodes.find(n => n.id === edge.to);
+      if (other) downstream.push({ type: edge.type, evidence: edge.evidence, line: edge.line, other: describe(graph, other.id), snippet: snippetFor(graph, other) });
+    }
+  }
+  const uniq = list => list.filter((item, index, arr) => arr.findIndex(x => x.other.path === item.other.path && x.other.label === item.other.label && x.type === item.type) === index).slice(0, 12);
+  const up = uniq(upstream);
+  const down = uniq(downstream);
+  const narrative = [
+    `${focus.kind === 'module' ? focus.label + '()' : focus.label} in ${focusFile?.path || focus.path}`,
+    up.length ? `receives from ${up.length} upstream node(s): ${up.slice(0, 4).map(u => u.other.label).join(', ')}` : 'has no static upstream callers in this graph',
+    down.length ? `emits to ${down.length} downstream node(s): ${down.slice(0, 4).map(d => d.other.label).join(', ')}` : 'has no static downstream consumers in this graph'
+  ].join(' — ');
+  return {
+    path: focusFile?.path || focus.path,
+    module: focus.kind === 'module' ? focus.label : null,
+    narrative,
+    focus: snippetFor(graph, focus, 40),
+    upstream: up,
+    downstream: down,
+    tip: 'Open the viewer overlay with deepflow_open_flow to walk this story visually.'
+  };
+}
+
 export const DEMO_TOUR_STEPS = [
   {
-    title: 'Architecture rails',
-    narrative: 'DeepFlow lays the repo left→right: Apps, Packages, Services, Platform. This is the judge-readable overview.',
-    command: { type: 'set-mode', mode: 'rails' }
+    title: 'Nested frames',
+    narrative: 'DeepFlow opens like a Figma artboard — folders are frames that encapsulate files, which encapsulate functions.',
+    command: { type: 'set-mode', mode: 'outline' }
   },
   {
     title: 'Gateway entry',
-    narrative: 'Jump to the HTTP gateway — the first signal into the system.',
-    command: { type: 'jump', path: 'apps/gateway/src/server.ts', module: 'start', pin: true }
+    narrative: 'Jump into the gateway ingest route and open startIngest() — the function frame owns the first signal.',
+    command: { type: 'jump', path: 'apps/gateway/src/documentRoutes.ts', module: 'startIngest', pin: true }
   },
   {
     title: 'Ingest worker',
-    narrative: 'Follow the signal into the ingest service that processes events.',
-    command: { type: 'jump', path: 'services/ingest/src/index.ts', pin: true }
+    narrative: 'Follow the trace into the ingest service. Wires land on the deepest open frame ports.',
+    command: { type: 'jump', path: 'services/ingest/src/worker/contentGuard.ts', module: 'rejectOversized', pin: true }
   },
   {
     title: 'Shared package',
-    narrative: 'Shared libraries sit on the Packages rail — reused by apps and services.',
-    command: { type: 'jump', path: 'packages/shared/src/index.ts' }
+    narrative: 'Shared libraries sit inside the packages frame — reused across apps and services.',
+    command: { type: 'jump', path: 'packages/shared/src/id.ts', module: 'createId' }
   },
   {
     title: 'Orphan detection',
@@ -268,7 +331,7 @@ export const DEMO_TOUR_STEPS = [
   },
   {
     title: 'Agent loop',
-    narrative: 'When your agent edits a file, the map refreshes live and the activity feed pulses. Call deepflow_after_edit after writes.',
-    command: { type: 'highlight-paths', paths: ['services/ingest/src/index.ts', 'apps/gateway/src/server.ts'], pin: true }
+    narrative: 'When your agent edits a file, the outline refreshes live and the activity feed pulses. Call deepflow_after_edit after writes.',
+    command: { type: 'highlight-paths', paths: ['services/ingest/src/worker/contentGuard.ts', 'apps/gateway/src/documentRoutes.ts'], pin: true }
   }
 ];

@@ -46,6 +46,9 @@ let reflowFrame = 0;
 let focusOrigin = null;
 let focusedFileId = null;
 let draggingTraceAnchorId = null;
+let hoverId = null;
+let hoverTimer = 0;
+const floatPlacements = new Map();
 
 const FLOW_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits', 'imports', 'references', 'reexports']);
 const WALK_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits']);
@@ -66,8 +69,38 @@ const modules = file => children(file.id).filter(item => item.kind === 'module')
 const filesBelow = item => graph.nodes.filter(entry => entry.kind === 'file' && ancestors(entry).some(parent => parent.id === item.id));
 const directItems = item => children(item.id).filter(child => child.kind === 'folder' || child.kind === 'file');
 const escape = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-const colors = ['#087c66', '#6056a7', '#ad6b25', '#a84b68', '#287e98', '#72843d'];
-const color = value => colors[[...String(value)].reduce((sum, letter) => sum + letter.charCodeAt(0), 0) % colors.length];
+// Distinct folder hues — spread far enough that sibling packages read as different islands.
+const FOLDER_COLORS = [
+  '#0d8a72', '#3b6fb8', '#b05a28', '#8f3f72', '#218ea0',
+  '#6f8230', '#5a48a8', '#b4474a', '#1f7a62', '#9a6b18',
+  '#3f6e8c', '#7a4570', '#177a7a', '#8a5634', '#4658a0',
+  '#2d7a48', '#a05538', '#4a5f78'
+];
+const REGION_COLOR = {
+  application: '#0d8a72',
+  package: '#5a48a8',
+  service: '#218ea0',
+  infrastructure: '#9a6b18',
+  docs: '#2d7a48',
+  test: '#8f3f72',
+  generated: '#6f8230',
+  context: '#3f6e8c'
+};
+const hashHue = value => [...String(value || '')].reduce((sum, letter) => sum + letter.charCodeAt(0), 0);
+const color = value => FOLDER_COLORS[hashHue(value) % FOLDER_COLORS.length];
+function folderTint(item) {
+  const region = mapRegion(item);
+  const base = REGION_COLOR[region] || REGION_COLOR.context;
+  // Keep region identity, but salt by path so sibling folders stay distinct.
+  const salt = hashHue(item.path || item.label);
+  if (salt % 3 === 0) return base;
+  const baseIndex = Math.max(0, FOLDER_COLORS.indexOf(base));
+  return FOLDER_COLORS[(baseIndex + 1 + (salt % (FOLDER_COLORS.length - 1))) % FOLDER_COLORS.length];
+}
+function fileTint(file) {
+  const parent = node(file.parentId);
+  return parent?.kind === 'folder' ? folderTint(parent) : color(file.path);
+}
 
 function ancestors(item) {
   const result = [];
@@ -128,7 +161,9 @@ function mergeTrace(item) {
 function rebuildTrace() {
   trace = new Set();
   traceEdges = new Set();
-  mergeTrace(selected() || entryItem());
+  const item = selected();
+  // Root overview stays quiet until hover/select of a real island.
+  if (item && !(item.kind === 'folder' && item.depth === 0)) mergeTrace(item);
   for (const pin of pinned) mergeTrace(node(pin));
 }
 function hasTrace(item) {
@@ -138,12 +173,37 @@ function hasTrace(item) {
   if (item.kind === 'folder') return filesBelow(item).some(hasTrace);
   return false;
 }
-// Flow state dims the map around the active selection. Overview stays open.
-function traceActive() { return flowMode && !!focusedFileId; }
+// Selection, pins, or hover preview drive which wires are live.
+function traceActive() {
+  const item = selected();
+  return !!(item && (item.kind === 'file' || item.kind === 'module' || item.kind === 'folder')) || pinned.size > 0 || !!hoverId;
+}
 function exitFlow() {
   flowMode = false;
   focusOrigin = null;
   focusedFileId = null;
+}
+function outlineDim() {
+  // Keep every frame fully readable — highlight via wires/hot, never fade modules out.
+  return false;
+}
+function hoverPreviewTrace() {
+  if (!hoverId || !graph) return null;
+  const item = node(hoverId);
+  if (!item) return null;
+  // Prefer hover when nothing is selected, or when hovering a different node.
+  if (selectedId && hoverId === selectedId) return null;
+  return collectTrace(item);
+}
+function activeTraceEdges() {
+  const preview = hoverPreviewTrace();
+  if (preview) return preview.edges;
+  return traceEdges;
+}
+function activeTraceNodes() {
+  const preview = hoverPreviewTrace();
+  if (preview) return preview.nodes;
+  return trace;
 }
 function traceFiles() {
   const result = new Map();
@@ -419,24 +479,26 @@ function softenedPlacement(_item, target) {
   return target;
 }
 function requestLayoutSettle(item) {
-  const file = fileOf(item);
-  if (file) activateFocus(item);
-  else {
-    const origin = captureItemOrigin(item);
-    if (origin) layoutMemory.set(origin.id, origin);
-    flowMode = true;
-  }
+  if (item) activateFocus(item);
   basePlacements.clear();
   basePlacementKey = '';
+}
+function expandAncestors(item) {
+  if (!item) return;
+  for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
+  if (item.kind === 'folder') expandedFolders.add(item.id);
+}
+function ensureDefaultOutlineExpanded() {
+  const root = rootFolder();
+  if (!root) return;
+  // Overview stays as floating collapsed islands — expand on demand.
+  expandedFolders.add(root.id);
 }
 function livesInsideExpandedFolder(file) {
   return !!file && ancestors(file).some(parent => parent.kind === 'folder' && parent.id !== rootFolder().id && expandedFolders.has(parent.id));
 }
 function focusAnchorElement() {
-  const item = selected();
-  if (item?.kind === 'module') return scene.querySelector(`[data-module="${CSS.escape(item.id)}"]`);
-  const file = fileOf(item);
-  return file ? scene.querySelector(`.card[data-id="${CSS.escape(file.id)}"], [data-inline-file="${CSS.escape(file.id)}"]`) : null;
+  return elementForSelection();
 }
 function lockFocusedAnchor(previousRect) {
   const item = selected(); const file = fileOf(item);
@@ -459,157 +521,160 @@ function lockFocusedAnchor(previousRect) {
   if (container) container.style.translate = `${dx}px ${dy}px`;
 }
 function activateFocus(item) {
-  const file = fileOf(item); if (!file) return;
-  // A file revealed inside an expanded folder is part of that recursive
-  // container. Selecting it should refine its trace in place, never promote it
-  // into the floating trace stage outside its parent.
-  if (livesInsideExpandedFolder(file)) {
-    focusedFileId = null;
-    focusOrigin = null;
-    flowMode = false;
+  const file = fileOf(item);
+  const target = file || (item?.kind === 'folder' ? item : null);
+  if (!target) return;
+  expandAncestors(target);
+  if (file) {
+    focusedFileId = file.id;
     layoutAnchorFileId = file.id;
-    return;
+    flowMode = true;
   }
-  // Capture the *rendered* position at pointer time. That location becomes the
-  // file's new anchor before a single neighbouring card begins to move.
-  focusOrigin = captureFocusOrigin(file);
-  // Focus origin is already the rendered position, including any manual drag.
-  // Normalize the offset so the position cannot be applied twice during the
-  // focus layout pass.
-  offsets.delete(file.id);
-  focusedFileId = file.id;
-  flowMode = true;
-  layoutAnchorFileId = file.id;
   basePlacements.clear();
   basePlacementKey = '';
 }
-function settleDragAnchor(item) {
-  const file = fileOf(item) || (item?.kind === 'file' ? item : null);
-  if (!file) return false;
-  if (livesInsideExpandedFolder(file)) return false;
-  const origin = captureCardOrigin(file.id) || captureFocusOrigin(file);
-  if (!origin) return false;
-  focusOrigin = origin;
-  focusedFileId = file.id;
-  flowMode = true;
-  layoutAnchorFileId = file.id;
-  offsets.delete(file.id);
-  if (!selected() || fileOf(selected())?.id !== file.id) selectedId = file.id;
-  basePlacements.clear();
-  basePlacementKey = '';
-  rebuildTrace();
-  return true;
+function settleDragAnchor() {
+  return false;
 }
-function stackColumn(items, x, top, width, lane, gap = 18) {
-  const placements = [];
-  let y = top;
-  for (const item of items) {
-    const size = cardSize(item);
-    const w = Math.min(width, Math.max(size.w, Math.min(320, width)));
-    const h = size.h;
-    const placement = { item, x, y, w, h, lane, groupId: `rail:${lane}`, boundaryKey: `rail:${lane}` };
-    placements.push(placement);
-    basePlacements.set(item.id, placement);
-    y += h + gap;
+function frameModuleSize() {
+  return { w: 188, h: 52 };
+}
+function frameFileSize(file) {
+  if (!expandedFiles.has(file.id)) return { w: 200, h: 58, children: [] };
+  const boxes = modules(file).slice(0, 18).map(module => {
+    const size = frameModuleSize(file, module);
+    return { id: module.id, item: module, w: size.w, h: size.h, size };
+  });
+  const packed = packBoxes(boxes, { gap: 10, pad: 12, maxWidth: 640 });
+  return { w: Math.max(240, packed.w + 8), h: 48 + packed.h + 10, children: packed.items };
+}
+function frameFolderSize(item, depth = 0) {
+  if (!expandedFolders.has(item.id) || depth > 8) {
+    return { w: depth ? 196 : 210, h: 58, children: [] };
   }
-  return { placements, bottom: y };
+  const boxes = folderItems(item).slice(0, depth > 3 ? 20 : 36).map(child => {
+    const size = child.kind === 'folder' ? frameFolderSize(child, depth + 1) : frameFileSize(child);
+    return { id: child.id, item: child, w: size.w, h: size.h, children: size.children, size };
+  });
+  const packed = packBoxes(boxes, { gap: 14, pad: 14, maxWidth: depth === 0 ? 980 : 720 });
+  return { w: Math.max(260, packed.w + 8), h: 48 + packed.h + 12, children: packed.items };
+}
+/** Shelf-pack floating boxes left→right, wrap on maxWidth. */
+function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900 } = {}) {
+  let x = pad, y = pad, rowH = 0, maxX = pad, maxY = pad;
+  const items = [];
+  const ordered = [...boxes].sort((a, b) => {
+    const ia = a.item || node(a.id);
+    const ib = b.item || node(b.id);
+    return (mapRegionPriority[mapRegion(ia)] ?? 9) - (mapRegionPriority[mapRegion(ib)] ?? 9)
+      || primaryTraceScore(ib) - primaryTraceScore(ia)
+      || (ia?.label || '').localeCompare(ib?.label || '');
+  });
+  for (const box of ordered) {
+    if (x > pad && x + box.w > maxWidth - pad) {
+      x = pad;
+      y += rowH + gap;
+      rowH = 0;
+    }
+    items.push({ ...box, x, y });
+    x += box.w + gap;
+    rowH = Math.max(rowH, box.h);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y + box.h);
+  }
+  return { items, w: Math.max(maxX + pad - gap, pad * 2 + 120), h: Math.max(maxY + pad, pad * 2 + 48) };
+}
+function buildFloatLayout(root) {
+  floatPlacements.clear();
+  if (!root) return { w: 800, h: 480, items: [] };
+  const top = folderItems(root).map(child => {
+    const size = child.kind === 'folder' ? frameFolderSize(child, 0) : frameFileSize(child);
+    return { id: child.id, item: child, w: size.w, h: size.h, size };
+  });
+  const packed = packBoxes(top, { gap: 22, pad: 28, maxWidth: Math.max(920, board.clientWidth - 80) });
+  relaxTopLevel(packed.items, 28);
+  let maxX = 0, maxY = 0;
+  for (const entry of packed.items) {
+    maxX = Math.max(maxX, entry.x + entry.w);
+    maxY = Math.max(maxY, entry.y + entry.h);
+  }
+  packed.w = Math.max(packed.w, maxX + 28);
+  packed.h = Math.max(packed.h, maxY + 28);
+  return packed;
+}
+function relaxTopLevel(items, pad) {
+  if (items.length < 2) return;
+  const byId = new Map(items.map(item => [item.id, item]));
+  for (let pass = 0; pass < 18; pass++) {
+    for (const edge of edgeTypes()) {
+      if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
+      const aFile = fileOf(node(edge.from));
+      const bFile = fileOf(node(edge.to));
+      if (!aFile || !bFile) continue;
+      const aTop = topLevelOwner(aFile);
+      const bTop = topLevelOwner(bFile);
+      if (!aTop || !bTop || aTop.id === bTop.id) continue;
+      const A = byId.get(aTop.id), B = byId.get(bTop.id);
+      if (!A || !B) continue;
+      const ax = A.x + A.w / 2, ay = A.y + A.h / 2;
+      const bx = B.x + B.w / 2, by = B.y + B.h / 2;
+      const dx = bx - ax, dy = by - ay;
+      const dist = Math.hypot(dx, dy) || 1;
+      const desired = 180 + (A.w + B.w) * .2;
+      const pull = Math.min(10, (dist - desired) * .08);
+      const ux = dx / dist, uy = dy / dist;
+      A.x += ux * pull * .5; A.y += uy * pull * .5;
+      B.x -= ux * pull * .5; B.y -= uy * pull * .5;
+    }
+    // Simple overlap resolve
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const A = items[i], B = items[j];
+        const ox = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
+        const oy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
+        if (ox <= 0 || oy <= 0) continue;
+        if (ox < oy) {
+          const push = ox / 2 + 6;
+          if (A.x < B.x) { A.x -= push; B.x += push; } else { A.x += push; B.x -= push; }
+        } else {
+          const push = oy / 2 + 6;
+          if (A.y < B.y) { A.y -= push; B.y += push; } else { A.y += push; B.y -= push; }
+        }
+      }
+    }
+  }
+  let minX = Infinity, minY = Infinity;
+  for (const item of items) { minX = Math.min(minX, item.x); minY = Math.min(minY, item.y); }
+  for (const item of items) { item.x += pad - minX; item.y += pad - minY; }
+}
+function topLevelOwner(item) {
+  const root = rootFolder();
+  let cursor = item;
+  while (cursor && cursor.parentId && cursor.parentId !== root?.id) cursor = node(cursor.parentId);
+  return cursor?.parentId === root?.id ? cursor : null;
 }
 function automaticLayout() {
-  const current = folder();
-  const direct = directItems(current);
-  const focusItem = selected();
-  const nestedFocus = livesInsideExpandedFolder(fileOf(focusItem));
-  const focusMode = !nestedFocus && flowMode && focusedFileId === fileOf(focusItem)?.id && (focusItem?.kind === 'module' || focusItem?.kind === 'file');
-  const focusFiles = focusMode ? focusTraceFiles(focusItem) : [];
+  const root = rootFolder();
+  const packed = buildFloatLayout(root);
   const viewportWidth = Math.max(980, board.clientWidth);
   const viewportHeight = Math.max(680, board.clientHeight);
-  const padX = 40;
-  const padY = 108;
-  const usableWidth = Math.max(860, viewportWidth - padX * 2);
+  const contentWidth = Math.max(packed.w + 40, viewportWidth - 48);
+  const contentHeight = Math.max(packed.h + 40, 420);
+  const worldW = Math.max(viewportWidth, contentWidth + 80);
+  const worldH = Math.max(viewportHeight, contentHeight + 120);
   basePlacements.clear();
-  basePlacementKey = `${scopeId}:${focusMode ? `signal:${focusItem.id}` : 'rails'}:${direct.map(item => item.id).join('|')}`;
-
-  if (focusMode) {
-    const selectedFile = fileOf(focusItem);
-    const others = focusFiles.filter(file => file.id !== selectedFile.id);
-    const upstream = others.filter(file => connectionPressure(file, selectedFile).ratio <= .5)
-      .sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a));
-    const downstream = others.filter(file => connectionPressure(file, selectedFile).ratio > .5)
-      .sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a));
-    const colGap = 36;
-    const colW = Math.floor((usableWidth - colGap * 2) / 3);
-    const leftX = padX;
-    const midX = padX + colW + colGap;
-    const rightX = padX + (colW + colGap) * 2;
-    const stackTop = padY + 28;
-    const inset = 22;
-    const left = stackColumn(upstream.slice(0, 6), leftX + inset, stackTop, colW - inset, 'upstream');
-    const mid = stackColumn([selectedFile], midX + inset, stackTop + Math.max(0, (Math.max(upstream.length, downstream.length) - 1) * 24), colW - inset, 'focus', 24);
-    const right = stackColumn(downstream.slice(0, 6), rightX + inset, stackTop, colW - inset, 'downstream');
-    const placements = [...left.placements, ...mid.placements, ...right.placements];
-    const contentBottom = Math.max(left.bottom, mid.bottom, right.bottom, stackTop + 280);
-    const worldH = Math.max(viewportHeight, contentBottom + 80);
-    const worldW = Math.max(viewportWidth, padX * 2 + usableWidth);
-    const chrome = [
-      { kind: 'stage', mode: 'signal', x: 0, y: 0, w: worldW, h: worldH, title: selectedFile.label, path: selectedFile.path || '' },
-      { kind: 'rail', lane: 'upstream', x: leftX, y: padY - 8, w: colW, h: worldH - padY, index: 0, count: upstream.length },
-      { kind: 'rail', lane: 'focus', x: midX, y: padY - 8, w: colW, h: worldH - padY, index: 1, count: 1 },
-      { kind: 'rail', lane: 'downstream', x: rightX, y: padY - 8, w: colW, h: worldH - padY, index: 2, count: downstream.length }
-    ];
-    return { placements, chrome, boundaries: [], mode: 'signal', w: worldW, h: worldH };
-  }
-
-  // Architecture rails: fixed columns that read left → right like a circuit.
-  const regions = new Map();
-  for (const item of direct) {
-    const region = mapRegion(item);
-    const list = regions.get(region) || [];
-    list.push(item);
-    regions.set(region, list);
-  }
-  const orderedRails = [...regions.entries()]
-    .sort(([a], [b]) => (mapRegionPriority[a] ?? 9) - (mapRegionPriority[b] ?? 9))
-    .map(([lane, items]) => ({
-      lane,
-      items: [...items].sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label))
-    }));
-  // Prefer at most 4 primary rails; fold leftovers into the last column.
-  const primary = orderedRails.slice(0, 4);
-  if (orderedRails.length > 4) {
-    const overflow = orderedRails.slice(4).flatMap(rail => rail.items);
-    primary[primary.length - 1].items = [...primary[primary.length - 1].items, ...overflow]
-      .sort((a, b) => primaryTraceScore(b) - primaryTraceScore(a) || a.label.localeCompare(b.label));
-  }
-  const railCount = Math.max(1, primary.length);
-  const colGap = 28;
-  const colW = Math.floor((usableWidth - colGap * (railCount - 1)) / railCount);
-  const stackTop = padY + 36;
-  const placements = [];
-  const chrome = [{ kind: 'stage', mode: 'rails', x: 0, y: 0, w: 0, h: 0, title: current.label || 'repository', path: current.path || '/' }];
-  let maxBottom = stackTop;
-  primary.forEach((rail, index) => {
-    const x = padX + index * (colW + colGap);
-    const inset = 22;
-    const stacked = stackColumn(rail.items, x + inset, stackTop, colW - inset, rail.lane);
-    placements.push(...stacked.placements);
-    maxBottom = Math.max(maxBottom, stacked.bottom);
-    chrome.push({
-      kind: 'rail',
-      lane: rail.lane,
-      x,
-      y: padY - 8,
-      w: colW,
-      h: 0,
-      index,
-      count: rail.items.length
-    });
-  });
-  const worldH = Math.max(viewportHeight, maxBottom + 96);
-  const worldW = Math.max(viewportWidth, padX * 2 + usableWidth);
-  chrome[0].w = worldW;
-  chrome[0].h = worldH;
-  for (const rail of chrome) if (rail.kind === 'rail') rail.h = worldH - padY;
-  return { placements, chrome, boundaries: [], mode: 'rails', w: worldW, h: worldH };
+  basePlacementKey = `float:${root?.id}:${expandedFolders.size}:${expandedFiles.size}:${expandedModules.size}`;
+  return {
+    placements: packed.items,
+    chrome: [{ kind: 'stage', mode: 'frames', title: root?.label || 'repository', path: '/', w: worldW, h: worldH }],
+    root,
+    mode: 'frames',
+    w: worldW,
+    h: worldH,
+    contentWidth,
+    contentHeight: Math.max(contentHeight, packed.h + 48),
+    packed
+  };
 }
 
 function sourceNotes(file) {
@@ -665,61 +730,93 @@ function diffHtml(file) {
 function diffPreviewHtml(file) {
   return '';
 }
-function folderRowsHtml(item, depth = 0) {
-  if (!expandedFolders.has(item.id) || depth > 4) return '';
-  const rows = folderItems(item).slice(0, 18).map(child => {
-    if (child.kind === 'folder') {
-      const nested = expandedFolders.has(child.id) ? `<div class="folder-contents nested">${folderRowsHtml(child, depth + 1)}</div>` : '';
-      const childFolders = children(child.id).filter(entry => entry.kind === 'folder').length;
-      return `<section class="folder-nest folder-tile ${expandedFolders.has(child.id) ? 'expanded' : ''} ${selectedId === child.id ? 'selected' : ''} ${traceActive() && !hasTrace(child) ? 'dim' : ''}" data-inline="${child.id}" data-kind="folder" data-id="${child.id}" style="--node:${color(child.path || child.label)}"><span class="port edge-port in endpoint-port ${pinned.has(child.id) ? 'pinned' : ''}" data-pin="${child.id}" data-port-for="${child.id}" data-port-side="in" title="Folder input"></span><span class="port edge-port out endpoint-port ${pinned.has(child.id) ? 'pinned' : ''}" data-pin="${child.id}" data-port-for="${child.id}" data-port-side="out" title="Folder output"></span><button class="folder-row folder-tile-head" data-inline="${child.id}" data-kind="folder"><i></i><span title="${escape(child.path || child.label)}">${expandedFolders.has(child.id) ? '⌄ ' : '› '}${escape(child.label)}</span><em>${filesBelow(child).length} files${childFolders ? ` · ${childFolders} folders` : ''}</em><span class="port ${pinned.has(child.id) ? 'pinned' : ''}" data-pin="${child.id}" title="Pin trace"></span></button>${nested}</section>`;
-    }
-    return inlineFileCardHtml(child);
+function framePorts(id) {
+  return `<span class="port edge-port in endpoint-port ${pinned.has(id) ? 'pinned' : ''}" data-pin="${id}" data-port-for="${id}" data-port-side="in" title="Trace in"></span><span class="port edge-port out endpoint-port ${pinned.has(id) ? 'pinned' : ''}" data-pin="${id}" data-port-for="${id}" data-port-side="out" title="Trace out"></span>`;
+}
+function frameStyle(placement, tint, id, { depth = 0 } = {}) {
+  const off = offsets.get(id) || { x: 0, y: 0 };
+  const glass = Math.min(78, 16 + depth * 14);
+  return `left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;translate:${off.x}px ${off.y}px;--node:${tint};--depth:${depth};--glass:${glass}%`;
+}
+function frameModuleHtml(file, module, placement, depth = 0) {
+  const hot = hoverId === module.id ? 'hot' : '';
+  const tint = fileTint(file);
+  return `<section class="frame frame-fn float ${selectedId === module.id ? 'selected' : ''} ${hot}" data-module-box="${module.id}" data-hover="${module.id}" data-drag-id="${module.id}" data-open-flow="${module.id}" style="${frameStyle(placement, tint, module.id, { depth: depth + 1 })}">
+    <header class="frame-bar" data-outline-row="${module.id}" data-hover="${module.id}">
+      ${framePorts(module.id)}
+      <button class="frame-title" data-module="${module.id}" data-open-flow="${module.id}" type="button">
+        <em class="fn-kind">${module.moduleKind === 'class' ? 'class' : 'fn'}</em>
+        <b>${escape(module.label)}()</b>
+      </button>
+      <button class="port pin-btn ${pinned.has(module.id) ? 'pinned' : ''}" data-pin="${module.id}" type="button" title="Pin"></button>
+    </header>
+  </section>`;
+}
+function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
+  const expanded = expandedFiles.has(file.id);
+  const hot = hoverId === file.id ? 'hot' : '';
+  const tint = fileTint(file);
+  const kids = expanded
+    ? (size.children || []).map(child => {
+      const module = child.item || node(child.id);
+      return module ? frameModuleHtml(file, module, child, depth) : '';
+    }).join('')
+    : '';
+  return `<section class="frame frame-file float ${expanded ? 'expanded' : ''} ${selectedId === file.id || fileOf(selected())?.id === file.id ? 'selected' : ''} ${recentFor(file) ? 'live-changed' : ''} ${file.orphan ? 'orphan' : ''} ${file.entrypoint ? 'entrypoint' : ''} ${hot}" data-id="${file.id}" data-inline="${file.id}" data-inline-file="${file.id}" data-kind="file" data-hover="${file.id}" data-drag-id="${file.id}" data-depth="${depth}" style="${frameStyle(placement, tint, file.id, { depth })}">
+    <header class="frame-bar" data-outline-row="${file.id}" data-hover="${file.id}">
+      ${framePorts(file.id)}
+      <button class="frame-toggle" data-expand="${file.id}" type="button">${expanded ? '⌄' : '›'}</button>
+      <button class="frame-title outline-label" data-inline="${file.id}" data-kind="file" data-focus-file="${file.id}" type="button">
+        <b title="${escape(file.path)}">${escape(file.label)}</b>
+        <span>${modules(file).length || '—'}</span>
+      </button>
+      <button class="port pin-btn ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" type="button" title="Pin"></button>
+    </header>
+    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(64, placement.h - 48)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
+  </section>`;
+}
+function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth = 0) {
+  const expanded = expandedFolders.has(item.id);
+  const files = filesBelow(item).length;
+  const region = mapRegion(item);
+  const copy = railCopy(region);
+  const hot = hoverId === item.id ? 'hot' : '';
+  const tint = folderTint(item);
+  const kids = expanded
+    ? (size.children || []).map(child => {
+      const childItem = child.item || node(child.id);
+      if (!childItem) return '';
+      const childSize = child.size || (childItem.kind === 'folder' ? frameFolderSize(childItem, depth + 1) : frameFileSize(childItem));
+      return childItem.kind === 'folder'
+        ? frameFolderHtml(childItem, child, childSize, depth + 1)
+        : frameFileHtml(childItem, child, childSize, depth + 1);
+    }).join('')
+    : '';
+  return `<section class="frame frame-folder float ${expanded ? 'expanded' : ''} ${selectedId === item.id ? 'selected' : ''} ${hot}" data-id="${item.id}" data-inline="${item.id}" data-kind="folder" data-region="${region}" data-depth="${depth}" data-hover="${item.id}" data-drag-id="${item.id}" style="${frameStyle(placement, tint, item.id, { depth })}">
+    <header class="frame-bar" data-outline-row="${item.id}" data-hover="${item.id}">
+      ${framePorts(item.id)}
+      <button class="frame-toggle" data-folder-expand="${item.id}" type="button">${expanded ? '⌄' : '›'}</button>
+      <button class="frame-title outline-label" data-inline="${item.id}" data-kind="folder" type="button">
+        <em class="frame-kind">${escape(copy.title)}</em>
+        <b>${escape(item.label)}</b>
+        <span>${files}</span>
+      </button>
+      <button class="port pin-btn ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" type="button" title="Pin"></button>
+    </header>
+    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(72, placement.h - 48)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
+  </section>`;
+}
+function frameTreeHtml(root, packed) {
+  if (!root) return '<p class="frame-empty">No workspace loaded.</p>';
+  const items = packed?.items || buildFloatLayout(root).items;
+  const kids = items.map(entry => {
+    const item = entry.item || node(entry.id);
+    if (!item) return '';
+    const size = entry.size || (item.kind === 'folder' ? frameFolderSize(item, 0) : frameFileSize(item));
+    return item.kind === 'folder' ? frameFolderHtml(item, entry, size, 0) : frameFileHtml(item, entry, size, 0);
   }).join('');
-  return rows || '<div class="folder-empty">No files in this folder.</div>';
-}
-function inlineFileCardHtml(file) {
-  const expanded = shouldInlineExpandFile(file);
-  const selectedClass = selectedId === file.id || fileOf(selected())?.id === file.id ? 'selected' : '';
-  const traceClass = traceActive() && !hasTrace(file) ? 'dim' : '';
-  const imports = importSummaries(file);
-  const offset = offsets.get(file.id) || { x: 0, y: 0 };
-  return `<section class="inline-file-card ${expanded ? 'expanded' : ''} ${selectedClass} ${traceClass}" data-inline="${file.id}" data-drag-id="${file.id}" data-kind="file" data-inline-file="${file.id}" style="--node:${color(file.path || file.label)};translate:${offset.x}px ${offset.y}px">
-    <span class="port edge-port in endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="in" title="File input"></span>
-    <span class="port edge-port out endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="out" title="File output"></span>
-    <button class="inline-file-head" data-inline="${file.id}" data-kind="file" data-inline-file="${file.id}">
-      <span class="file-chevron">${expanded ? '⌄' : '›'}</span><b title="${escape(file.path)}">${escape(file.label)}</b><em>${file.meta?.loc || 0} lines · ${modules(file).length} modules</em><span class="port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" title="Pin file trace"></span>
-    </button>
-    ${expanded ? inlineFileDetails(file, imports) : ''}
-  </section>`;
-}
-function inlineFileDetails(file, importEdges = importSummaries(file)) {
-  const imports = importEdges.map(importRowHtml).join('');
-  const moduleRows = displayModules(file).map(module => moduleHtml(file, module, true)).join('');
-  return `<div class="inline-file-detail">${imports ? `<div class="inline-imports">${imports}</div>` : ''}<div class="inline-modules">${moduleRows || '<span class="inline-empty">No semantic modules found.</span>'}</div></div>`;
-}
-function moduleHtml(file, module, inline = false) {
-  const expanded = expandedModules.has(module.id);
-  const klass = inline ? 'inline-module' : 'module';
-  const inlineAttr = inline ? `data-inline-module="${module.id}"` : '';
-  return `<section class="module-block ${expanded ? 'expanded' : ''} ${selectedId === module.id ? 'selected' : ''} ${selected()?.kind === 'module' && !hasTrace(module) ? 'dim' : ''}">
-    <button class="${klass}" data-module="${module.id}" data-drag-id="${file.id}" data-drag-anchor="${module.id}" ${inlineAttr}>
-      <span class="port edge-port in ${pinned.has(module.id) ? 'pinned' : ''}" data-pin="${module.id}" data-port-for="${module.id}" data-port-side="in"></span>
-      <b>${expanded ? '⌄ ' : '› '}${escape(module.label)}()</b><em>line ${module.loc.start}</em>
-      <span class="port edge-port out ${pinned.has(module.id) ? 'pinned' : ''}" data-pin="${module.id}" data-port-for="${module.id}" data-port-side="out"></span>
-    </button>
-    ${expanded ? moduleSourceHtml(file, module) : ''}
-  </section>`;
-}
-function fileHtml(file, placement) {
-  const offset = offsets.get(file.id) || { x: 0, y: 0 }; const traceClass = traceActive() && !hasTrace(file) ? 'dim' : ''; const selectedClass = selectedId === file.id || fileOf(selected())?.id === file.id ? 'selected' : ''; const expanded = expandedFiles.has(file.id); const list = modules(file); const liveClass = recentFor(file) ? 'live-changed' : ''; const focusClass = focusedFileId === file.id ? 'focus-anchor' : '';
-  const orphanClass = file.orphan ? 'orphan' : '';
-  const entryClass = file.entrypoint ? 'entrypoint' : '';
-  const importRows = expanded ? importSummaries(file).map(importRowHtml).join('') : '';
-  return `<article class="card file-card ${expanded ? 'expanded' : ''} ${traceClass} ${selectedClass} ${liveClass} ${focusClass} ${orphanClass} ${entryClass}" data-id="${file.id}" data-drag-id="${file.id}" data-kind="file" data-parent="${file.parentId}" data-group="${placement.groupId}" data-boundary="${placement.boundaryKey}" style="left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;--node:${color(file.path)};translate:${offset.x}px ${offset.y}px"><span class="port edge-port in endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="in" title="File input"></span><span class="port edge-port out endpoint-port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" data-port-for="${file.id}" data-port-side="out" title="File output"></span><div class="file-head"><button class="chevron" data-expand="${file.id}" title="${expanded ? 'Collapse modules' : 'Show modules'}">${expanded ? '⌄' : '›'}</button><small class="file-path">${escape(file.path)}</small><b>${escape(file.label)}${file.entrypoint ? '<em class="badge entry">entry</em>' : ''}${file.orphan ? '<em class="badge orphan">orphan</em>' : ''}</b><span>${file.meta?.loc || 0} lines · ${list.length} modules · ${relationshipCount(file)} links</span><button class="port ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" title="Pin file trace"></button>${file.git?.change ? `<button class="change" data-diff="${file.id}">${escape(file.git.change)} diff</button>` : ''}</div>${diffPreviewHtml(file)}${expanded ? `${importRows ? `<div class="file-imports">${importRows}</div>` : ''}<div class="module-list">${displayModules(file).map(module => moduleHtml(file, module)).join('') || '<div class="module">No semantic modules found.</div>'}</div>${diffHtml(file)}` : ''}</article>`;
-}
-function folderHtml(item, placement) {
-  const offset = offsets.get(item.id) || { x: 0, y: 0 }; const traceClass = traceActive() && !hasTrace(item) ? 'dim' : ''; const nested = children(item.id).filter(child => child.kind === 'folder').length; const files = filesBelow(item).length; const live = recentDescendants(item).length; const expanded = expandedFolders.has(item.id);
-  return `<article class="card folder-card ${expanded ? 'expanded' : ''} ${traceClass} ${selectedId === item.id ? 'selected' : ''} ${live ? 'live-changed' : ''}" data-id="${item.id}" data-drag-id="${item.id}" data-kind="folder" data-parent="${item.parentId}" data-group="${placement.groupId}" data-boundary="${placement.boundaryKey}" style="left:${placement.x}px;top:${placement.y}px;width:${placement.w}px;--node:${color(item.path)};translate:${offset.x}px ${offset.y}px"><span class="port edge-port in endpoint-port ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" data-port-for="${item.id}" data-port-side="in" title="Folder input"></span><span class="port edge-port out endpoint-port ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" data-port-for="${item.id}" data-port-side="out" title="Folder output"></span><header><button class="folder-toggle" data-folder-expand="${item.id}" title="${expanded ? 'Collapse folder' : 'Reveal files'}">${expanded ? '⌄' : '›'}</button><b>${escape(item.label)}</b><small>${live ? `${live} live` : files}</small><button class="folder-pin ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" title="Pin folder trace">•</button><p><strong>${escape(mapRegion(item))}</strong>${nested ? ` · ${nested} folders` : ''} · ${files} files · ${relationshipCount(item)} links${live ? ` · ${live} changed` : ''}</p></header>${expanded ? `<div class="folder-contents">${folderRowsHtml(item)}</div>` : ''}</article>`;
+  const w = packed?.w || 800, h = packed?.h || 480;
+  return `<div class="frame-artboard" data-id="${root.id}" data-kind="folder" style="width:${w}px;height:${h}px">${kids}</div>`;
 }
 function changeLines(file, limit = 6) {
   const lines = (file.git?.diff || '').split('\n').filter(line => /^[+-]/.test(line) && !/^(\+\+\+|---)/.test(line)).slice(0, limit);
@@ -812,82 +909,66 @@ function renderActivityFeed() {
 }
 function chromeHtml(layout) {
   return (layout.chrome || []).map(piece => {
-    if (piece.kind === 'stage') {
-      const modeLabel = piece.mode === 'signal' ? 'Signal path' : 'Architecture map';
-      const hint = piece.mode === 'signal'
-        ? 'Callers feed the signal on the left. Consumers leave on the right.'
-        : 'Read left to right — entry, shared code, runtime, platform.';
-      const stats = graph?.stats || {};
-      const meta = piece.mode === 'rails'
-        ? `${stats.files || 0} files · ${stats.modules || 0} modules · ${stats.orphaned || 0} orphans`
-        : hint;
-      return `<div class="stage-banner ${piece.mode}" data-stage="${piece.mode}">
-        <div class="stage-banner-copy">
-          <span class="stage-kicker">${modeLabel}</span>
-          <h2>${escape(piece.title)}</h2>
-          <p>${escape(piece.path || hint)}</p>
-        </div>
-        <p class="stage-hint">${escape(meta)}</p>
-      </div>`;
-    }
-    const copy = railCopy(piece.lane);
-    return `<div class="arch-rail ${piece.lane}" data-rail="${piece.lane}" style="left:${piece.x}px;top:${piece.y}px;width:${piece.w}px;height:${piece.h}px;--rail:${color(piece.lane)}">
-      <header>
-        <em>${String(piece.index + 1).padStart(2, '0')}</em>
-        <div><b>${escape(copy.title)}</b><span>${escape(copy.subtitle)}</span></div>
-        <small>${piece.count}</small>
-      </header>
-      <i class="rail-spine" aria-hidden="true"></i>
+    if (piece.kind !== 'stage') return '';
+    const stats = graph?.stats || {};
+    return `<div class="stage-banner frames minimal" data-stage="frames">
+      <div class="stage-banner-copy">
+        <span class="stage-kicker">Hover to trace · click to pin focus</span>
+        <h2>${escape(piece.title)}</h2>
+      </div>
+      <p class="stage-hint">${stats.files || 0} files · ${stats.modules || 0} fn</p>
     </div>`;
   }).join('');
 }
 function render() {
   if (!graph) return;
-  const previousRects = new Map([...scene.querySelectorAll('.card[data-id]')].map(element => [`card:${element.dataset.id}`, element.getBoundingClientRect()]));
   rememberLayoutPositions();
   const layout = automaticLayout();
   world.style.width = `${layout.w}px`;
   world.style.height = `${layout.h}px`;
-  world.dataset.layoutMode = layout.mode || 'rails';
-  scene.innerHTML = chromeHtml(layout) + layout.placements.map(placement => placement.item.kind === 'folder' ? folderHtml(placement.item, placement) : fileHtml(placement.item, placement)).join('');
-  bindScene(); applyCanvas(); refreshFocusClasses(); drawEdges(); animateReflowEdges(720); renderMinimap(); renderActivityFeed();
-  requestAnimationFrame(() => {
-    for (const element of scene.querySelectorAll('.card[data-id]')) {
-      const before = previousRects.get(`card:${element.dataset.id}`);
-      if (!before) continue;
-      const after = element.getBoundingClientRect();
-      const dx = (before.left - after.left) / canvas.scale, dy = (before.top - after.top) / canvas.scale;
-      if (Math.abs(dx) < .5 && Math.abs(dy) < .5) continue;
-      element.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }], { duration: 420, easing: 'cubic-bezier(.2, .8, .2, 1)' });
-    }
-  });
+  world.dataset.layoutMode = 'frames';
+  world.classList.toggle('previewing', !!hoverId && hoverId !== selectedId);
+  scene.innerHTML = `${chromeHtml(layout)}<div class="frame-stage" style="width:${layout.contentWidth || layout.w - 80}px;height:${layout.contentHeight || layout.h - 100}px">${frameTreeHtml(layout.root, layout.packed)}</div>`;
+  bindScene();
+  bindHoverTrace();
+  applyCanvas();
+  refreshFocusClasses();
+  drawEdges();
+  animateReflowEdges(360);
+  renderMinimap();
+  renderActivityFeed();
 }
 
 function folderOwnsEndpoint(folder) {
   return !expandedFolders.has(folder.id);
 }
 function fileOwnsEndpoint(file) {
-  return !(expandedFiles.has(file.id) || shouldInlineExpandFile(file));
+  return !expandedFiles.has(file.id);
 }
 function endpointFor(edge, side) {
-  const id = side === 'from' ? edge.from : edge.to; const item = node(id); const file = fileOf(item);
+  const id = side === 'from' ? edge.from : edge.to;
+  const item = node(id);
+  const file = fileOf(item);
   const sourcePort = `source:${edge.id}:${side === 'from' ? 'out' : 'in'}`;
   if (scene.querySelector(`[data-source-port="${CSS.escape(sourcePort)}"]`)) return sourcePort;
   const importPort = importPortId(edge, side);
   if (CONTEXT_TYPES.has(edge.type) && scene.querySelector(`[data-import-port="${CSS.escape(importPort)}"]`)) return importPort;
-  if (item?.kind === 'module' && scene.querySelector(`[data-inline-module="${CSS.escape(item.id)}"]`)) return `inline-module:${item.id}`;
-  if (item?.kind === 'module' && expandedFiles.has(item.fileId) && scene.querySelector(`[data-module="${item.id}"]`)) return `module:${item.id}`;
-  if (file && fileOwnsEndpoint(file) && scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"]`)) return `inline:${file.id}`;
-  if (file && fileOwnsEndpoint(file) && scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`)) return file.id;
-  if (file && item?.kind === 'file' && scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"]`)) return `inline:${file.id}`;
-  if (file && item?.kind === 'file' && scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`)) return file.id;
-  // An expanded folder has delegated its connection point to the visible
-  // children inside it.  Walk past it until we find the first still-collapsed
-  // container instead of targeting a hidden parent-side port.
+  if (item?.kind === 'module' && scene.querySelector(`[data-inline-module="${CSS.escape(item.id)}"],[data-module="${CSS.escape(item.id)}"]`)) {
+    return `inline-module:${item.id}`;
+  }
+  if (file && scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"],[data-id="${CSS.escape(file.id)}"]`)) {
+    if (fileOwnsEndpoint(file) || item?.kind === 'file') return file.id;
+    // File is expanded: still allow file port when the module row is missing.
+    if (item?.kind === 'module') {
+      let visible = nearestVisibleFolder(file);
+      while (visible && !folderOwnsEndpoint(visible)) visible = nearestVisibleFolder(node(visible.parentId));
+      return visible?.id || file.id;
+    }
+    return file.id;
+  }
   let visible = nearestVisibleFolder(file || item);
   while (visible && !folderOwnsEndpoint(visible)) visible = nearestVisibleFolder(node(visible.parentId));
-  if (visible) return visible.id;
-  return null;
+  return visible?.id || null;
 }
 function isDetailedEndpoint(id) {
   return id?.startsWith('inline-module:') || id?.startsWith('module:') || id?.startsWith('source:');
@@ -940,13 +1021,9 @@ function crossingOffsets(edges) {
 function usesModulePort(id) {
   return id?.startsWith('inline-module:') || id?.startsWith('module:') || id?.startsWith('source:');
 }
-function showOverviewEdge(edge) {
-  if (traceActive() || expandedFolders.size || expandedFiles.size || expandedModules.size || pinned.size) return true;
-  // Architecture map only draws links that jump between rails — the story of
-  // the system, not every internal chatter inside one column.
-  const fromRegion = mapRegion(fileOf(node(edge.from)) || node(edge.from));
-  const toRegion = mapRegion(fileOf(node(edge.to)) || node(edge.to));
-  return fromRegion !== toRegion;
+function showOverviewEdge() {
+  // Outline canvas always draws the active trace edges to visible ports.
+  return true;
 }
 function moduleBusPath(a, b, spread, cross, backwards) {
   const lanePad = 34 + Math.min(46, Math.abs(cross) * .55);
@@ -958,17 +1035,24 @@ function moduleBusPath(a, b, spread, cross, backwards) {
 function drawEdges() {
   wires.innerHTML = '';
   scene.querySelectorAll('.connected-port').forEach(port => port.classList.remove('connected-port'));
+  scene.querySelectorAll('.frame.trace-lit').forEach(el => el.classList.remove('trace-lit'));
+  const liveEdges = activeTraceEdges();
+  const liveNodes = activeTraceNodes();
+  const previewing = !!hoverPreviewTrace();
+  if (!liveEdges.size) return;
+  for (const id of liveNodes) {
+    scene.querySelector(`[data-id="${CSS.escape(id)}"],[data-module-box="${CSS.escape(id)}"]`)?.classList.add('trace-lit');
+  }
   const unique = new Map();
   for (const edge of edgeTypes()) {
-    if (!traceEdges.has(edge.id)) continue;
-    if (!showOverviewEdge(edge)) continue;
+    if (!liveEdges.has(edge.id)) continue;
     if (sameModuleOrInternalContainer(edge)) continue;
-    const from = endpointFor(edge, 'from'), to = endpointFor(edge, 'to'); if (!from || !to || from === to) continue;
+    const from = endpointFor(edge, 'from'), to = endpointFor(edge, 'to');
+    if (!from || !to || from === to) continue;
     const key = isDetailedEndpoint(from) || isDetailedEndpoint(to) ? edge.id : `${from}:${to}:${edge.type}`;
     if (!unique.has(key)) unique.set(key, { ...edge, from, to });
   }
   const rendered = [...unique.values()].map((edge, index) => ({ edge, index, a: point(edge.from, 'out'), b: point(edge.to, 'in') })).filter(item => item.a && item.b);
-  const relaxedFocus = !!draggingTraceAnchorId || (!!focusedFileId && (selected()?.kind === 'module' || selected()?.kind === 'file'));
   const crossOffsets = crossingOffsets(rendered);
   const pairCounts = new Map();
   rendered.forEach(({ edge }) => { const key = `${edge.from}:${edge.to}`; pairCounts.set(key, (pairCounts.get(key) || 0) + 1); });
@@ -979,29 +1063,40 @@ function drawEdges() {
     const pairIndex = pairSeen.get(pairKey) || 0;
     pairSeen.set(pairKey, pairIndex + 1);
     const total = pairCounts.get(pairKey) || 1;
-    const spread = (pairIndex - (total - 1) / 2) * Math.min(18, Math.max(8, 42 / total));
+    const spread = (pairIndex - (total - 1) / 2) * Math.min(14, Math.max(6, 36 / total));
     const cross = crossOffsets.get(edge.id) || 0;
-    const span = Math.max(58, Math.min(230, Math.abs(b.x - a.x) * .5));
-    const backwards = b.x < a.x;
-    const bend = (backwards ? 110 + (index % 3) * 24 : 0) + spread + cross;
-    const startY = a.y + spread * .3 + cross * .22, endY = b.y + spread * .3 - cross * .22;
-    const midLift = cross * .65;
-    const moduleRoute = !relaxedFocus && (usesModulePort(edge.from) || usesModulePort(edge.to));
-    // Flow stage uses a single soft Bézier so wires relax as cards settle.
-    // Overview keeps the slightly busier curves that separate parallel links.
-    const focusHandle = Math.max(76, Math.min(300, Math.abs(b.x - a.x) * .46));
+    const focusHandle = Math.max(64, Math.min(260, Math.abs(b.x - a.x) * .42));
     const focusDirection = b.x >= a.x ? 1 : -1;
-    const pathData = relaxedFocus
-      ? `M ${a.x} ${a.y} C ${a.x + focusDirection * focusHandle} ${a.y}, ${b.x - focusDirection * focusHandle} ${b.y}, ${b.x} ${b.y}`
-      : moduleRoute ? moduleBusPath(a, b, spread, cross, backwards) : backwards
-      ? `M ${a.x} ${startY} C ${a.x + span} ${startY + bend}, ${b.x - span} ${endY + bend + midLift}, ${b.x} ${endY}`
-      : `M ${a.x} ${startY} C ${a.x + span} ${startY + spread + cross}, ${b.x - span} ${endY + spread - cross}, ${b.x} ${endY}`;
+    const pathData = `M ${a.x} ${a.y} C ${a.x + focusDirection * focusHandle} ${a.y + spread}, ${b.x - focusDirection * focusHandle} ${b.y + spread * .2 + cross}, ${b.x} ${b.y}`;
     const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     path.setAttribute('d', pathData);
-    path.setAttribute('class', `wire moving ${edge.type} ${moduleRoute ? 'module-bus' : ''} ${Math.abs(cross) > 18 ? 'resolved-crossing' : ''} ${relaxedFocus ? 'flow-stage' : 'overview-stage'}`);
-    path.style.setProperty('--delay', `${index * -0.14}s`);
+    path.setAttribute('class', `wire moving ${edge.type} flow-stage ${previewing ? 'preview' : 'committed'}`);
+    path.style.setProperty('--delay', `${index * -0.1}s`);
     path.append(Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'title'), { textContent: `${edge.type}: ${edge.evidence}` }));
     wires.append(path);
+  });
+}
+function bindHoverTrace() {
+  const setHover = id => {
+    if (hoverId === id) return;
+    hoverId = id;
+    world.classList.toggle('previewing', !!id && id !== selectedId);
+    scene.querySelectorAll('.frame.hot').forEach(el => el.classList.remove('hot'));
+    if (id) scene.querySelector(`[data-id="${CSS.escape(id)}"],[data-module-box="${CSS.escape(id)}"]`)?.classList.add('hot');
+    drawEdges();
+    refreshFocusClasses();
+  };
+  scene.querySelectorAll('.frame.float').forEach(frame => {
+    frame.addEventListener('pointerenter', event => {
+      event.stopPropagation();
+      clearTimeout(hoverTimer);
+      setHover(frame.dataset.moduleBox || frame.dataset.id || frame.dataset.hover);
+    });
+    frame.addEventListener('pointerleave', event => {
+      if (frame.contains(event.relatedTarget)) return;
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => setHover(null), 60);
+    });
   });
 }
 function point(id, side) {
@@ -1052,98 +1147,228 @@ function resizeZones(groups) {
 function visibleDragMembers(card, item) {
   return [card];
 }
-function bindDrag(card) {
+function bindFrameDrag(frame) {
+  const id = frame.dataset.dragId;
+  if (!id) return;
   let drag;
-  card.addEventListener('pointerdown', event => {
-    const isModuleHandle = !!card.dataset.module;
-    if (event.button !== 0 || event.target.closest('[data-pin]') || (event.target.closest('button,a') && !isModuleHandle)) return;
-    event.stopPropagation(); const item = node(card.dataset.dragId);
-    const topCard = scene.querySelector(`.card[data-id="${CSS.escape(card.dataset.dragId)}"]`);
-    const inlineCard = card.closest(`[data-inline-file="${CSS.escape(card.dataset.dragId)}"]`);
-    const dragElement = topCard || inlineCard || card.closest('.card[data-id]') || card;
-    const members = visibleDragMembers(dragElement, item);
-    draggingTraceAnchorId = item?.kind === 'file' ? item.id : fileOf(item)?.id || null;
-    drag = { x: event.clientX, y: event.clientY, moved: false, remembered: false, members: members.map(member => ({ member, id: member.dataset.dragId, offset: offsets.get(member.dataset.dragId) || { x: 0, y: 0 }, boundary: member.dataset.boundary })) };
-    card.setPointerCapture(event.pointerId); dragElement.classList.add('dragging'); app.classList.add('dragging');
+  // Drag from the chrome only — buttons (title / expand / pin) stay clickable.
+  const onBar = event => event.target.closest('.frame-bar') && !event.target.closest('button,a,[data-pin]');
+  frame.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !onBar(event)) return;
+    event.stopPropagation();
+    const current = offsets.get(id) || { x: 0, y: 0 };
+    drag = { x: event.clientX, y: event.clientY, ox: current.x, oy: current.y, moved: false, remembered: false };
+    draggingTraceAnchorId = id;
+    frame.classList.add('dragging');
+    app.classList.add('dragging');
+    frame.setPointerCapture(event.pointerId);
   });
-  card.addEventListener('pointermove', event => {
-    if (!drag) return; const dx = (event.clientX - drag.x) / canvas.scale, dy = (event.clientY - drag.y) / canvas.scale; drag.moved ||= Math.abs(dx) + Math.abs(dy) > 3; if (drag.moved && !drag.remembered) { remember(); drag.remembered = true; }
-    const zones = new Set(); for (const item of drag.members) { const value = { x: item.offset.x + dx, y: item.offset.y + dy }; offsets.set(item.id, value); item.member.style.translate = `${value.x}px ${value.y}px`; if (item.boundary) zones.add(item.boundary); } resizeZones(zones); scheduleDraw(); animateReflowEdges(180);
-  });
-  const end = event => {
+  frame.addEventListener('pointermove', event => {
     if (!drag) return;
-    const moved = drag.moved;
-    const item = node(card.dataset.dragId);
-    const topCard = scene.querySelector(`.card[data-id="${CSS.escape(card.dataset.dragId)}"]`);
-    const inlineCard = card.closest(`[data-inline-file="${CSS.escape(card.dataset.dragId)}"]`);
-    const dragElement = topCard || inlineCard || card.closest('.card[data-id]') || card;
-    if (moved) { card.dataset.dragged = String(Date.now()); dragElement.dataset.dragged = card.dataset.dragged; event?.preventDefault(); }
-    drag = null; dragElement.classList.remove('dragging'); app.classList.remove('dragging');
+    const dx = (event.clientX - drag.x) / canvas.scale;
+    const dy = (event.clientY - drag.y) / canvas.scale;
+    drag.moved ||= Math.abs(dx) + Math.abs(dy) > 3;
+    if (drag.moved && !drag.remembered) { remember(); drag.remembered = true; }
+    const value = { x: drag.ox + dx, y: drag.oy + dy };
+    offsets.set(id, value);
+    frame.style.translate = `${value.x}px ${value.y}px`;
+    scheduleDraw();
+    animateReflowEdges(160);
+  });
+  const end = () => {
+    if (!drag) return;
+    if (drag.moved) frame.dataset.dragged = String(Date.now());
+    drag = null;
+    frame.classList.remove('dragging');
+    app.classList.remove('dragging');
     draggingTraceAnchorId = null;
-    if (moved && settleDragAnchor(item)) render();
-    else { drawEdges(); renderMinimap(); }
+    drawEdges();
+    renderMinimap();
   };
-  card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+  frame.addEventListener('pointerup', end);
+  frame.addEventListener('pointercancel', end);
+}
+function focusFileFrame(file, { expand = true } = {}) {
+  if (!file) return;
+  remember();
+  activateFocus(file);
+  layoutAnchorFileId = file.id;
+  if (expand) expandedFiles.add(file.id);
+  selectItem(file.id);
+  flowMode = true;
+  rebuildTrace();
+  render();
+  updateInspector();
+  requestAnimationFrame(() => {
+    animateReflowEdges(900);
+    pulseSelection();
+  });
+}
+function codeBlockHtml(item, { edge, role } = {}) {
+  const file = fileOf(item) || (item.kind === 'file' ? item : null);
+  const source = file?.meta?.source || '';
+  const lines = source.split('\n');
+  let start = 1, end = Math.min(lines.length, 20);
+  if (item.kind === 'module' && item.loc) {
+    start = item.loc.start;
+    end = Math.min(lines.length, Math.max(start, Math.min(item.loc.end || start, start + 36)));
+  }
+  const code = lines.slice(start - 1, end).map((text, index) => {
+    const line = start + index;
+    return `<span class="flow-line"><i>${line}</i><code>${escape(text) || ' '}</code></span>`;
+  }).join('') || '<span class="flow-line"><i>—</i><code>No source</code></span>';
+  const title = item.kind === 'module' ? `${item.label}()` : item.label;
+  const meta = edge ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}` : (item.kind === 'module' ? `L${start}–${end}` : file?.path || '');
+  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}">
+    <header><b>${escape(title)}</b><span>${escape(meta)}</span></header>
+    <small>${escape(file?.path || item.path || '')}</small>
+    <pre>${code}</pre>
+  </article>`;
+}
+function flowNeighbors(focus) {
+  const seeds = new Set(sourceSeeds(focus));
+  const upstream = [];
+  const downstream = [];
+  // Overlay shows full static flow regardless of ribbon edge toggles.
+  for (const edge of (graph?.edges || []).filter(e => FLOW_TYPES.has(e.type))) {
+    if (seeds.has(edge.to) && !seeds.has(edge.from)) {
+      const other = node(edge.from);
+      if (other) upstream.push({ edge, other });
+    }
+    if (seeds.has(edge.from) && !seeds.has(edge.to)) {
+      const other = node(edge.to);
+      if (other) downstream.push({ edge, other });
+    }
+  }
+  const rank = type => ({ inherits: 0, calls: 1, dataflow: 2, events: 3, imports: 4, references: 5, reexports: 6 }[type] ?? 9);
+  const dedupe = list => list
+    .filter((item, index, arr) => arr.findIndex(x => x.other.id === item.other.id && x.edge.type === item.edge.type) === index)
+    .sort((a, b) => rank(a.edge.type) - rank(b.edge.type) || (a.other.label || '').localeCompare(b.other.label || ''))
+    .slice(0, 16);
+  return { upstream: dedupe(upstream), downstream: dedupe(downstream) };
+}
+function openFlowOverlay(item, { narrative } = {}) {
+  const focus = item?.kind === 'file' ? (modules(item)[0] || item) : item;
+  if (!focus || !graph) return;
+  const file = fileOf(focus) || (focus.kind === 'file' ? focus : null);
+  const { upstream, downstream } = flowNeighbors(focus);
+  const dialog = $('#flow-overlay');
+  $('#flow-kicker').textContent = focus.kind === 'module' ? 'MODULE FLOW' : 'FILE FLOW';
+  $('#flow-title').textContent = focus.kind === 'module' ? `${focus.label}()` : focus.label;
+  $('#flow-path').textContent = file?.path || focus.path || '';
+  $('#flow-focus-meta').textContent = focus.kind === 'module' ? `lines ${focus.loc?.start || '?'}–${focus.loc?.end || '?'}` : `${modules(file || {}).length} modules`;
+  const story = narrative || [
+    upstream.length ? `${upstream.length} upstream` : 'no upstream',
+    downstream.length ? `${downstream.length} downstream` : 'no downstream'
+  ].join(' · ');
+  const narrativeEl = $('#flow-narrative');
+  narrativeEl.hidden = !story;
+  narrativeEl.textContent = story;
+  $('#flow-upstream').innerHTML = upstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'from' })).join('') || '<p class="flow-empty">Nothing feeds into this node statically.</p>';
+  $('#flow-focus').innerHTML = codeBlockHtml(focus, { role: 'here' });
+  $('#flow-downstream').innerHTML = downstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'to' })).join('') || '<p class="flow-empty">Nothing consumes this node statically.</p>';
+  dialog?.querySelectorAll('[data-flow-jump]').forEach(card => card.addEventListener('click', () => {
+    const target = node(card.dataset.flowJump);
+    if (!target) return;
+    closeFlowOverlay();
+    if (target.kind === 'module') openFlowOverlay(target);
+    else focusFileFrame(fileOf(target) || target);
+  }));
+  if (dialog && !dialog.open) dialog.showModal();
+  selectItem(focus.id);
+  activateFocus(focus);
+  if (file) expandedFiles.add(file.id);
+  rebuildTrace();
+  render();
+  requestAnimationFrame(() => animateReflowEdges(1000));
+}
+function closeFlowOverlay() {
+  const dialog = $('#flow-overlay');
+  if (dialog?.open) dialog.close();
 }
 function bindScene() {
-  scene.querySelectorAll('[data-drag-id]').forEach(bindDrag);
-  scene.querySelectorAll('[data-folder-expand]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.folderExpand; remember(); const item = node(id); requestLayoutSettle(item); expandedFolders.has(id) ? expandedFolders.delete(id) : expandedFolders.add(id); selectItem(id); render(); updateInspector(); }));
-  scene.querySelectorAll('[data-inline]').forEach(row => {
-    row.addEventListener('click', event => {
-      if (event.target.closest('[data-pin]') || Date.now() - Number(row.dataset.dragged || 0) < 240) return;
-      event.stopPropagation();
-      const item = node(row.dataset.inline); if (!item) return;
-      if (item.kind === 'file') activateFocus(item);
-      selectItem(item.id);
-      layoutAnchorFileId = item.kind === 'file' ? item.id : layoutAnchorFileId;
-      rebuildTrace(); render(); updateInspector();
-    });
-    row.addEventListener('dblclick', event => { event.stopPropagation(); const item = node(row.dataset.inline); if (!item) return; remember(); requestLayoutSettle(item); if (item.kind === 'file') { layoutAnchorFileId = item.id; expandedFiles.add(item.id); } else expandedFolders.add(item.id); render(); updateInspector(); });
-  });
-  scene.querySelectorAll('[data-inline-import]').forEach(row => row.addEventListener('click', event => {
-    event.stopPropagation(); remember(); selectedImportEdgeId = row.dataset.inlineImport;
-    const edge = edgeTypes().find(item => item.id === selectedImportEdgeId); const file = fileOf(node(edge?.from)) || fileOf(node(edge?.to));
-    if (file) selectedId = file.id;
-    rebuildTrace(); render(); updateInspector();
+  scene.querySelectorAll('.frame.float[data-drag-id]').forEach(bindFrameDrag);
+  scene.querySelectorAll('[data-folder-expand]').forEach(button => button.addEventListener('click', event => {
+    event.stopPropagation();
+    const id = button.dataset.folderExpand;
+    remember();
+    expandedFolders.has(id) ? expandedFolders.delete(id) : expandedFolders.add(id);
+    selectItem(id);
+    render();
+    updateInspector();
   }));
-  scene.querySelectorAll('[data-expand]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.expand; remember(); const item = node(id); requestLayoutSettle(item); layoutAnchorFileId = id; expandedFiles.has(id) ? (expandedFiles.delete(id), sourceFiles.delete(id)) : expandedFiles.add(id); render(); }));
-  scene.querySelectorAll('[data-source]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.source; remember(); const item = node(id); requestLayoutSettle(item); layoutAnchorFileId = id; expandedFiles.add(id); sourceFiles.has(id) ? sourceFiles.delete(id) : sourceFiles.add(id); render(); }));
-  scene.querySelectorAll('[data-diff]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); selectItem(button.dataset.diff); }));
-  scene.querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.pin; remember(); pinned.has(id) ? pinned.delete(id) : pinned.add(id); rebuildTrace(); render(); updateInspector(); }));
-  scene.querySelectorAll('[data-module]').forEach(element => {
-    element.addEventListener('click', event => { if (event.target.closest('[data-pin]') || Date.now() - Number(element.dataset.dragged || 0) < 240) return; event.stopPropagation(); const module = node(element.dataset.module); requestLayoutSettle(module); selectItem(module.id); render(); });
-    element.addEventListener('dblclick', event => {
-      event.stopPropagation(); const module = node(element.dataset.module); if (!module) return;
-      remember(); requestLayoutSettle(module); layoutAnchorFileId = module.fileId; expandedFiles.add(module.fileId);
-      expandedModules.has(module.id) ? expandedModules.delete(module.id) : expandedModules.add(module.id);
-      render(); updateInspector();
-    });
-  });
-  scene.querySelectorAll('.card[data-id]').forEach(card => {
-    card.addEventListener('click', event => {
-      if (Date.now() - Number(card.dataset.dragged || 0) < 240 || event.target.closest('button,[data-module],[data-inline]')) return;
-      const item = node(card.dataset.id);
-      requestLayoutSettle(item);
-      selectItem(card.dataset.id);
-      render();
-    });
-    card.addEventListener('dblclick', event => {
-      if (event.target.closest('button,[data-module],[data-inline]')) return;
-      const item = node(card.dataset.id);
+  scene.querySelectorAll('[data-expand]').forEach(button => button.addEventListener('click', event => {
+    event.stopPropagation();
+    const file = node(button.dataset.expand);
+    if (!file) return;
+    if (expandedFiles.has(file.id)) {
       remember();
-      requestLayoutSettle(item);
-      if (item.kind === 'folder') expandedFolders.has(item.id) ? expandedFolders.delete(item.id) : expandedFolders.add(item.id);
-      else { layoutAnchorFileId = item.id; expandedFiles.has(item.id) ? (expandedFiles.delete(item.id), sourceFiles.delete(item.id)) : (expandedFiles.add(item.id), sourceFiles.add(item.id)); }
+      expandedFiles.delete(file.id);
+      selectItem(file.id);
+      render();
+      updateInspector();
+    } else {
+      focusFileFrame(file, { expand: true });
+    }
+  }));
+  scene.querySelectorAll('[data-focus-file]').forEach(button => button.addEventListener('click', event => {
+    if (Date.now() - Number(button.closest('.frame')?.dataset.dragged || 0) < 220) return;
+    event.stopPropagation();
+    focusFileFrame(node(button.dataset.focusFile), { expand: true });
+  }));
+  scene.querySelectorAll('.outline-label[data-inline]:not([data-focus-file])').forEach(row => {
+    row.addEventListener('click', event => {
+      if (event.target.closest('[data-pin]') || Date.now() - Number(row.closest('.frame')?.dataset.dragged || 0) < 220) return;
+      event.stopPropagation();
+      const item = node(row.dataset.inline);
+      if (!item) return;
+      if (item.kind === 'file') return focusFileFrame(item, { expand: true });
+      activateFocus(item);
+      selectItem(item.id);
       render();
       updateInspector();
     });
+    row.addEventListener('dblclick', event => {
+      event.stopPropagation();
+      const item = node(row.dataset.inline);
+      if (!item || item.kind !== 'folder') return;
+      remember();
+      expandedFolders.has(item.id) ? expandedFolders.delete(item.id) : expandedFolders.add(item.id);
+      selectItem(item.id);
+      render();
+    });
+  });
+  scene.querySelectorAll('.frame-fn[data-open-flow]').forEach(element => element.addEventListener('click', event => {
+    if (event.target.closest('[data-pin]')) return;
+    if (Date.now() - Number(element.dataset.dragged || 0) < 220) return;
+    event.stopPropagation();
+    const module = node(element.dataset.openFlow);
+    if (module) openFlowOverlay(module);
+  }));
+  scene.querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => {
+    event.stopPropagation();
+    const id = button.dataset.pin;
+    remember();
+    pinned.has(id) ? pinned.delete(id) : pinned.add(id);
+    rebuildTrace();
+    render();
+    updateInspector();
+  }));
+}
+function initFlowOverlay() {
+  $('#flow-close')?.addEventListener('click', () => closeFlowOverlay());
+  $('#flow-overlay')?.addEventListener('click', event => {
+    if (event.target === $('#flow-overlay')) closeFlowOverlay();
+  });
+  $('#flow-overlay')?.addEventListener('cancel', event => {
+    event.preventDefault();
+    closeFlowOverlay();
   });
 }
 function bindActivityFeed() {
   $('#activity-list')?.querySelectorAll('[data-open-change]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation(); const file = fileForPath(button.dataset.openChange); if (!file) return;
-    remember(); selectedId = file.id; layoutAnchorFileId = file.id; activateFocus(file); expandedFiles.add(file.id);
-    for (const parent of ancestors(file).filter(item => item.kind === 'folder').slice(-3)) expandedFolders.add(parent.id);
+    remember(); selectedId = file.id; layoutAnchorFileId = file.id; activateFocus(file); expandAncestors(file); expandedFiles.add(file.id);
     rebuildTrace(); render(); updateInspector();
   }));
   $('#activity-list')?.querySelectorAll('[data-review-change]').forEach(button => button.addEventListener('click', event => {
@@ -1155,27 +1380,23 @@ function bindActivityFeed() {
 }
 function refreshFocusClasses() {
   const selectedFile = fileOf(selected());
+  const lit = activeTraceNodes();
   world.classList.toggle('flow-active', traceActive());
-  world.classList.toggle('rails-active', !traceActive());
-  scene.querySelectorAll('.card[data-id]').forEach(card => {
-    card.classList.toggle('selected', card.dataset.id === selectedId || card.dataset.id === selectedFile?.id);
-    card.classList.toggle('focus-anchor', card.dataset.id === focusedFileId);
-    card.classList.toggle('dim', false);
+  world.classList.toggle('frames-active', true);
+  world.classList.toggle('previewing', !!hoverPreviewTrace());
+  world.classList.toggle('rails-active', false);
+  scene.querySelectorAll('.frame-folder[data-id], .frame-file[data-id]').forEach(frame => {
+    const item = node(frame.dataset.id);
+    frame.classList.toggle('selected', frame.dataset.id === selectedId || frame.dataset.id === selectedFile?.id);
+    frame.classList.toggle('focus-anchor', frame.dataset.id === focusedFileId);
+    frame.classList.toggle('dim', outlineDim(item));
+    frame.classList.toggle('trace-lit', lit.has(frame.dataset.id));
   });
-  scene.querySelectorAll('[data-module]').forEach(element => {
-    const item = node(element.dataset.module);
-    element.classList.toggle('selected', element.dataset.module === selectedId);
-    element.classList.toggle('dim', selected()?.kind === 'module' && item && !hasTrace(item));
-  });
-  scene.querySelectorAll('[data-inline]').forEach(element => {
-    element.classList.toggle('selected', element.dataset.inline === selectedId || fileOf(selected())?.id === element.dataset.inline);
-    element.classList.toggle('dim', false);
-  });
-  const activeModule = selected()?.kind === 'module' ? selected() : null;
-  document.querySelectorAll('.line[data-line]').forEach(line => {
-    const n = Number(line.dataset.line);
-    const hasBadge = !!line.querySelector('.line-badge');
-    line.classList.toggle('dim', !!activeModule && line.dataset.file === activeModule.fileId && (n < activeModule.loc.start || n > activeModule.loc.end) && !hasBadge);
+  scene.querySelectorAll('.frame-fn').forEach(box => {
+    const item = node(box.dataset.moduleBox);
+    box.classList.toggle('selected', box.dataset.moduleBox === selectedId);
+    box.classList.toggle('dim', outlineDim(item));
+    box.classList.toggle('trace-lit', lit.has(box.dataset.moduleBox));
   });
 }
 function selectItem(id) {
@@ -1184,11 +1405,12 @@ function selectItem(id) {
 }
 function updateInspector() {
   const item = selected() || entryFile(); if (!item) return; const file = fileOf(item) || item; const related = edgeTypes().filter(edge => edge.from === item.id || edge.to === item.id || edge.from === file.id || edge.to === file.id);
-  $('#inspect-kind').textContent = `${item.kind.toUpperCase()} · ${traceActive() ? 'SIGNAL PATH' : `RAIL · ${mapRegion(file || item).toUpperCase()}`}`;
+  const region = mapRegion(file || item);
+  $('#inspect-kind').textContent = `${item.kind.toUpperCase()} · FRAME · ${region.toUpperCase()}`;
   $('#inspect-title').textContent = item.kind === 'module' ? `${item.label}()` : item.label;
   $('#inspect-path').textContent = item.path || '/';
   $('#inspect-trace').textContent = related.length
-    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}.${traceActive() ? ' Reading as calls-in → signal → calls-out.' : ' Click to isolate its signal path.'}`
+    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}. Open nested frames to push wires onto deeper ports.`
     : 'No direct relationships with the current edge filters.';
   $('#inspect-edges').innerHTML = related.slice(0, 9).map(edge => `<div><code>${edge.from === item.id ? '→' : '←'}</code> ${escape(edge.type)} · ${escape(edge.evidence)}${edge.line ? ` · line ${edge.line}` : ''}</div>`).join('') || '<div>No direct relationships.</div>';
   const sourcePanel = $('#source-panel'), sourceTarget = $('#inspect-source');
@@ -1201,14 +1423,31 @@ function bindInspectorSource() {
   $('#inspect-source').querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.pin; remember(); pinned.has(id) ? pinned.delete(id) : pinned.add(id); rebuildTrace(); render(); updateInspector(); }));
 }
 function renderMinimap() {
-  if (!graph) return; const w = 160, h = 104, scale = Math.min(w / Math.max(1, world.offsetWidth), h / Math.max(1, world.offsetHeight)); const cards = [...scene.querySelectorAll('.card')].map(card => `<i class="mini-node ${card.dataset.id === selectedId ? 'selected' : ''}" style="left:${(card.offsetLeft + card.offsetWidth / 2) * scale}px;top:${(card.offsetTop + card.offsetHeight / 2) * scale}px"></i>`).join(''); minimap.innerHTML = `${cards}<i class="mini-viewport" style="left:${-canvas.x * scale}px;top:${-canvas.y * scale}px;width:${board.clientWidth * scale / canvas.scale}px;height:${board.clientHeight * scale / canvas.scale}px"></i>`;
+  if (!graph) return;
+  const w = 160, h = 104;
+  const scale = Math.min(w / Math.max(1, world.offsetWidth), h / Math.max(1, world.offsetHeight));
+  const nodes = [...scene.querySelectorAll('.frame > .frame-bar')].map(row => {
+    const id = row.dataset.outlineRow;
+    const rect = row.getBoundingClientRect();
+    const worldRect = world.getBoundingClientRect();
+    const x = (rect.left - worldRect.left) / canvas.scale + rect.width / (2 * canvas.scale);
+    const y = (rect.top - worldRect.top) / canvas.scale + rect.height / (2 * canvas.scale);
+    return `<i class="mini-node ${id === selectedId ? 'selected' : ''}" style="left:${x * scale}px;top:${y * scale}px"></i>`;
+  }).join('');
+  minimap.innerHTML = `${nodes}<i class="mini-viewport" style="left:${-canvas.x * scale}px;top:${-canvas.y * scale}px;width:${board.clientWidth * scale / canvas.scale}px;height:${board.clientHeight * scale / canvas.scale}px"></i>`;
 }
 function fitMap() {
-  const cards = [...scene.querySelectorAll('.card')]; if (!cards.length) return; const left = Math.min(...cards.map(card => card.offsetLeft)), top = Math.min(...cards.map(card => card.offsetTop)), right = Math.max(...cards.map(card => card.offsetLeft + card.offsetWidth)), bottom = Math.max(...cards.map(card => card.offsetTop + card.offsetHeight));
-  const rawScale = Math.min((board.clientWidth - 96) / (right - left + 1), (board.clientHeight - 88) / (bottom - top + 1));
-  canvas.scale = Math.min(1, Math.max(.72, rawScale));
+  const tree = scene.querySelector('.frame-artboard') || scene.querySelector('.frame-stage');
+  if (!tree) return;
+  const stage = scene.querySelector('.frame-stage');
+  const left = stage?.offsetLeft || tree.offsetLeft;
+  const top = stage?.offsetTop || tree.offsetTop;
+  const right = left + tree.offsetWidth;
+  const bottom = top + tree.offsetHeight;
+  const rawScale = Math.min((board.clientWidth - 96) / Math.max(1, right - left), (board.clientHeight - 88) / Math.max(1, bottom - top));
+  canvas.scale = Math.min(1, Math.max(.42, rawScale));
   canvas.x = board.clientWidth / 2 - (left + right) / 2 * canvas.scale;
-  canvas.y = board.clientHeight / 2 - (top + bottom) / 2 * canvas.scale;
+  canvas.y = Math.max(20, 56 - top * canvas.scale);
   applyCanvas();
 }
 function focusSelection() {
@@ -1224,10 +1463,13 @@ function focusSelection() {
 }
 function elementForSelection() {
   const item = selected(); if (!item) return null;
-  if (item.kind === 'module') return scene.querySelector(`[data-inline-module="${CSS.escape(item.id)}"],[data-module="${CSS.escape(item.id)}"]`);
+  if (item.kind === 'module') {
+    return scene.querySelector(`.frame-fn[data-module-box="${CSS.escape(item.id)}"]`)
+      || scene.querySelector(`[data-inline-module="${CSS.escape(item.id)}"],[data-module="${CSS.escape(item.id)}"]`);
+  }
   const file = fileOf(item);
-  if (file) return scene.querySelector(`.card[data-id="${CSS.escape(file.id)}"]`) || scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"]`);
-  return scene.querySelector(`.card[data-id="${CSS.escape(item.id)}"]`) || scene.querySelector(`.folder-tile[data-id="${CSS.escape(item.id)}"]`);
+  if (file) return scene.querySelector(`.frame-file[data-id="${CSS.escape(file.id)}"],[data-inline-file="${CSS.escape(file.id)}"]`);
+  return scene.querySelector(`.frame[data-id="${CSS.escape(item.id)}"]`);
 }
 function keepSelectionVisible() {
   const element = elementForSelection(); if (!element) return;
@@ -1254,16 +1496,16 @@ function resetPresentation() { remember(); exitFlow(); offsets.clear(); basePlac
 function canvasControls() {
   let pan, lastPanMoved = false, wheelRemainder = 0;
   const stopPan = () => { lastPanMoved = !!pan?.moved; pan = null; board.classList.remove('panning'); setTimeout(() => { lastPanMoved = false; }, 0); };
-  board.addEventListener('pointerdown', event => { if (event.button !== 0 || event.target.closest('.card,button,#minimap')) return; pan = { x: event.clientX, y: event.clientY, left: canvas.x, top: canvas.y, moved: false }; board.classList.add('panning'); board.setPointerCapture(event.pointerId); });
+  board.addEventListener('pointerdown', event => { if (event.button !== 0 || event.target.closest('.frame,.frame-bar,button,#minimap')) return; pan = { x: event.clientX, y: event.clientY, left: canvas.x, top: canvas.y, moved: false }; board.classList.add('panning'); board.setPointerCapture(event.pointerId); });
   board.addEventListener('pointermove', event => { if (!pan) return; const dx = event.clientX - pan.x, dy = event.clientY - pan.y; pan.moved ||= Math.abs(dx) + Math.abs(dy) > 8; canvas.x = pan.left + dx; canvas.y = pan.top + dy; applyCanvas(); });
   board.addEventListener('pointerup', stopPan); board.addEventListener('pointercancel', stopPan);
   board.addEventListener('click', event => {
-    if (event.target.closest('.card,button,#minimap') || lastPanMoved) return;
-    const fallback = entryItem(folder()); if (!fallback) return;
+    if (event.target.closest('.frame,button,#minimap,.frame-bar') || lastPanMoved) return;
     remember();
-    selectedId = fallback.id;
     selectedImportEdgeId = undefined;
     exitFlow();
+    pinned.clear();
+    selectedId = rootFolder()?.id;
     rebuildTrace();
     render();
     updateInspector();
@@ -1383,7 +1625,7 @@ function revealItem(item, { moduleName, line, pin = false, pulse = false, enterF
   const file = item.kind === 'file' ? item : item.kind === 'module' ? fileOf(item) : null;
   const folderTarget = item.kind === 'folder' ? item : null;
   const targetFile = file || (folderTarget ? entryFile(folderTarget) : null);
-  for (const parent of ancestors(file || folderTarget || item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
+  expandAncestors(file || folderTarget || item);
   if (folderTarget) expandedFolders.add(folderTarget.id);
   let target = item;
   if (targetFile) {
@@ -1430,13 +1672,35 @@ async function playTour(steps = []) {
   }
 }
 function handleViewerCommand(command = {}) {
+  if (command.type === 'open-flow') {
+    const file = fileByPath(command.path);
+    if (!file) return;
+    const target = command.module
+      ? modules(file).find(module => module.label === command.module) || file
+      : file;
+    remember();
+    expandAncestors(file);
+    expandedFiles.add(file.id);
+    openFlowOverlay(target, { narrative: command.narrative });
+    writeDeepLink();
+    return;
+  }
+  if (command.type === 'close-flow') {
+    closeFlowOverlay();
+    return;
+  }
   if (command.type === 'clear-highlights') {
-    remember(); pinned.clear(); exitFlow(); recentPaths.clear(); rebuildTrace(); render(); updateInspector(); writeDeepLink(); return;
+    remember(); closeFlowOverlay(); pinned.clear(); exitFlow(); recentPaths.clear(); rebuildTrace(); render(); updateInspector(); writeDeepLink(); return;
   }
   if (command.type === 'set-mode') {
     remember();
-    if (command.mode === 'rails') { exitFlow(); rebuildTrace(); render(); updateInspector(); }
-    else if (command.mode === 'signal') {
+    if (command.mode === 'rails' || command.mode === 'outline') {
+      exitFlow();
+      ensureDefaultOutlineExpanded();
+      rebuildTrace();
+      render();
+      updateInspector();
+    } else if (command.mode === 'signal') {
       const item = selected() || entryItem();
       if (item) revealItem(fileOf(item) || item, { enterFlow: true, pulse: true });
     }
@@ -1459,10 +1723,9 @@ function handleViewerCommand(command = {}) {
       const item = fileByPath(path);
       if (!item) continue;
       pinned.add(item.id);
-      for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
+      expandAncestors(item);
       selectedId = item.id;
     }
-    exitFlow();
     rebuildTrace(); render(); updateInspector(); syncToolbar();
     showTourCard('Orphans', `${paths.length} nodes with no static callers.`);
     if (command.pulse) requestAnimationFrame(pulseSelection);
@@ -1483,10 +1746,11 @@ function handleViewerCommand(command = {}) {
       const item = fileByPath(path) || folderByPath(path);
       if (!item) continue;
       if (command.pin) pinned.add(item.id);
-      for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
+      expandAncestors(item);
       if (item.kind === 'folder') expandedFolders.add(item.id);
       if (item.kind === 'file') expandedFiles.add(item.id);
       selectedId = item.id;
+      activateFocus(item);
     }
     rebuildTrace(); render(); updateInspector(); syncToolbar(); requestAnimationFrame(focusSelection); return;
   }
@@ -1509,7 +1773,7 @@ function writeDeepLink() {
   const params = new URLSearchParams();
   params.set('path', file.path);
   if (item?.kind === 'module') params.set('module', item.label);
-  params.set('mode', traceActive() ? 'signal' : 'rails');
+  params.set('mode', traceActive() ? 'signal' : 'outline');
   history.replaceState(null, '', `#${params.toString()}`);
 }
 function applyDeepLink() {
@@ -1522,7 +1786,7 @@ function applyDeepLink() {
   if (!item) return false;
   revealItem(item, {
     moduleName: params.get('module') || undefined,
-    enterFlow: params.get('mode') !== 'rails',
+    enterFlow: params.get('mode') !== 'outline' && params.get('mode') !== 'rails',
     pulse: true
   });
   return true;
@@ -1602,19 +1866,25 @@ function initSearch() {
 function applyGraph(next, { preserve = false } = {}) {
   const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
   if (!preserve) { offsets.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
-  scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id; selectedId = preserve && node(previousSelected) ? previousSelected : entryItem(folder())?.id || rootFolder().id; layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
+  scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id;
+  selectedId = preserve && node(previousSelected) ? previousSelected : rootFolder().id;
+  layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
+  if (!preserve) ensureDefaultOutlineExpanded();
   if (preserve) revealRecentChanges();
   $('#repo-name').textContent = graph.roots.map(root => root.label).join(' + ');
   updateRepoStats();
   rebuildTrace(); render(); updateInspector(); updateHistory(); renderActivityFeed(); syncToolbar();
   if (!preserve) {
-    fitMap();
-    if (!applyDeepLink()) writeDeepLink();
+    requestAnimationFrame(() => {
+      fitMap();
+      if (!applyDeepLink()) writeDeepLink();
+    });
   }
 }
 async function loadGraph({ preserve = false } = {}) { const response = await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }); if (!response.ok) throw new Error(await response.text()); sourceMode = 'live'; if ($('#tracking-status')) $('#tracking-status').textContent = 'live local map'; applyGraph(await response.json(), { preserve }); }
 initSettings();
 initSearch();
+initFlowOverlay();
 $('#history-back').addEventListener('click', () => moveHistory(true)); $('#history-forward').addEventListener('click', () => moveHistory(false)); $('#reset-view').addEventListener('click', resetPresentation); $('#open-workspace').addEventListener('click', showOpenDialog); $('#choose-folder').addEventListener('click', openWorkspace); $('#copy-mcp').addEventListener('click', async () => { await navigator.clipboard?.writeText($('#mcp-snippet').textContent); $('#copy-mcp').textContent = 'Copied'; setTimeout(() => $('#copy-mcp').textContent = 'Copy MCP setup', 1200); }); $('#workspace-files').addEventListener('change', event => { if (event.target.files.length) snapshotFiles([...event.target.files]); event.target.value = ''; }); $('#inspector-toggle').addEventListener('click', () => app.classList.toggle('inspector-closed'));
 $('#focus-selection')?.addEventListener('click', focusSelection);
 window.addEventListener('hashchange', () => applyDeepLink());

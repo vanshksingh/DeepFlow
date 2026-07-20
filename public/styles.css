@@ -35,9 +35,10 @@
   margin: 0;
   max-width: 28ch;
   text-align: right;
-  color: #6d7d73;
+  color: var(--muted);
   font: 600 11px/1.35 "IBM Plex Mono", ui-monospace, monospace;
 }
+.outline-frame { color: var(--ink); }
 .stage-banner.signal .stage-banner-copy h2 {
   color: color-mix(in srgb, var(--green) 72%, var(--ink));
 }

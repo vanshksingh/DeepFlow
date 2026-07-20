@@ -1,0 +1,10 @@
+Setup DeepFlow (local codebase visualizer + MCP):
+1. Clone & Bootstrap:
+   git clone https://github.com/vanshksingh/DeepFlow.git && cd DeepFlow && bash scripts/agent-bootstrap.sh
+   (Installs deps, starts viewer on http://127.0.0.1:4317, generates config in .deepflow.mcp.generated.json)
+2. Connect: Merge generated config into your IDE's MCP settings. Verify via `deepflow_status`.
+3. Usage in any repo:
+   - Connect workspace: `deepflow_open_workspace {"root": "<ABS_PATH>"}`
+   - Sync writes: `deepflow_after_edit {"paths": ["rel/path/to/edited"]}`
+   - Trace/Explain: `deepflow_jump_to`, `deepflow_impact`, or `deepflow_summary` for maps/signals.
+   - Keep `npm run dev` running in DeepFlow checkout.

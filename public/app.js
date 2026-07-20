@@ -19,7 +19,7 @@ let traceEdges = new Set();
 let sourceMode = 'live';
 let autoRevealChanges = true;
 let agentRevealDwellMs = 8000;
-let editAnimStyle = 'pulse'; // pulse | ripple | flash | scan | beacon | spark | hearts | lines
+let editAnimStyle = 'spark'; // pulse | ripple | flash | scan | fire | spark | hearts | lines
 let agentRevealTimer = 0;
 let agentRevealPath = null;
 let agentRevealExpandedId = null;
@@ -145,7 +145,10 @@ const THEME_FOLDER_COLORS = {
   ocean: ['#0e7c86', '#0b6e99', '#14919b', '#2a9d8f', '#3a86ff', '#0077b6', '#00b4d8', '#48cae4', '#023e8a', '#0096c7', '#90e0ef', '#f0a202'],
   sunset: ['#e76f51', '#f4a261', '#e9c46a', '#f28482', '#ff6b6b', '#ffa94d', '#ffd43b', '#ff8787', '#d9480f', '#fd7e14', '#fab005', '#e64980'],
   lavender: ['#7c5cbf', '#5c7cfa', '#e599f7', '#9775fa', '#845ef7', '#748ffc', '#da77f2', '#7048e8', '#5f3dc4', '#4c6ef5', '#cc5de8', '#7950f2'],
-  noir: ['#f5f5f5', '#c8c8c8', '#9a9a9a', '#e8e8e8', '#b0b0b0', '#dcdcdc', '#888888', '#fafafa', '#aaaaaa', '#dddddd', '#777777', '#eeeeee']
+  noir: ['#f5f5f5', '#c8c8c8', '#9a9a9a', '#e8e8e8', '#b0b0b0', '#dcdcdc', '#888888', '#fafafa', '#aaaaaa', '#dddddd', '#777777', '#eeeeee'],
+  ember: ['#ff9f1c', '#ff6b35', '#d9381e', '#f7c59f', '#f4a261', '#e76f51', '#e9c46a', '#f28482', '#ffb703', '#fb8500', '#eb5e28', '#c1121f'],
+  github: ['#238636', '#58a6ff', '#8957e5', '#d29922', '#2ea043', '#3fb950', '#a371f7', '#bc8cff', '#1f6feb', '#388bfd', '#d29922', '#e3b341'],
+  solarized: ['#859900', '#2aa198', '#268bd2', '#b58900', '#cb4b16', '#dc322f', '#d33682', '#6c71c4', '#586e75', '#657b83', '#93a1a1', '#839496']
 };
 function themeFolderColors() {
   return THEME_FOLDER_COLORS[document.body.dataset.theme] || FOLDER_COLORS;
@@ -3061,7 +3064,7 @@ function playAgentEditReveal(path, { theater = false } = {}) {
     smoothFocusSelection({ duration: 2000 });
     applyEditAnimBurst(file.id);
     const burstKind = editAnimStyle === 'hearts' ? 'hearts' : editAnimStyle === 'spark' ? 'sparks' : 'sparks';
-    if (editAnimStyle !== 'lines' && editAnimStyle !== 'hearts') {
+    if (editAnimStyle !== 'lines' && editAnimStyle !== 'hearts' && editAnimStyle !== 'fire') {
       spawnParticleBurst(scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`), burstKind);
     }
     if (theater) playEditTheater(file).catch(() => {});
@@ -3075,23 +3078,29 @@ function playAgentEditReveal(path, { theater = false } = {}) {
 function applyEditAnimBurst(fileId) {
   const el = scene.querySelector(`.frame-file[data-id="${CSS.escape(fileId)}"]`);
   if (!el || document.body.classList.contains('reduce-motion')) return;
-  el.classList.remove('edit-anim-burst', 'edit-anim-lines-on', 'edit-anim-hearts-on');
+  el.classList.remove('edit-anim-burst', 'edit-anim-lines-on', 'edit-anim-hearts-on', 'edit-anim-fire-on');
   el.querySelector('.edit-anim-lines')?.remove();
   el.querySelector('.edit-anim-hearts')?.remove();
+  el.querySelector('.edit-anim-fire')?.remove();
   void el.offsetWidth;
   el.classList.add('edit-anim-burst');
   if (editAnimStyle === 'hearts') {
     mountEditHeartsAnim(el);
     spawnParticleBurst(el, 'hearts');
+  } else if (editAnimStyle === 'fire') {
+    mountEditFireAnim(el);
+    spawnParticleBurst(el, 'fire');
   } else if (editAnimStyle === 'lines') {
     mountEditLinesAnim(el);
+    spawnParticleBurst(el, 'fire');
   }
   clearTimeout(el._editAnimTimer);
   el._editAnimTimer = setTimeout(() => {
-    el.classList.remove('edit-anim-burst', 'edit-anim-lines-on', 'edit-anim-hearts-on');
+    el.classList.remove('edit-anim-burst', 'edit-anim-lines-on', 'edit-anim-hearts-on', 'edit-anim-fire-on');
     el.querySelector('.edit-anim-lines')?.remove();
     el.querySelector('.edit-anim-hearts')?.remove();
-  }, editAnimStyle === 'lines' ? 3200 : editAnimStyle === 'hearts' ? 2600 : 1800);
+    el.querySelector('.edit-anim-fire')?.remove();
+  }, editAnimStyle === 'lines' ? 3200 : editAnimStyle === 'hearts' || editAnimStyle === 'fire' ? 2600 : 1800);
 }
 function mountEditLinesAnim(el) {
   if (!el) return;
@@ -3100,21 +3109,17 @@ function mountEditLinesAnim(el) {
   strip.className = 'edit-anim-lines';
   strip.setAttribute('aria-hidden', 'true');
   const rows = [
-    { w: 92, caret: true },
-    { w: 68 },
-    { w: 84 },
-    { w: 46 },
-    { w: 76 },
-    { w: 58, caret: true },
-    { w: 88 },
-    { w: 52 }
+    { w: 92 }, { w: 68 }, { w: 84 }, { w: 46 },
+    { w: 76 }, { w: 58 }, { w: 88 }, { w: 52 },
+    { w: 60 }, { w: 90 }, { w: 45 }
   ];
-  strip.innerHTML = [
-    '<em class="edit-lines-label">editing</em>',
-    ...rows.map((row, i) =>
-      `<span class="${row.caret ? 'has-caret' : ''}" style="--w:${row.w}%;--d:${(i * 0.09).toFixed(2)}s"></span>`
-    )
-  ].join('');
+  strip.innerHTML = `
+    <div class="edit-lines-beacon"></div>
+    <div class="edit-lines-scroll">
+      <em class="edit-lines-label">editing</em>
+      ${rows.map((row, i) => `<span style="--w:${row.w}%;--i:${i}"></span>`).join('')}
+    </div>
+  `;
   el.appendChild(strip);
 }
 function mountEditHeartsAnim(el) {
@@ -3124,13 +3129,39 @@ function mountEditHeartsAnim(el) {
   layer.className = 'edit-anim-hearts';
   layer.setAttribute('aria-hidden', 'true');
   const glyphs = ['♥', '♡', '♥', '♡', '♥', '♡', '♥', '♡', '♥', '♡', '♥', '♡'];
-  layer.innerHTML = glyphs.map((g, i) => {
-    const side = i % 2 === 0 ? -1 : 1;
-    const x = side * (22 + (i % 5) * 14);
-    const delay = (i * 0.1).toFixed(2);
-    const dur = (1.2 + (i % 4) * 0.22).toFixed(2);
-    return `<i style="--hx:${x}px;--hd:${delay}s;--hru:${dur}s">${g}</i>`;
-  }).join('');
+  const parts = ['<div class="edit-anim-center-glyph" style="color: #ff7eb6; text-shadow: 0 0 20px #e83e8c;">♥</div>'];
+  glyphs.forEach((g, i) => {
+    const angle = (i / glyphs.length) * Math.PI * 2;
+    const dist = 30 + Math.random() * 40;
+    const hx = (Math.cos(angle) * dist).toFixed(1) + 'px';
+    const hy = (Math.sin(angle) * dist - 20).toFixed(1) + 'px';
+    const delay = (i * 0.1).toFixed(2) + 's';
+    const dur = (1.2 + (i % 4) * 0.22).toFixed(2) + 's';
+    const scale = (0.5 + Math.random() * 0.5).toFixed(2);
+    parts.push(`<span style="--hx:${hx};--hy:${hy};--hd:${delay};--hs:${scale};--hdur:${dur}">${g}</span>`);
+  });
+  layer.innerHTML = parts.join('');
+  el.appendChild(layer);
+}
+function mountEditFireAnim(el) {
+  if (!el) return;
+  el.classList.add('edit-anim-fire-on');
+  const layer = document.createElement('div');
+  layer.className = 'edit-anim-fire';
+  layer.setAttribute('aria-hidden', 'true');
+  const glyphs = ['●', '○', '•', '◦', '°', '●', '○', '•', '◦', '°', '●', '○'];
+  const parts = ['<div class="edit-anim-center-glyph fire-glyph" style="color: #ff9f1c; text-shadow: 0 0 20px #ff6b35;">●</div>'];
+  glyphs.forEach((g, i) => {
+    const angle = (i / glyphs.length) * Math.PI * 2;
+    const dist = 30 + Math.random() * 50;
+    const hx = (Math.cos(angle) * dist).toFixed(1) + 'px';
+    const hy = (Math.sin(angle) * dist - 30).toFixed(1) + 'px';
+    const delay = (i * 0.08).toFixed(2) + 's';
+    const dur = (1.0 + (i % 4) * 0.3).toFixed(2) + 's';
+    const scale = (0.4 + Math.random() * 0.8).toFixed(2);
+    parts.push(`<span style="--hx:${hx};--hy:${hy};--hd:${delay};--hs:${scale};--hdur:${dur}">${g}</span>`);
+  });
+  layer.innerHTML = parts.join('');
   el.appendChild(layer);
 }
 function syncEditAnim() {
@@ -4352,15 +4383,15 @@ async function playLocalCapabilityDemo() {
   ]);
 }
 function initSettings() {
-  const savedTheme = localStorage.getItem('deepflow-theme') || 'aurora';
+  const savedTheme = localStorage.getItem('deepflow-theme') || 'ocean';
   const knownThemes = new Set([...($('#theme-grid')?.querySelectorAll('[data-theme-choice]') || [])].map(button => button.dataset.themeChoice));
-  const theme = knownThemes.has(savedTheme) ? savedTheme : 'aurora';
+  const theme = knownThemes.has(savedTheme) ? savedTheme : 'ocean';
   if (theme !== savedTheme) localStorage.setItem('deepflow-theme', theme);
   const motion = localStorage.getItem('deepflow-motion') !== 'reduced';
   autoRevealChanges = localStorage.getItem('deepflow-auto-reveal') !== 'false';
   agentRevealDwellMs = Math.max(3000, Math.min(20000, Number(localStorage.getItem('deepflow-reveal-dwell') || 8000)));
-  const knownEditAnims = new Set(['pulse', 'ripple', 'flash', 'scan', 'beacon', 'spark', 'hearts', 'lines']);
-  const savedEditAnim = localStorage.getItem('deepflow-edit-anim') || 'pulse';
+  const knownEditAnims = new Set(['pulse', 'ripple', 'flash', 'scan', 'fire', 'spark', 'hearts', 'lines']);
+  const savedEditAnim = localStorage.getItem('deepflow-edit-anim') || 'spark';
   editAnimStyle = knownEditAnims.has(savedEditAnim) ? savedEditAnim : 'pulse';
   traceMode = localStorage.getItem('deepflow-live-trace') !== 'false';
   document.body.dataset.theme = theme;
@@ -4405,6 +4436,113 @@ function initSettings() {
     const previewId = agentRevealExpandedId || fileOf(selected())?.id || selectedId;
     if (previewId) applyEditAnimBurst(previewId);
   }));
+  // Seed live particles into the fire and hearts preview thumbnails
+  seedPreviewParticles();
+  // Seed the lines preview with animated bars
+  seedLinesPreview();
+  // Wire copy agent instructions button
+  const copyBtn = $('#copy-agent-instructions');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      fetch('/agent-setup.txt')
+        .then(r => r.text())
+        .then(instructions => {
+          navigator.clipboard.writeText(instructions).then(() => {
+            const toast = $('#copy-agent-toast');
+            if (toast) { toast.style.opacity = '1'; setTimeout(() => { toast.style.opacity = '0'; }, 2800); }
+            copyBtn.textContent = 'Copied!';
+            copyBtn.style.background = 'var(--green)';
+            copyBtn.style.color = 'var(--paper)';
+            setTimeout(() => {
+              copyBtn.textContent = 'Copy Agent Setup';
+              copyBtn.style.background = 'var(--panel)';
+              copyBtn.style.color = 'var(--green)';
+            }, 2200);
+          }).catch(() => {
+            const ta = document.createElement('textarea');
+            ta.value = instructions; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+          });
+        })
+        .catch(() => console.warn('DeepFlow: could not load /agent-setup.txt'));
+    });
+  }
+}
+function seedPreviewParticles() {
+  const configs = {
+    fire: {
+      glyphs: ['\u25cf', '\u25cb', '\u2022', '\u25e6', '\u00b0', '\u25cf', '\u25cb', '\u2022', '\u25e6', '\u00b0'],
+      colors: ['#ff9f1c', '#ff6b35', '#dc2f02', '#ffb347', '#ffd080', '#ff4500', '#ff9f1c', '#ffcf77', '#dc2f02', '#ff6b35'],
+      count: 14,
+    },
+    hearts: {
+      glyphs: ['\u2665', '\u2661', '\u2665', '\u2661', '\u2665', '\u2661', '\u2665', '\u2661', '\u2665', '\u2661'],
+      colors: ['#e83e8c', '#ff7eb6', '#ff4daa', '#ffb3d9', '#e83e8c', '#c2185b', '#ff7eb6', '#e83e8c', '#ff4daa', '#ffb3d9'],
+      count: 14,
+    },
+  };
+  for (const [kind, cfg] of Object.entries(configs)) {
+    const preview = document.querySelector(`.edit-anim-preview.${kind}`);
+    if (!preview) continue;
+    // Remove any previously seeded particles
+    preview.querySelectorAll('.preview-particle').forEach(el => el.remove());
+    for (let i = 0; i < cfg.count; i++) {
+      const span = document.createElement('span');
+      span.className = 'preview-particle';
+      const glyph = cfg.glyphs[i % cfg.glyphs.length];
+      span.textContent = glyph;
+      const leftPct = 10 + Math.random() * 80; // spread across preview width
+      const sizePx = 6 + Math.random() * 10;   // 6–16px: big size variability
+      const delay = (Math.random() * 1.4).toFixed(2);
+      const dur = (1.0 + Math.random() * 0.8).toFixed(2);
+      const drift = ((Math.random() - 0.5) * 12).toFixed(1); // ±6px horizontal drift
+      const color = cfg.colors[i % cfg.colors.length];
+      span.style.cssText = `
+        position: absolute;
+        bottom: 2px;
+        left: ${leftPct}%;
+        font-size: ${sizePx}px;
+        color: ${color};
+        text-shadow: 0 0 ${Math.round(sizePx * 0.8)}px ${color};
+        opacity: 0;
+        pointer-events: none;
+        animation: preview-particle-rise ${dur}s ease-out ${delay}s infinite;
+        --drift: ${drift}px;
+      `;
+      preview.appendChild(span);
+    }
+  }
+}
+function seedLinesPreview() {
+  const preview = document.querySelector('.edit-anim-preview.lines');
+  if (!preview) return;
+  // Clear any existing bar spans (leave ::before/::after pseudo elements)
+  preview.querySelectorAll('.preview-line-bar').forEach(el => el.remove());
+  // The lines preview already shows 2 bars via ::before/::after CSS - add 3 more for depth
+  const widths = [80, 55, 70, 38, 62];
+  const colors = [
+    'var(--green)', 'var(--amber)', 'var(--green)', 'var(--teal)', 'var(--amber)'
+  ];
+  widths.forEach((w, i) => {
+    const bar = document.createElement('span');
+    bar.className = 'preview-line-bar';
+    bar.style.cssText = `
+      position: absolute;
+      left: 18%;
+      height: 2px;
+      border-radius: 99px;
+      width: ${w}%;
+      background: ${colors[i]};
+      box-shadow: 0 0 6px ${colors[i]};
+      transform-origin: left center;
+      opacity: 0;
+      animation: edit-anim-line-run 1.15s ease-in-out ${(i * 0.18).toFixed(2)}s infinite;
+      top: ${22 + i * 14}%;
+    `;
+    preview.appendChild(bar);
+  });
 }
 function syncToolbar() {
   document.querySelectorAll('[data-toolbar-toggle]').forEach(button => {
@@ -4554,8 +4692,8 @@ function spawnParticleBurst(el, kind = 'hearts') {
   if (!el || document.body.classList.contains('reduce-motion')) return;
   const layer = document.createElement('div');
   layer.className = `particle-burst ${kind}`;
-  const glyphs = kind === 'fire' ? ['*', '+', 'x', '.'] : kind === 'sparks' ? ['.', '+', '*'] : ['♥', '♡', '♥', '♡', '+'];
-  const count = kind === 'hearts' ? 18 : 14;
+  const glyphs = kind === 'fire' ? ['🔥', '⚡', '✦', '✧'] : kind === 'sparks' ? ['.', '+', '*'] : ['♥', '♡'];
+  const count = kind === 'hearts' ? 18 : kind === 'fire' ? 16 : 14;
   for (let i = 0; i < count; i++) {
     const p = document.createElement('span');
     p.textContent = glyphs[i % glyphs.length];
@@ -4670,7 +4808,7 @@ function handleViewerCommand(command = {}) {
     return;
   }
   if (command.type === 'set-theme') {
-    const theme = command.theme || 'aurora';
+    const theme = command.theme || 'ocean';
     document.body.dataset.theme = theme;
     localStorage.setItem('deepflow-theme', theme);
     $('#theme-grid')?.querySelectorAll('[data-theme-choice]').forEach(button => {
@@ -4680,7 +4818,7 @@ function handleViewerCommand(command = {}) {
     return;
   }
   if (command.type === 'set-edit-anim') {
-    const known = new Set(['pulse', 'ripple', 'flash', 'scan', 'beacon', 'spark', 'hearts', 'lines']);
+    const known = new Set(['pulse', 'ripple', 'flash', 'scan', 'fire', 'spark', 'hearts', 'lines']);
     editAnimStyle = known.has(command.style) ? command.style : 'pulse';
     localStorage.setItem('deepflow-edit-anim', editAnimStyle);
     syncEditAnim();

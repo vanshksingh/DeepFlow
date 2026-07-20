@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DeepFlow signal map</title><link rel="icon" href="/favicon.svg">
+  <title>DeepFlow signal map</title><link rel="icon" href="/favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=Sora:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/demo-polish.css">
@@ -11,7 +11,7 @@
   <main id="app">
     <section class="workspace">
       <header class="ribbon">
-        <a class="brand" href="#" aria-label="DeepFlow home"><i></i><span>DeepFlow</span></a>
+        <a class="brand" href="https://github.com/vanshksingh/DeepFlow" target="_blank" rel="noopener noreferrer" aria-label="DeepFlow home"><img src="/favicon.png" alt="" style="width: 16px; height: 16px; margin-right: 6px; border-radius: 4px; box-shadow: 0 0 8px rgba(0, 240, 255, 0.4);"><span>DeepFlow</span></a>
         <div class="workspace-name"><b id="repo-name">atlas-workspace</b><em id="repo-stats">booting…</em></div>
         <div class="ribbon-actions">
           <button id="search-open" title="Search (⌘K)" aria-label="Search">⌕</button>
@@ -99,13 +99,13 @@
   </dialog>
   <dialog id="settings-dialog" class="open-dialog settings-dialog">
     <form method="dialog">
-      <header><div><b>DeepFlow settings</b><span>Tune the canvas mood and motion.</span></div><button value="cancel" aria-label="Close">×</button></header>
+      <header><div><b style="display: flex; align-items: center; gap: 8px;"><img src="/favicon.png" alt="" style="width: 18px; height: 18px; border-radius: 4px; box-shadow: 0 0 8px rgba(0, 240, 255, 0.4);">DeepFlow settings</b><span>Tune the canvas mood and motion.</span></div><button value="cancel" aria-label="Close">×</button></header>
       <section>
         <b>Theme</b>
         <div class="theme-grid" id="theme-grid">
-          <button type="button" data-theme-choice="aurora" data-theme-mode="light" style="--tp:#f7faf5;--ti:#14271f;--tg:#087c66;--tt:#26b98c;--tb:#36849d;--ta:#b16d27">
+          <button type="button" data-theme-choice="solarized" data-theme-mode="light" style="--tp:#fdf6e3;--ti:#657b83;--tg:#859900;--tt:#2aa198;--tb:#268bd2;--ta:#b58900">
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
-            <span class="theme-meta"><b>Aurora</b><em>Light</em></span>
+            <span class="theme-meta"><b>Solarized</b><em>Light</em></span>
           </button>
           <button type="button" data-theme-choice="bubblegum" data-theme-mode="light" style="--tp:#fff0f7;--ti:#4a1840;--tg:#e83e8c;--tt:#ff7eb6;--tb:#7c5cff;--ta:#ff9f43">
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
@@ -119,6 +119,10 @@
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
             <span class="theme-meta"><b>Ocean</b><em>Light</em></span>
           </button>
+          <button type="button" data-theme-choice="lavender" data-theme-mode="light" style="--tp:#f7f2ff;--ti:#2d2145;--tg:#7c5cbf;--tt:#9b7ede;--tb:#5c7cfa;--ta:#e599f7">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Lavender</b><em>Light</em></span>
+          </button>
           <button type="button" data-theme-choice="hacker" data-theme-mode="dark" style="--tp:#050a06;--ti:#b6f7c1;--tg:#33ff66;--tt:#00ffa3;--tb:#39ff14;--ta:#b8ff3c">
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
             <span class="theme-meta"><b>Hacker</b><em>Dark</em></span>
@@ -127,17 +131,13 @@
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
             <span class="theme-meta"><b>Noir</b><em>Dark</em></span>
           </button>
-          <button type="button" data-theme-choice="catppuccin" data-theme-mode="dark" style="--tp:#1e1e2e;--ti:#cdd6f4;--tg:#a6e3a1;--tt:#94e2d5;--tb:#89b4fa;--ta:#f9e2af">
+          <button type="button" data-theme-choice="ember" data-theme-mode="dark" style="--tp:#1a1412;--ti:#e8d5cc;--tg:#ff6b35;--tt:#f7c59f;--tb:#d9381e;--ta:#ff9f1c">
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
-            <span class="theme-meta"><b>Catppuccin</b><em>Dark</em></span>
+            <span class="theme-meta"><b>Ember</b><em>Dark</em></span>
           </button>
-          <button type="button" data-theme-choice="tokyo" data-theme-mode="dark" style="--tp:#16161e;--ti:#c0caf5;--tg:#9ece6a;--tt:#7dcfff;--tb:#7aa2f7;--ta:#e0af68">
+          <button type="button" data-theme-choice="github" data-theme-mode="dark" style="--tp:#0d1117;--ti:#c9d1d9;--tg:#238636;--tt:#58a6ff;--tb:#8957e5;--ta:#d29922">
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
-            <span class="theme-meta"><b>Tokyo Night</b><em>Dark</em></span>
-          </button>
-          <button type="button" data-theme-choice="nord" data-theme-mode="dark" style="--tp:#2e3440;--ti:#d8dee9;--tg:#a3be8c;--tt:#8fbcbb;--tb:#88c0d0;--ta:#ebcb8b">
-            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
-            <span class="theme-meta"><b>Nord</b><em>Dark</em></span>
+            <span class="theme-meta"><b>GitHub</b><em>Dark</em></span>
           </button>
           <button type="button" data-theme-choice="dracula" data-theme-mode="dark" style="--tp:#282a36;--ti:#f8f8f2;--tg:#50fa7b;--tt:#8be9fd;--tb:#bd93f9;--ta:#ffb86c">
             <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
@@ -153,7 +153,7 @@
           <b>Edit animation</b>
           <p class="setting-hint">How agent edits call out the file on the map.</p>
           <div class="edit-anim-grid" id="edit-anim-grid">
-            <button type="button" data-edit-anim="pulse" class="active">
+            <button type="button" data-edit-anim="pulse">
               <span class="edit-anim-preview pulse" aria-hidden="true"></span>
               <span class="edit-anim-meta"><b>Pulse</b><em>Soft hit ring</em></span>
             </button>
@@ -169,11 +169,11 @@
               <span class="edit-anim-preview scan" aria-hidden="true"></span>
               <span class="edit-anim-meta"><b>Scan</b><em>Diff sweep line</em></span>
             </button>
-            <button type="button" data-edit-anim="beacon">
-              <span class="edit-anim-preview beacon" aria-hidden="true"></span>
-              <span class="edit-anim-meta"><b>Beacon</b><em>Calm breathe</em></span>
+            <button type="button" data-edit-anim="fire">
+              <span class="edit-anim-preview fire" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Fire</b><em>Blazing aura</em></span>
             </button>
-            <button type="button" data-edit-anim="spark">
+            <button type="button" data-edit-anim="spark" class="active">
               <span class="edit-anim-preview spark" aria-hidden="true"></span>
               <span class="edit-anim-meta"><b>Spark</b><em>Corner ticks</em></span>
             </button>
@@ -186,6 +186,20 @@
               <span class="edit-anim-meta"><b>Lines</b><em>Running edit strip</em></span>
             </button>
           </div>
+        </div>
+      </section>
+      <section style="text-align: center; margin-top: 24px; padding-bottom: 8px;">
+        <div class="setting-block" style="display: flex; flex-direction: column; align-items: center; gap: 10px;">
+          <b style="font-size: 13px;">Get the Full MCP here!</b>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
+            <a href="https://github.com/vanshksingh/DeepFlow" target="_blank" rel="noopener noreferrer" style="display: inline-block; padding: 10px 20px; background: var(--green); color: var(--paper); text-decoration: none; border-radius: 8px; font-weight: 800; font-size: 12px; letter-spacing: 0.5px; box-shadow: 0 4px 12px rgba(8, 124, 102, 0.3); transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='scale(1.05)'; this.style.boxShadow='0 6px 16px rgba(8, 124, 102, 0.4)';" onmouseout="this.style.transform='scale(1)'; this.style.boxShadow='0 4px 12px rgba(8, 124, 102, 0.3)';">
+              GitHub Repository
+            </a>
+            <button type="button" id="copy-agent-instructions" style="padding: 10px 20px; min-width: 152px; background: var(--panel); color: var(--green); border: 2px solid var(--green); border-radius: 8px; font-weight: 800; font-size: 12px; letter-spacing: 0.5px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='var(--green)'; this.style.color='var(--paper)';" onmouseout="this.style.background='var(--panel)'; this.style.color='var(--green)';" >
+              Copy Agent Setup
+            </button>
+          </div>
+          <p id="copy-agent-toast" style="font-size: 11px; color: var(--green); opacity: 0; transition: opacity 0.3s; margin: 0; font-style: italic;">Give it to your AI agent - it will set everything up !</p>
         </div>
       </section>
     </form>

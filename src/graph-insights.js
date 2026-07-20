@@ -306,12 +306,12 @@ export function explainFlow(graph, pathRef) {
 export const DEMO_TOUR_STEPS = [
   {
     title: 'Nested frames',
-    narrative: 'DeepFlow opens like a Figma artboard — folders are frames that encapsulate files, which encapsulate functions.',
+    narrative: 'DeepFlow opens like a Figma artboard: folders are frames that encapsulate files, which encapsulate functions.',
     command: { type: 'set-mode', mode: 'outline' }
   },
   {
     title: 'Gateway entry',
-    narrative: 'Jump into the gateway ingest route and open startIngest() — the function frame owns the first signal.',
+    narrative: 'Jump into the gateway ingest route and open startIngest(). The function frame owns the first signal.',
     command: { type: 'jump', path: 'apps/gateway/src/documentRoutes.ts', module: 'startIngest', pin: true }
   },
   {
@@ -321,17 +321,185 @@ export const DEMO_TOUR_STEPS = [
   },
   {
     title: 'Shared package',
-    narrative: 'Shared libraries sit inside the packages frame — reused across apps and services.',
+    narrative: 'Shared libraries sit inside the packages frame, reused across apps and services.',
     command: { type: 'jump', path: 'packages/shared/src/id.ts', module: 'createId' }
   },
   {
     title: 'Orphan detection',
-    narrative: 'DeepFlow flags code with no static callers — dead weight or future hooks.',
+    narrative: 'DeepFlow flags code with no static callers: dead weight or future hooks.',
     command: { type: 'show-orphans', pulse: true }
   },
   {
     title: 'Agent loop',
     narrative: 'When your agent edits a file, the outline refreshes live and the activity feed pulses. Call deepflow_after_edit after writes.',
     command: { type: 'highlight-paths', paths: ['services/ingest/src/worker/contentGuard.ts', 'apps/gateway/src/documentRoutes.ts'], pin: true }
+  }
+];
+
+/**
+ * Full capability showcase: slow enough to read, with spotlight + legend beats.
+ * Best on fixtures/atlas-workspace.
+ */
+export const CAPABILITY_DEMO_STEPS = [
+  {
+    title: 'Welcome to the map',
+    narrative: 'DeepFlow turns a messy monorepo into nested frames. Folders hold files; files hold functions. This tour walks every major capability.',
+    dwellMs: 7000,
+    legend: { kicker: '01 · Map', title: 'Architecture frames', body: 'Folders → files → functions as nested islands. Drag freely; neighbors yield on drop.' },
+    command: { type: 'set-mode', mode: 'outline' }
+  },
+  {
+    title: 'Relationship filters',
+    narrative: 'Ribbon toggles pick which wires matter. Calls + Imports stay on, the two relationships people can read at a glance.',
+    dwellMs: 6200,
+    legend: { kicker: '02 · Edges', title: 'Filter the signal', body: 'Toggle Calls, Imports, Data, Events from the ribbon.' },
+    command: { type: 'set-edges', edges: { calls: true, imports: true, dataflow: false, events: false, inherits: false } }
+  },
+  {
+    title: 'Live hover traces',
+    narrative: 'Live mode draws hover traces without changing selection. Skim the map and the wires follow your pointer.',
+    dwellMs: 6200,
+    legend: { kicker: '03 · Live', title: 'Hover to trace', body: 'Live toggle = pointer-driven wires.' },
+    command: { type: 'set-live', enabled: true }
+  },
+  {
+    title: 'Bubblegum mood',
+    narrative: 'Themes are first-class. Each paints paper, ink, accents, and folder glass. Here is Bubblegum.',
+    dwellMs: 5800,
+    legend: { kicker: '04 · Theme', title: 'Bubblegum', body: 'Settings → Theme for light and dark packs.' },
+    command: { type: 'set-theme', theme: 'bubblegum' }
+  },
+  {
+    title: 'Tokyo Night',
+    narrative: 'Dark themes work too. Tokyo Night for a moment, then we return to Aurora for clear contrast.',
+    dwellMs: 5600,
+    legend: { kicker: '04 · Theme', title: 'Tokyo Night', body: 'Accent swatches show Light vs Dark at a glance.' },
+    command: { type: 'set-theme', theme: 'tokyo' }
+  },
+  {
+    title: 'Back to Aurora',
+    narrative: 'Return to Aurora (light) for the rest of the tour.',
+    dwellMs: 5000,
+    legend: { kicker: '04 · Theme', title: 'Aurora · Light', body: 'Default light canvas mood.' },
+    command: { type: 'set-theme', theme: 'aurora' }
+  },
+  {
+    title: 'Focus a service folder',
+    narrative: 'Folders open under the pointer. Level-1 stays open; depth caps at two so the map stays readable.',
+    dwellMs: 6800,
+    legend: { kicker: '05 · Focus', title: 'services/ingest', body: 'Spotlight dims the rest of the map.' },
+    spotlight: { path: 'services/ingest' },
+    command: { type: 'focus-folder', path: 'services/ingest', expand: true, pulse: true }
+  },
+  {
+    title: 'Jump into an entrypoint',
+    narrative: 'Agents call deepflow_jump_to to pin a file and flash it. Gateway startIngest() is the front door.',
+    dwellMs: 6800,
+    legend: { kicker: '06 · Jump', title: 'startIngest()', body: 'Pin + pulse for the human watching.' },
+    spotlight: { path: 'apps/gateway/src/documentRoutes.ts', module: 'startIngest' },
+    command: { type: 'jump', path: 'apps/gateway/src/documentRoutes.ts', module: 'startIngest', pin: true, pulse: true }
+  },
+  {
+    title: 'Code-flow overlay',
+    narrative: 'Three columns: upstream → you are here → downstream. Scrollable snippets with syntax color and connect windows on the linked lines.',
+    dwellMs: 9000,
+    legend: { kicker: '07 · Flow', title: 'Inherit · call · emit', body: 'deepflow_explain_flow opens this overlay. Scroll sideways across columns.' },
+    command: {
+      type: 'open-flow',
+      path: 'apps/gateway/src/documentRoutes.ts',
+      module: 'startIngest',
+      narrative: 'Gateway ingest is the front door. Callers arrive here, then work fans out into services.'
+    }
+  },
+  {
+    title: 'Follow the worker',
+    narrative: 'Close the overlay and land deeper. Wires leave out-ports outward and enter in-ports from outside.',
+    dwellMs: 5600,
+    legend: { kicker: '08 · Trace path', title: 'Into the worker', body: 'Same graph, deeper frame.' },
+    command: { type: 'close-flow' }
+  },
+  {
+    title: 'Worker frame',
+    narrative: 'rejectOversized() sits inside the ingest worker, a concrete module frame with ports for Live traces.',
+    dwellMs: 6400,
+    legend: { kicker: '08 · Module', title: 'rejectOversized()', body: 'Function chips live inside file tiles.' },
+    spotlight: { path: 'services/ingest/src/worker/contentGuard.ts', module: 'rejectOversized' },
+    command: { type: 'jump', path: 'services/ingest/src/worker/contentGuard.ts', module: 'rejectOversized', pin: true, pulse: true }
+  },
+  {
+    title: 'Edit animation · Ripple',
+    narrative: 'Agent edits can pulse, ripple, flash, scan, beacon, or spark. Pick one in Settings. Watch Ripple on this file.',
+    dwellMs: 6400,
+    legend: { kicker: '09 · Motion', title: 'Ripple edit', body: 'Configurable in Settings → Edit animation.' },
+    command: { type: 'set-edit-anim', style: 'ripple', path: 'services/ingest/src/worker/contentGuard.ts' }
+  },
+  {
+    title: 'Agent edit theater',
+    narrative: 'When the agent writes code, DeepFlow opens the file, plays a side strip of running lines with diff line numbers, then folds the diff into the inspector.',
+    dwellMs: 9200,
+    legend: { kicker: '10 · Agent loop', title: 'after_edit', body: 'Theater strip → file focus → sidebar diff.' },
+    spotlight: { path: 'services/ingest/src/worker/contentGuard.ts' },
+    command: { type: 'simulate-edit', path: 'services/ingest/src/worker/contentGuard.ts', theater: true }
+  },
+  {
+    title: 'Celebration particles',
+    narrative: 'New or hot files can bloom. Soft hearts rise from the frame so the eye finds what just changed.',
+    dwellMs: 5800,
+    legend: { kicker: '11 · Bloom', title: 'Hearts', body: 'Particle accents on hot frames.' },
+    command: { type: 'particle-burst', path: 'packages/shared/src/id.ts', kind: 'hearts' }
+  },
+  {
+    title: 'Fire bloom',
+    narrative: 'Or fire and sparks, for edits that feel hotter. Same API, different mood.',
+    dwellMs: 5600,
+    legend: { kicker: '11 · Bloom', title: 'Fire', body: 'kind: fire | hearts | sparks' },
+    command: { type: 'particle-burst', path: 'apps/gateway/src/documentRoutes.ts', kind: 'fire' }
+  },
+  {
+    title: 'Shared utilities',
+    narrative: 'Cross-cutting packages are their own islands. createId() is reused across apps and services.',
+    dwellMs: 6200,
+    legend: { kicker: '12 · Packages', title: 'createId()', body: 'Shared code as a first-class island.' },
+    spotlight: { path: 'packages/shared/src/id.ts', module: 'createId' },
+    command: { type: 'jump', path: 'packages/shared/src/id.ts', module: 'createId', pin: true }
+  },
+  {
+    title: 'Orphan hunt',
+    narrative: 'deepflow_orphans pins files with no static callers: dead weight, stubs, or future hooks.',
+    dwellMs: 7200,
+    legend: { kicker: '13 · Orphans', title: 'No static callers', body: 'Amber dots in the edge legend.' },
+    command: { type: 'show-orphans', pulse: true }
+  },
+  {
+    title: 'Trace dialects',
+    narrative: 'Wires can speak dialects. Unreviewed edges feel dashed and soft; removed edges fade. Live calls stay solid.',
+    dwellMs: 6800,
+    legend: { kicker: '14 · Dialects', title: 'Wire styles', body: 'Solid · dashed unreviewed · faded removed.' },
+    command: { type: 'set-trace-dialects', enabled: true }
+  },
+  {
+    title: 'Pin the change set',
+    narrative: 'Highlight the files the agent just touched so the human sees the blast radius without a wall of text.',
+    dwellMs: 6400,
+    legend: { kicker: '15 · Pins', title: 'Change set', body: 'Multi-path pin from the agent.' },
+    command: {
+      type: 'highlight-paths',
+      paths: ['services/ingest/src/worker/contentGuard.ts', 'apps/gateway/src/documentRoutes.ts', 'packages/shared/src/id.ts'],
+      pin: true
+    }
+  },
+  {
+    title: 'New file pop-in',
+    narrative: 'When a brand-new file appears on the map, it calms in with a soft pop, never a hard snap.',
+    dwellMs: 5800,
+    legend: { kicker: '16 · Birth', title: 'New file pop', body: 'calm-in + scale for arrivals.' },
+    command: { type: 'pop-in', path: 'packages/shared/src/id.ts' }
+  },
+  {
+    title: 'You are ready',
+    narrative: 'That is the loop: open workspace → jump / explain_flow → edit → after_edit. Call deepflow_demo anytime for the full showcase.',
+    dwellMs: 7200,
+    legend: { kicker: 'Done', title: 'Agent-native map', body: 'deepflow_demo · autoPlay: true' },
+    command: { type: 'clear-highlights' }
   }
 ];

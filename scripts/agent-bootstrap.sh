@@ -68,7 +68,7 @@ Paste MCP config into your agent IDE, then run these tools in order:
 1. deepflow_status
 2. deepflow_open_workspace
    root = $ROOT/fixtures/atlas-workspace
-3. deepflow_tour
+3. deepflow_demo
    root = $ROOT/fixtures/atlas-workspace
    autoPlay = true
 

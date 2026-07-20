@@ -19,6 +19,7 @@ let traceEdges = new Set();
 let sourceMode = 'live';
 let autoRevealChanges = true;
 let agentRevealDwellMs = 8000;
+let editAnimStyle = 'pulse'; // pulse | ripple | flash | scan | beacon | spark | hearts | lines
 let agentRevealTimer = 0;
 let agentRevealPath = null;
 let agentRevealExpandedId = null;
@@ -55,11 +56,22 @@ let hoverId = null;
 let hoverTimer = 0;
 const floatPlacements = new Map();
 const localOffsets = new Map(); // nested rearrange inside a parent canvas
-const pinnedLayout = new Set(); // user-dragged frames skip gravity
+const nestedSeats = new Map(); // nested id -> absolute {x,y} in parent canvas (drop seat)
+const userArranged = new Set(); // nested ids the user dragged - only these keep locals across reflow
+const pinnedLayout = new Set(); // user-dragged frames skip shelf clustering (view-field gravity still applies)
 let gravityTimer = 0;
+let traceAlignToken = 0;
+let traceAlignRaf = 0;
+let traceAlignTimer = 0;
 let skipFlipOnce = false;
 let flipBefore = null;
-let clickAnchor = null; // expand under pointer — never camera-center on open
+let clickAnchor = null; // expand under pointer - never camera-center on open
+let forceFreshPack = false;
+/** While set, pack/separate keeps these frames fixed so expand pushes siblings away. */
+let layoutAnchorIds = new Set();
+/** Focus/trace align owns motion - skip pack snap, FLIP, and soft-settle fights. */
+let alignMotionPending = false;
+let softSettleToken = 0;
 
 const FLOW_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits', 'imports', 'references', 'reexports']);
 const WALK_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits']);
@@ -115,13 +127,25 @@ const filesBelow = item => {
 };
 const directItems = item => children(item.id).filter(child => child.kind === 'folder' || child.kind === 'file');
 const escape = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-// Distinct folder hues — translucent glass groups share a tint with their files.
+// Distinct folder hues - translucent glass groups share a tint with their files.
 const FOLDER_COLORS = [
   '#0d8a72', '#3b6fb8', '#b05a28', '#8f3f72', '#218ea0',
   '#6f8230', '#5a48a8', '#b4474a', '#1f7a62', '#9a6b18',
   '#3f6e8c', '#7a4570', '#177a7a', '#8a5634', '#4658a0',
   '#2d7a48', '#a05538', '#4a5f78'
 ];
+const THEME_FOLDER_COLORS = {
+  bubblegum: ['#ff6bb5', '#7c5cff', '#ff9f43', '#35c4c4', '#ff5c8a', '#b388ff', '#ff8fab', '#5ad1e6', '#ff7eb6', '#a78bfa', '#fb923c', '#22d3ee'],
+  volcano: ['#d9480f', '#e67700', '#c92a2a', '#f59f00', '#e03131', '#f76707', '#fab005', '#c2255c', '#e8590c', '#f08c00', '#ae3ec9', '#ff922b'],
+  hacker: ['#33ff66', '#00d4aa', '#7cff4a', '#00ffa3', '#39ff14', '#b8ff3c', '#1aff9c', '#66ff99', '#00cc88', '#88ff44', '#22eeaa', '#aaff00'],
+  ocean: ['#0e7c86', '#0b6e99', '#14919b', '#2a9d8f', '#3a86ff', '#0077b6', '#00b4d8', '#48cae4', '#023e8a', '#0096c7', '#90e0ef', '#f0a202'],
+  sunset: ['#e76f51', '#f4a261', '#e9c46a', '#f28482', '#ff6b6b', '#ffa94d', '#ffd43b', '#ff8787', '#d9480f', '#fd7e14', '#fab005', '#e64980'],
+  lavender: ['#7c5cbf', '#5c7cfa', '#e599f7', '#9775fa', '#845ef7', '#748ffc', '#da77f2', '#7048e8', '#5f3dc4', '#4c6ef5', '#cc5de8', '#7950f2'],
+  noir: ['#f5f5f5', '#c8c8c8', '#9a9a9a', '#e8e8e8', '#b0b0b0', '#dcdcdc', '#888888', '#fafafa', '#aaaaaa', '#dddddd', '#777777', '#eeeeee']
+};
+function themeFolderColors() {
+  return THEME_FOLDER_COLORS[document.body.dataset.theme] || FOLDER_COLORS;
+}
 const REGION_COLOR = {
   application: '#0d8a72',
   package: '#5a48a8',
@@ -133,16 +157,17 @@ const REGION_COLOR = {
   context: '#3f6e8c'
 };
 const hashHue = value => [...String(value || '')].reduce((sum, letter) => sum + letter.charCodeAt(0), 0);
-const color = value => FOLDER_COLORS[hashHue(value) % FOLDER_COLORS.length];
+const color = value => {
+  const palette = themeFolderColors();
+  return palette[hashHue(value) % palette.length];
+};
 function folderTint(item) {
-  if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) return '#4a5f78';
+  const palette = themeFolderColors();
+  if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) return palette[palette.length - 1] || '#4a5f78';
   const region = mapRegion(item);
-  const base = REGION_COLOR[region] || REGION_COLOR.context;
-  // Keep region identity, but salt by path so sibling folders stay distinct.
+  const regionBias = { application: 0, package: 6, service: 1, infrastructure: 9, docs: 5, test: 3, generated: 5, context: 10 };
   const salt = hashHue(item.path || item.label);
-  if (salt % 3 === 0) return base;
-  const baseIndex = Math.max(0, FOLDER_COLORS.indexOf(base));
-  return FOLDER_COLORS[(baseIndex + 1 + (salt % (FOLDER_COLORS.length - 1))) % FOLDER_COLORS.length];
+  return palette[((regionBias[region] ?? 0) + salt) % palette.length];
 }
 function folderIcon(item) {
   if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) return { g: '▤', c: '#4a5f78', region: 'context' };
@@ -257,7 +282,7 @@ function exitFlow() {
   focusedFileId = null;
 }
 function outlineDim() {
-  // Keep every frame fully readable — highlight via wires/hot, never fade modules out.
+  // Keep every frame fully readable - highlight via wires/hot, never fade modules out.
   return false;
 }
 function hoverPreviewTrace() {
@@ -364,7 +389,7 @@ function folderItems(item) {
   if (item?.id === SYNTHETIC_ROOT_ID || item?.synthetic) {
     return [...syntheticRootFiles].sort((a, b) => fileOrder(a, b));
   }
-  // Hide loose files at display-root — they live inside the synthetic "root" island.
+  // Hide loose files at display-root - they live inside the synthetic "root" island.
   const root = displayRootRaw();
   const list = item?.id === root?.id
     ? directItems(item).filter(child => child.kind === 'folder')
@@ -428,15 +453,39 @@ function entryItem(item = rootFolder()) {
   return bestFile || bestFolder || ranked[0] || entryFile(item) || item;
 }
 function snapshot() {
-  return { scopeId, selectedId, selectedImportEdgeId, layoutAnchorFileId, flowMode, focusedFileId, traceMode, presentationMode, expanded: [...expandedFiles], expandedFolders: [...expandedFolders], expandedModules: [...expandedModules], source: [...sourceFiles], pinned: [...pinned], offsets: [...offsets.entries()].map(([id, value]) => [id, { ...value }]), canvas: { ...canvas }, edgeVisibility: { ...edgeVisibility } };
+  return {
+    scopeId, selectedId, selectedImportEdgeId, layoutAnchorFileId, flowMode, focusedFileId, traceMode, presentationMode,
+    expanded: [...expandedFiles], expandedFolders: [...expandedFolders], expandedModules: [...expandedModules],
+    source: [...sourceFiles], pinned: [...pinned],
+    offsets: [...offsets.entries()].map(([id, value]) => [id, { ...value }]),
+    localOffsets: [...localOffsets.entries()].map(([id, value]) => [id, { ...value }]),
+    nestedSeats: [...nestedSeats.entries()].map(([id, value]) => [id, { ...value }]),
+    userArranged: [...userArranged],
+    pinnedLayout: [...pinnedLayout],
+    canvas: { ...canvas }, edgeVisibility: { ...edgeVisibility }
+  };
 }
 function updateHistory() { $('#history-back').disabled = !undoStack.length; $('#history-forward').disabled = !redoStack.length; }
 function remember() { if (!graph) return; undoStack.push(snapshot()); if (undoStack.length > 70) undoStack.shift(); redoStack.length = 0; updateHistory(); }
 function restore(state) {
   scopeId = state.scopeId; selectedId = state.selectedId; selectedImportEdgeId = state.selectedImportEdgeId; layoutAnchorFileId = state.layoutAnchorFileId; flowMode = state.flowMode; focusedFileId = state.focusedFileId || null; focusOrigin = null; traceMode = state.traceMode ?? true; presentationMode = !!state.presentationMode;
   Object.assign(edgeVisibility, state.edgeVisibility || {});
-  expandedFiles.clear(); state.expanded.forEach(id => expandedFiles.add(id)); expandedFolders.clear(); (state.expandedFolders || []).forEach(id => expandedFolders.add(id)); expandedModules.clear(); (state.expandedModules || []).forEach(id => expandedModules.add(id)); sourceFiles.clear(); state.source.forEach(id => sourceFiles.add(id)); pinned.clear(); state.pinned.forEach(id => pinned.add(id)); offsets.clear(); state.offsets.forEach(([id, value]) => offsets.set(id, value)); Object.assign(canvas, state.canvas);
-  rebuildTrace(); render(); updateInspector();
+  expandedFiles.clear(); state.expanded.forEach(id => expandedFiles.add(id)); expandedFolders.clear(); (state.expandedFolders || []).forEach(id => expandedFolders.add(id)); expandedModules.clear(); (state.expandedModules || []).forEach(id => expandedModules.add(id)); sourceFiles.clear(); state.source.forEach(id => sourceFiles.add(id)); pinned.clear(); state.pinned.forEach(id => pinned.add(id));
+  offsets.clear(); (state.offsets || []).forEach(([id, value]) => offsets.set(id, value));
+  userArranged.clear();
+  (state.userArranged || []).forEach(id => userArranged.add(id));
+  localOffsets.clear(); (state.localOffsets || []).forEach(([id, value]) => {
+    localOffsets.set(id, value);
+    userArranged.add(id);
+  });
+  nestedSeats.clear();
+  (state.nestedSeats || []).forEach(([id, value]) => nestedSeats.set(id, { ...value }));
+  if (!state.nestedSeats) {
+    for (const [id, value] of localOffsets) nestedSeats.set(id, { x: value.x, y: value.y });
+  }
+  pinnedLayout.clear(); (state.pinnedLayout || []).forEach(id => pinnedLayout.add(id));
+  Object.assign(canvas, state.canvas);
+  rebuildTrace(); render(); updateInspector(); syncToolbar();
 }
 function moveHistory(backward) {
   const from = backward ? undoStack : redoStack; const to = backward ? redoStack : undoStack; const state = from.pop();
@@ -556,7 +605,7 @@ function rememberLayoutPositions() {
   });
 }
 function softenedPlacement(_item, target) {
-  // Demo layout is intentional and fixed — no soft-snap interpolation.
+  // Demo layout is intentional and fixed - no soft-snap interpolation.
   return target;
 }
 function requestLayoutSettle(item) {
@@ -564,13 +613,14 @@ function requestLayoutSettle(item) {
   basePlacements.clear();
   basePlacementKey = '';
 }
-function expandAncestors(item) {
+function expandAncestors(item, { autoReveal = true } = {}) {
   if (!item) return;
   // Only open ancestor folders so a collapse isn't immediately undone.
   for (const parent of ancestors(item).filter(entry => entry.kind === 'folder')) expandedFolders.add(parent.id);
   const root = displayRootRaw();
   if (item.kind === 'file' && item.parentId === root?.id) expandedFolders.add(SYNTHETIC_ROOT_ID);
-  pruneFolderDepth();
+  // Depth prune is for auto-reveal only. Manual open can go as deep as needed.
+  if (autoReveal) pruneFolderDepth(2);
 }
 /** Prefer the inner workspace when a single wrapper folder was uploaded. */
 function displayRoot() {
@@ -601,8 +651,8 @@ function folderDepthFrom(root, item) {
   for (let cursor = item; cursor && cursor.id !== root.id; cursor = node(cursor.parentId)) depth += 1;
   return depth;
 }
-/** Always keep 1 level open; never more than 2 levels of open folders. */
-function pruneFolderDepth() {
+/** Keep level-1 open. Optional maxDepth is only for auto-reveal paths. */
+function pruneFolderDepth(maxDepth = null) {
   const root = displayRoot();
   if (!root) return;
   expandedFolders.add(root.id);
@@ -610,11 +660,12 @@ function pruneFolderDepth() {
   for (const child of topLevelItems(root)) {
     if (child.kind === 'folder') expandedFolders.add(child.id);
   }
+  if (maxDepth == null) return;
   for (const id of [...expandedFolders]) {
     if (id === SYNTHETIC_ROOT_ID) continue;
     const item = node(id);
     if (!item || item.kind !== 'folder') continue;
-    if (folderDepthFrom(root, item) > 2) expandedFolders.delete(id);
+    if (folderDepthFrom(root, item) > maxDepth) expandedFolders.delete(id);
   }
 }
 function toggleFolder(id) {
@@ -630,9 +681,8 @@ function toggleFolder(id) {
       if (child.kind === 'folder') expandedFolders.delete(child.id);
     }
   } else {
-    if (folderDepthFrom(root, item) > 2) return;
+    // Manual open: no depth cap. Auto-reveal still uses pruneFolderDepth(2).
     expandedFolders.add(id);
-    pruneFolderDepth();
   }
 }
 function ensureDefaultOutlineExpanded() {
@@ -645,6 +695,11 @@ function ensureDefaultOutlineExpanded() {
   }
 }
 function captureFlip() {
+  // Clear in-flight FLIP transforms so we don't sample mid-animation positions.
+  scene.querySelectorAll('.frame.float.flipping').forEach(el => {
+    el.classList.remove('flipping');
+    el.style.transform = '';
+  });
   const map = new Map();
   scene.querySelectorAll('.frame.float[data-drag-id]').forEach(el => {
     map.set(el.dataset.dragId, el.getBoundingClientRect());
@@ -680,7 +735,7 @@ function playFlip(before) {
           el.removeEventListener('transitionend', done);
         };
         el.addEventListener('transitionend', done);
-        setTimeout(done, 2600);
+        setTimeout(done, 4000);
       });
     });
   });
@@ -700,7 +755,7 @@ const NESTED_GAP = 26; // padding between sibling folders/files inside a parent
 function topLevelIslandElements() {
   return [...scene.querySelectorAll('.frame-artboard > .frame.float[data-drag-id]')];
 }
-/** Top-level folder under pointer — only case where a drag may overlap another island. */
+/** Top-level folder under pointer - only case where a drag may overlap another island. */
 function folderUnderPointer(clientX, clientY, excludeId) {
   for (const el of topLevelIslandElements()) {
     const id = el.dataset.dragId;
@@ -711,7 +766,10 @@ function folderUnderPointer(clientX, clientY, excludeId) {
   }
   return null;
 }
-/** Visible board frame — gravity parks islands just outside this, never inside. */
+/** Park this far outside the visible board - strays stop here, never enter the field. */
+const VIEW_PARK_PAD = 40;
+/** Only islands farther than this from the board edge get pulled. */
+const VIEW_FAR_PAD = 200;
 function viewFieldBounds() {
   const boardRect = board.getBoundingClientRect();
   return {
@@ -721,36 +779,39 @@ function viewFieldBounds() {
     bottom: boardRect.bottom
   };
 }
-/** Rim just outside the view frame where strays settle. */
-function viewFieldRim(margin = 28) {
+function viewParkRim() {
   const field = viewFieldBounds();
   return {
-    left: field.left - margin,
-    top: field.top - margin,
-    right: field.right + margin,
-    bottom: field.bottom + margin
+    left: field.left - VIEW_PARK_PAD,
+    top: field.top - VIEW_PARK_PAD,
+    right: field.right + VIEW_PARK_PAD,
+    bottom: field.bottom + VIEW_PARK_PAD
   };
 }
-/** True when the island is already near the field (inside or just outside) — no pull. */
-function islandNearViewField(rect, slack = 40) {
+/** True when fully outside the far band - only these migrate to the park rim. */
+function islandFarFromView(rect) {
   const field = viewFieldBounds();
-  const nearLeft = rect.right >= field.left - slack;
-  const nearRight = rect.left <= field.right + slack;
-  const nearTop = rect.bottom >= field.top - slack;
-  const nearBottom = rect.top <= field.bottom + slack;
-  return nearLeft && nearRight && nearTop && nearBottom;
+  return rect.right < field.left - VIEW_FAR_PAD
+    || rect.left > field.right + VIEW_FAR_PAD
+    || rect.bottom < field.top - VIEW_FAR_PAD
+    || rect.top > field.bottom + VIEW_FAR_PAD;
 }
-/** Pull toward the nearest point on the outside rim — not toward center, not inside the field. */
+/** Pull so the island's near edge sits just outside the view (park rim). */
 function pullTowardViewField(rect) {
-  const rim = viewFieldRim(28);
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  let targetX = cx, targetY = cy;
-  if (cx < rim.left) targetX = rim.left;
-  else if (cx > rim.right) targetX = rim.right;
-  if (cy < rim.top) targetY = rim.top;
-  else if (cy > rim.bottom) targetY = rim.bottom;
-  return { pullX: targetX - cx, pullY: targetY - cy };
+  const rim = viewParkRim();
+  let pullX = 0, pullY = 0;
+  if (rect.right < rim.left) pullX = rim.left - rect.right;
+  else if (rect.left > rim.right) pullX = rim.right - rect.left;
+  if (rect.bottom < rim.top) pullY = rim.top - rect.bottom;
+  else if (rect.top > rim.bottom) pullY = rim.bottom - rect.top;
+  return { pullX, pullY };
+}
+function clampGravityStep(pullScreen, scale, speed, maxStep) {
+  const target = pullScreen / scale;
+  if (!target) return 0;
+  const raw = target * speed;
+  const capped = Math.sign(raw) * Math.min(Math.abs(raw), maxStep, Math.abs(target));
+  return capped;
 }
 function rectsOverlap(a, b, gap = ISLAND_GAP) {
   // Collide when rects are closer than `gap` (not when they already overlap by gap).
@@ -760,7 +821,7 @@ function rectsOverlap(a, b, gap = ISLAND_GAP) {
 }
 function separationPush(moving, fixed, gap = ISLAND_GAP) {
   const overlapX = Math.min(moving.right, fixed.right) - Math.max(moving.left, fixed.left);
-  const overlapY = Math.min(moving.bottom, fixed.bottom) - Math.max(moving.top, fixed.bottom);
+  const overlapY = Math.min(moving.bottom, fixed.bottom) - Math.max(moving.top, fixed.top);
   // Penetration past the required gap (positive = too close / overlapping).
   const penX = overlapX + gap;
   const penY = overlapY + gap;
@@ -814,6 +875,208 @@ function markDropTarget(clientX, clientY, excludeId) {
 function clearDropTargets() {
   topLevelIslandElements().forEach(el => el.classList.remove('drop-target'));
 }
+/** After a free drop, animate other islands aside so the dropped one keeps its place. */
+function cancelSoftSettle() {
+  softSettleToken += 1;
+}
+function softSettleNeighbors(islandId, islandEl, { duration = 1600 } = {}) {
+  if (!islandEl) return;
+  const token = ++softSettleToken;
+  const scale = Math.max(.35, canvas.scale || 1);
+  const start = performance.now();
+  const movers = [];
+  for (const other of topLevelIslandElements()) {
+    const otherId = other.dataset.dragId;
+    if (otherId === islandId) continue;
+    const cur = offsets.get(otherId) || { x: 0, y: 0 };
+    movers.push({ id: otherId, el: other, from: { ...cur }, to: { ...cur } });
+  }
+  const resolveTargets = () => {
+    const mine = islandEl.getBoundingClientRect();
+    for (const m of movers) m.to = { ...(offsets.get(m.id) || m.from) };
+    for (let pass = 0; pass < 14; pass++) {
+      let hit = false;
+      for (const m of movers) {
+        m.el.style.translate = `${m.to.x}px ${m.to.y}px`;
+        const oRect = m.el.getBoundingClientRect();
+        if (!rectsOverlap(mine, oRect, ISLAND_GAP)) continue;
+        const { dx, dy } = separationPush(oRect, mine, ISLAND_GAP);
+        if (!dx && !dy) continue;
+        m.to.x += dx / scale;
+        m.to.y += dy / scale;
+        hit = true;
+      }
+      // Also ease movers apart from each other so the pack doesn't clump.
+      for (let i = 0; i < movers.length; i++) {
+        for (let j = i + 1; j < movers.length; j++) {
+          const A = movers[i], B = movers[j];
+          A.el.style.translate = `${A.to.x}px ${A.to.y}px`;
+          B.el.style.translate = `${B.to.x}px ${B.to.y}px`;
+          const aRect = A.el.getBoundingClientRect();
+          const bRect = B.el.getBoundingClientRect();
+          if (!rectsOverlap(aRect, bRect, ISLAND_GAP)) continue;
+          const { dx, dy } = separationPush(aRect, bRect, ISLAND_GAP);
+          if (!dx && !dy) continue;
+          A.to.x += dx / scale * .5;
+          A.to.y += dy / scale * .5;
+          B.to.x -= dx / scale * .5;
+          B.to.y -= dy / scale * .5;
+          hit = true;
+        }
+      }
+      if (!hit) break;
+    }
+  };
+  resolveTargets();
+  const tick = now => {
+    if (token !== softSettleToken) return;
+    const t = Math.min(1, (now - start) / duration);
+    const ease = 1 - Math.pow(1 - t, 3);
+    for (const m of movers) {
+      const x = m.from.x + (m.to.x - m.from.x) * ease;
+      const y = m.from.y + (m.to.y - m.from.y) * ease;
+      offsets.set(m.id, { x, y });
+      m.el.style.translate = `${x}px ${y}px`;
+      m.el.style.setProperty('--ox', `${x}px`);
+      m.el.style.setProperty('--oy', `${y}px`);
+    }
+    if (t < 1) requestAnimationFrame(tick);
+    else scheduleDraw();
+  };
+  requestAnimationFrame(tick);
+}
+/** Soft-push siblings inside a folder/file canvas after a nested drop. */
+function softSettleNested(draggedId, parentId, { duration = 1500 } = {}) {
+  const parentEl = scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`);
+  const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
+  if (!canvasEl) return;
+  const kids = [...canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')];
+  const mine = kids.find(el => el.dataset.dragId === draggedId);
+  if (!mine) return;
+  const gap = mine.classList.contains('frame-fn') ? MODULE_GAP : NESTED_GAP;
+  const movers = kids.filter(el => el.dataset.dragId !== draggedId).map(el => {
+    const left = parseFloat(el.style.left) || 0;
+    const top = parseFloat(el.style.top) || 0;
+    return { id: el.dataset.dragId, el, from: { x: left, y: top }, to: { x: left, y: top } };
+  });
+  const applySeat = (el, x, y) => {
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.translate = '0px 0px';
+    el.style.setProperty('--ox', '0px');
+    el.style.setProperty('--oy', '0px');
+  };
+  for (let pass = 0; pass < 16; pass++) {
+    let hit = false;
+    const mineBox = {
+      left: parseFloat(mine.style.left) || 0,
+      top: parseFloat(mine.style.top) || 0,
+      right: (parseFloat(mine.style.left) || 0) + mine.offsetWidth,
+      bottom: (parseFloat(mine.style.top) || 0) + mine.offsetHeight,
+      width: mine.offsetWidth,
+      height: mine.offsetHeight
+    };
+    for (const m of movers) {
+      const box = {
+        left: m.to.x,
+        top: m.to.y,
+        right: m.to.x + m.el.offsetWidth,
+        bottom: m.to.y + m.el.offsetHeight,
+        width: m.el.offsetWidth,
+        height: m.el.offsetHeight
+      };
+      if (!rectsOverlap(mineBox, box, gap)) continue;
+      const { dx, dy } = separationPush(box, mineBox, gap);
+      if (!dx && !dy) continue;
+      m.to.x += dx;
+      m.to.y += dy;
+      hit = true;
+    }
+    for (let i = 0; i < movers.length; i++) {
+      for (let j = i + 1; j < movers.length; j++) {
+        const A = movers[i], B = movers[j];
+        const aBox = {
+          left: A.to.x, top: A.to.y,
+          right: A.to.x + A.el.offsetWidth, bottom: A.to.y + A.el.offsetHeight,
+          width: A.el.offsetWidth, height: A.el.offsetHeight
+        };
+        const bBox = {
+          left: B.to.x, top: B.to.y,
+          right: B.to.x + B.el.offsetWidth, bottom: B.to.y + B.el.offsetHeight,
+          width: B.el.offsetWidth, height: B.el.offsetHeight
+        };
+        if (!rectsOverlap(aBox, bBox, gap)) continue;
+        const { dx, dy } = separationPush(aBox, bBox, gap);
+        if (!dx && !dy) continue;
+        A.to.x += dx * .5;
+        A.to.y += dy * .5;
+        B.to.x -= dx * .5;
+        B.to.y -= dy * .5;
+        hit = true;
+      }
+    }
+    if (!hit) break;
+  }
+  // Keep chips inside the canvas with a little pad.
+  const pad = 12;
+  const maxX = Math.max(canvasEl.clientWidth, ...movers.map(m => m.to.x + m.el.offsetWidth), (parseFloat(mine.style.left) || 0) + mine.offsetWidth) + pad;
+  const maxY = Math.max(canvasEl.clientHeight, ...movers.map(m => m.to.y + m.el.offsetHeight), (parseFloat(mine.style.top) || 0) + mine.offsetHeight) + pad;
+  for (const m of movers) {
+    m.to.x = Math.max(pad, m.to.x);
+    m.to.y = Math.max(pad, m.to.y);
+  }
+  const start = performance.now();
+  const tick = now => {
+    const t = Math.min(1, (now - start) / duration);
+    const ease = 1 - Math.pow(1 - t, 3);
+    for (const m of movers) {
+      const x = m.from.x + (m.to.x - m.from.x) * ease;
+      const y = m.from.y + (m.to.y - m.from.y) * ease;
+      applySeat(m.el, x, y);
+      if (Math.hypot(m.to.x - m.from.x, m.to.y - m.from.y) > 1) {
+        userArranged.add(m.id);
+        nestedSeats.set(m.id, { x, y });
+      }
+    }
+    reshapeParentCanvas(parentEl, canvasEl, maxX, maxY);
+    if (t < 1) requestAnimationFrame(tick);
+    else {
+      for (const m of movers) {
+        if (Math.hypot(m.to.x - m.from.x, m.to.y - m.from.y) > 1) {
+          nestedSeats.set(m.id, { ...m.to });
+          userArranged.add(m.id);
+        }
+      }
+      softSettleAfterExpand(parentId, { duration: 1400 });
+      scheduleDraw();
+      animateReflowEdges(700);
+      // Reconcile pack sizes / parent bounds without snapping seats (skip FLIP).
+      clearTimeout(softSettleNested._reconcile);
+      softSettleNested._reconcile = setTimeout(() => {
+        if (app.classList.contains('dragging')) return;
+        skipFlipOnce = true;
+        render();
+      }, 200);
+    }
+  };
+  requestAnimationFrame(tick);
+}
+function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH) {
+  if (!parentEl || !canvasEl) return;
+  const header = parentEl.querySelector(':scope > .frame-bar');
+  const headerH = header?.offsetHeight || 54;
+  const pad = 16;
+  const needW = Math.max(parentEl.offsetWidth, Math.ceil((contentW || canvasEl.scrollWidth) + pad));
+  const needH = Math.ceil(headerH + (contentH || canvasEl.scrollHeight) + 12);
+  parentEl.style.width = `${needW}px`;
+  canvasEl.style.height = `${Math.max(64, needH - headerH - 10)}px`;
+  canvasEl.style.minHeight = canvasEl.style.height;
+}
+function clearNestDragChrome() {
+  scene.querySelectorAll('.nest-drop-active, .nest-canvas-active').forEach(el => {
+    el.classList.remove('nest-drop-active', 'nest-canvas-active');
+  });
+}
 function scheduleGravityDrift(delay = 160) {
   // Viewport field gravity runs continuously; luxury-motion only gates jelly/FLIP.
   if (app.classList.contains('dragging')) return;
@@ -822,6 +1085,10 @@ function scheduleGravityDrift(delay = 160) {
 }
 function softGravityStep(pass) {
   if (!graph) return;
+  if (traceAlignRaf) {
+    gravityTimer = setTimeout(() => softGravityStep(0), 280);
+    return;
+  }
   if (app.classList.contains('dragging')) {
     gravityTimer = setTimeout(() => softGravityStep(0), 240);
     return;
@@ -831,40 +1098,65 @@ function softGravityStep(pass) {
     gravityTimer = setTimeout(() => softGravityStep(0), 400);
     return;
   }
-  const top = topLevelItems(root);
   let moved = false;
   const centers = [];
-  for (const item of top) {
-    const el = scene.querySelector(`.frame.float[data-drag-id="${CSS.escape(item.id)}"]`);
-    if (!el) continue;
-    const off = offsets.get(item.id) || { x: 0, y: 0 };
-    const rect = el.getBoundingClientRect();
-    centers.push({ item, el, off, rect });
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    const item = node(id);
+    if (!item) continue;
+    const off = offsets.get(id) || { x: 0, y: 0 };
+    centers.push({ item, el, off, rect: el.getBoundingClientRect() });
+  }
+  if (!centers.length) {
+    gravityTimer = setTimeout(() => softGravityStep(0), 400);
+    return;
   }
   const scale = Math.max(.35, canvas.scale || 1);
   for (const A of centers) {
-    if (pinnedLayout.has(A.item.id)) continue;
-    // Already inside or just outside the view frame — leave context alone.
-    if (islandNearViewField(A.rect)) continue;
+    A.far = islandFarFromView(A.rect);
+    // Only far-off islands drift to the park rim just outside the view.
+    // Never park-pull anything still in (or near) the viewfinder.
+    if (!A.far) continue;
     const { pullX, pullY } = pullTowardViewField(A.rect);
-    if (Math.abs(pullX) < 4 && Math.abs(pullY) < 4) continue;
-    const speed = 0.028;
-    const stepX = Math.max(-2.0, Math.min(2.0, pullX * speed / scale));
-    const stepY = Math.max(-2.0, Math.min(2.0, pullY * speed / scale));
-    if (Math.abs(stepX) < 0.04 && Math.abs(stepY) < 0.04) continue;
+    if (Math.abs(pullX) < 2 && Math.abs(pullY) < 2) continue;
+    const stepX = clampGravityStep(pullX, scale, 0.032, 2.4);
+    const stepY = clampGravityStep(pullY, scale, 0.032, 2.4);
+    if (Math.abs(stepX) < 0.05 && Math.abs(stepY) < 0.05) continue;
     applyIslandTranslate(A, { x: A.off.x + stepX, y: A.off.y + stepY });
+    A.far = islandFarFromView(A.rect);
     moved = true;
   }
+  // Soft padding: keep in-view seats still when a stray brushes them.
+  // Far ↔ in-view: only the stray yields. In-view ↔ in-view: gentle shared nudge.
   for (let i = 0; i < centers.length; i++) {
     for (let j = i + 1; j < centers.length; j++) {
       const A = centers[i], B = centers[j];
       if (!rectsOverlap(A.rect, B.rect, ISLAND_GAP)) continue;
-      const aPinned = pinnedLayout.has(A.item.id);
-      const bPinned = pinnedLayout.has(B.item.id);
-      if (aPinned && bPinned) continue;
       const { dx, dy } = separationPush(A.rect, B.rect);
       if (!dx && !dy) continue;
-      const sx = dx / scale, sy = dy / scale;
+      const aPinned = pinnedLayout.has(A.item.id);
+      const bPinned = pinnedLayout.has(B.item.id);
+      const aFar = A.far, bFar = B.far;
+      // Stray vs view: park physics owns the stray - don't migrate the view island.
+      if (aFar !== bFar) {
+        const stray = aFar ? A : B;
+        const sign = aFar ? 1 : -1;
+        const sx = (dx / scale) * sign;
+        const sy = (dy / scale) * sign;
+        if (Math.abs(sx) < 0.04 && Math.abs(sy) < 0.04) continue;
+        if (!pinnedLayout.has(stray.item.id)) {
+          applyIslandTranslate(stray, { x: stray.off.x + sx, y: stray.off.y + sy });
+          stray.far = islandFarFromView(stray.rect);
+          moved = true;
+        }
+        continue;
+      }
+      // Both far: separate at full strength so they don't clump on the rim.
+      // Both in-view: only heal real overlaps (gentle) - no continuous drift.
+      const strength = aFar ? 1 : 0.35;
+      const sx = (dx / scale) * strength;
+      const sy = (dy / scale) * strength;
+      if (Math.abs(sx) < 0.04 && Math.abs(sy) < 0.04) continue;
       if (!aPinned && !bPinned) {
         applyIslandTranslate(A, { x: A.off.x + sx * 0.5, y: A.off.y + sy * 0.5 });
         applyIslandTranslate(B, { x: B.off.x - sx * 0.5, y: B.off.y - sy * 0.5 });
@@ -875,11 +1167,330 @@ function softGravityStep(pass) {
       } else if (!aPinned && bPinned) {
         applyIslandTranslate(A, { x: A.off.x + sx, y: A.off.y + sy });
         moved = true;
+      } else if (aFar) {
+        applyIslandTranslate(A, { x: A.off.x + sx * 0.35, y: A.off.y + sy * 0.35 });
+        applyIslandTranslate(B, { x: B.off.x - sx * 0.35, y: B.off.y - sy * 0.35 });
+        moved = true;
       }
+      A.far = islandFarFromView(A.rect);
+      B.far = islandFarFromView(B.rect);
     }
   }
+  // No continuous attract inside the viewfinder - that was yanking seated
+  // islands toward strays / each other and felt like reversed park gravity.
   if (moved) scheduleDraw();
-  gravityTimer = setTimeout(() => softGravityStep(0), moved ? 140 : 320);
+  gravityTimer = setTimeout(() => softGravityStep(0), moved ? 110 : 280);
+}
+/** Shelf-space box for a top-level island (base left/top + drag offset). */
+function islandShelfBox(el, id) {
+  const left = parseFloat(el.style.left) || 0;
+  const top = parseFloat(el.style.top) || 0;
+  const off = offsets.get(id) || { x: 0, y: 0 };
+  return {
+    id,
+    el,
+    left,
+    top,
+    off: { x: off.x, y: off.y },
+    x: left + off.x,
+    y: top + off.y,
+    w: el.offsetWidth || 220,
+    h: el.offsetHeight || 54
+  };
+}
+function cancelTraceAlign() {
+  traceAlignToken += 1;
+  clearTimeout(traceAlignTimer);
+  if (traceAlignRaf) {
+    cancelAnimationFrame(traceAlignRaf);
+    traceAlignRaf = 0;
+  }
+  scene?.querySelectorAll('.trace-flying, .trace-align-focus').forEach(el => {
+    el.classList.remove('trace-flying', 'trace-align-focus');
+    el.style.zIndex = '';
+  });
+  scene?.classList.remove('trace-aligning');
+}
+function stripFlipTransforms() {
+  scene?.querySelectorAll('.frame.flipping, .frame.jelly-wobble').forEach(el => {
+    el.classList.remove('flipping', 'jelly-wobble');
+    el.style.transform = '';
+  });
+}
+/** Directed island→island links from the live trace (for flow ranking). */
+function traceIslandLinks(islandIds) {
+  const live = activeTraceEdges();
+  const idSet = islandIds instanceof Set ? islandIds : new Set(islandIds);
+  const links = [];
+  for (const edge of edgeTypes()) {
+    if (!live.has(edge.id)) continue;
+    const aTop = topLevelOwner(fileOf(node(edge.from)) || node(edge.from));
+    const bTop = topLevelOwner(fileOf(node(edge.to)) || node(edge.to));
+    if (!aTop || !bTop || aTop.id === bTop.id) continue;
+    if (!idSet.has(aTop.id) || !idSet.has(bTop.id)) continue;
+    links.push({ from: aTop.id, to: bTop.id });
+  }
+  return links;
+}
+function bfsDist(adj, start) {
+  const dist = new Map([[start, 0]]);
+  const queue = [start];
+  while (queue.length) {
+    const cur = queue.shift();
+    for (const nxt of adj.get(cur) || []) {
+      if (dist.has(nxt)) continue;
+      dist.set(nxt, dist.get(cur) + 1);
+      queue.push(nxt);
+    }
+  }
+  return dist;
+}
+/**
+ * Slow post-click layout: rank traced islands upstream←focus→downstream,
+ * stack columns to cut crossings, ease offsets (focus stays put).
+ */
+function computeTraceAlignMovers() {
+  const focus = selected();
+  if (!focus || (focus.kind === 'folder' && focus.depth === 0)) return [];
+  const focusTop = topLevelOwner(fileOf(focus) || focus);
+  if (!focusTop) return [];
+  const boxes = [];
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    const item = node(id);
+    if (!item) continue;
+    if (id !== focusTop.id && !hasTrace(item)) continue;
+    boxes.push(islandShelfBox(el, id));
+  }
+  if (boxes.length < 2) return [];
+  const byId = new Map(boxes.map(box => [box.id, box]));
+  const links = traceIslandLinks(byId);
+  const outAdj = new Map(boxes.map(box => [box.id, []]));
+  const inAdj = new Map(boxes.map(box => [box.id, []]));
+  for (const link of links) {
+    outAdj.get(link.from)?.push(link.to);
+    inAdj.get(link.to)?.push(link.from);
+  }
+  const outDist = bfsDist(outAdj, focusTop.id);
+  const inDist = bfsDist(inAdj, focusTop.id);
+  const focusBox = byId.get(focusTop.id);
+  const focusCx = focusBox.x + focusBox.w / 2;
+  const rank = new Map();
+  for (const box of boxes) {
+    if (box.id === focusTop.id) {
+      rank.set(box.id, 0);
+      continue;
+    }
+    const hasOut = outDist.has(box.id);
+    const hasIn = inDist.has(box.id);
+    if (hasOut || hasIn) {
+      rank.set(box.id, (hasOut ? outDist.get(box.id) : 0) - (hasIn ? inDist.get(box.id) : 0));
+    } else {
+      rank.set(box.id, box.x + box.w / 2 < focusCx ? -1 : 1);
+    }
+  }
+  const columns = new Map();
+  for (const box of boxes) {
+    const r = rank.get(box.id) || 0;
+    const list = columns.get(r) || [];
+    list.push(box);
+    columns.set(r, list);
+  }
+  const neighborY = id => {
+    const neigh = [...(outAdj.get(id) || []), ...(inAdj.get(id) || [])];
+    if (!neigh.length) {
+      const box = byId.get(id);
+      return box.y + box.h / 2;
+    }
+    let sum = 0, n = 0;
+    for (const nid of neigh) {
+      const nb = byId.get(nid);
+      if (!nb) continue;
+      sum += nb.y + nb.h / 2;
+      n += 1;
+    }
+    return n ? sum / n : byId.get(id).y;
+  };
+  for (let iter = 0; iter < 5; iter++) {
+    for (const col of columns.values()) {
+      col.sort((a, b) => neighborY(a.id) - neighborY(b.id) || a.y - b.y || a.id.localeCompare(b.id));
+    }
+  }
+  const colGap = 64;
+  const rowGap = 40;
+  const ranks = [...columns.keys()].sort((a, b) => a - b);
+  const colMeta = new Map();
+  for (const r of ranks) {
+    const col = columns.get(r);
+    let w = 0, h = 0;
+    for (const box of col) {
+      w = Math.max(w, box.w);
+      h += box.h + rowGap;
+    }
+    colMeta.set(r, { w, h: Math.max(0, h - rowGap), col });
+  }
+  const colX = new Map([[0, focusBox.x]]);
+  let cursor = focusBox.x + focusBox.w + colGap;
+  for (const r of ranks.filter(value => value > 0)) {
+    colX.set(r, cursor);
+    cursor += colMeta.get(r).w + colGap;
+  }
+  cursor = focusBox.x;
+  for (const r of ranks.filter(value => value < 0).sort((a, b) => b - a)) {
+    const meta = colMeta.get(r);
+    cursor -= colGap + meta.w;
+    colX.set(r, cursor);
+  }
+  const world = new Map();
+  for (const r of ranks) {
+    const { col } = colMeta.get(r);
+    if (r === 0) {
+      const focusIdx = Math.max(0, col.findIndex(box => box.id === focusTop.id));
+      let yAbove = focusBox.y;
+      for (let i = focusIdx - 1; i >= 0; i--) {
+        yAbove -= rowGap + col[i].h;
+        world.set(col[i].id, { x: focusBox.x, y: yAbove, w: col[i].w, h: col[i].h });
+      }
+      world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
+      let yBelow = focusBox.y + focusBox.h + rowGap;
+      for (let i = focusIdx + 1; i < col.length; i++) {
+        world.set(col[i].id, { x: focusBox.x, y: yBelow, w: col[i].w, h: col[i].h });
+        yBelow += col[i].h + rowGap;
+      }
+      continue;
+    }
+    const meta = colMeta.get(r);
+    let y = focusBox.y + focusBox.h / 2 - meta.h / 2;
+    const x = colX.get(r);
+    for (const box of col) {
+      world.set(box.id, { x, y, w: box.w, h: box.h });
+      y += box.h + rowGap;
+    }
+  }
+  // Keep traced targets clear of each other after ranking.
+  const movable = [...world.entries()].map(([id, box]) => ({ id, ...box }));
+  separateBoxes(movable, { gap: ISLAND_GAP + 8, passes: 24 });
+  for (const box of movable) world.set(box.id, { x: box.x, y: box.y, w: box.w, h: box.h });
+  // Focus island stays anchored (separateBoxes may have nudged it).
+  world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
+  // Keep non-focus targets from overlapping the focus seat so they don't animate
+  // "into" it and linger underneath.
+  const focusPad = ISLAND_GAP + 12;
+  for (const [id, seat] of world) {
+    if (id === focusTop.id) continue;
+    const box = { ...seat };
+    const ox = Math.min(box.x + box.w, focusBox.x + focusBox.w) - Math.max(box.x, focusBox.x);
+    const oy = Math.min(box.y + box.h, focusBox.y + focusBox.h) - Math.max(box.y, focusBox.y);
+    if (ox <= -focusPad || oy <= -focusPad) continue;
+    const penX = ox + focusPad;
+    const penY = oy + focusPad;
+    if (penX < penY) {
+      box.x += (box.x + box.w / 2 <= focusBox.x + focusBox.w / 2) ? -(penX + .5) : (penX + .5);
+    } else {
+      box.y += (box.y + box.h / 2 <= focusBox.y + focusBox.h / 2) ? -(penY + .5) : (penY + .5);
+    }
+    world.set(id, box);
+  }
+  const movers = [];
+  for (const box of boxes) {
+    if (box.id === focusTop.id) continue;
+    const target = world.get(box.id);
+    if (!target) continue;
+    const tx = target.x, ty = target.y;
+    const dist = Math.hypot(tx - box.x, ty - box.y);
+    if (dist < 3) continue;
+    const to = { x: tx - box.left, y: ty - box.top };
+    if (Math.abs(to.x - box.off.x) < 2 && Math.abs(to.y - box.off.y) < 2) continue;
+    movers.push({
+      id: box.id,
+      el: box.el,
+      from: { ...box.off },
+      to,
+      dist
+    });
+  }
+  return movers;
+}
+function scheduleTraceAlign(delay = 90) {
+  cancelTraceAlign();
+  const token = traceAlignToken;
+  traceAlignTimer = setTimeout(() => {
+    if (token !== traceAlignToken) return;
+    runTraceAlign(token);
+  }, delay);
+}
+function runTraceAlign(token) {
+  if (!graph || app.classList.contains('dragging')) return;
+  if (token !== traceAlignToken) return;
+  cancelSoftSettle();
+  stripFlipTransforms();
+  clearTimeout(gravityTimer);
+  const movers = computeTraceAlignMovers();
+  if (!movers.length) {
+    scheduleGravityDrift(400);
+    return;
+  }
+  // One continuous ease to the final seat - no pack/FLIP snap beforehand.
+  const maxDist = Math.max(...movers.map(m => m.dist || 0), 80);
+  const duration = Math.min(1400, Math.max(700, 480 + maxDist * 0.9));
+  const start = performance.now();
+  animateReflowEdges(duration + 200);
+  scene.classList.add('trace-aligning');
+  for (const mover of movers) {
+    mover.el.classList.remove('flipping', 'jelly-wobble');
+    mover.el.style.transform = '';
+    mover.el.classList.add('trace-flying');
+    mover.el.style.zIndex = '60';
+  }
+  const focusEl = elementForSelection() || scene.querySelector('.frame.selected, .frame.focus-anchor');
+  if (focusEl) {
+    focusEl.classList.add('trace-align-focus');
+    focusEl.style.zIndex = '40';
+  }
+  const tick = now => {
+    if (token !== traceAlignToken || app.classList.contains('dragging')) {
+      for (const mover of movers) {
+        mover.el.classList.remove('trace-flying');
+        mover.el.style.zIndex = '';
+      }
+      focusEl?.classList.remove('trace-align-focus');
+      if (focusEl) focusEl.style.zIndex = '';
+      scene.classList.remove('trace-aligning');
+      traceAlignRaf = 0;
+      return;
+    }
+    const t = Math.min(1, (now - start) / duration);
+    // Ease-out quart: arrive at the final seat and stop (no linger mid-path).
+    const ease = 1 - Math.pow(1 - t, 4);
+    for (const mover of movers) {
+      const x = mover.from.x + (mover.to.x - mover.from.x) * ease;
+      const y = mover.from.y + (mover.to.y - mover.from.y) * ease;
+      offsets.set(mover.id, { x, y });
+      mover.el.style.translate = `${x}px ${y}px`;
+      mover.el.style.setProperty('--ox', `${x}px`);
+      mover.el.style.setProperty('--oy', `${y}px`);
+    }
+    if (t < 1) {
+      traceAlignRaf = requestAnimationFrame(tick);
+      return;
+    }
+    for (const mover of movers) {
+      offsets.set(mover.id, { ...mover.to });
+      mover.el.style.translate = `${mover.to.x}px ${mover.to.y}px`;
+      mover.el.style.setProperty('--ox', `${mover.to.x}px`);
+      mover.el.style.setProperty('--oy', `${mover.to.y}px`);
+      mover.el.classList.remove('trace-flying');
+      mover.el.style.zIndex = '';
+    }
+    focusEl?.classList.remove('trace-align-focus');
+    if (focusEl) focusEl.style.zIndex = '';
+    scene.classList.remove('trace-aligning');
+    traceAlignRaf = 0;
+    scheduleDraw();
+    renderMinimap();
+    scheduleGravityDrift(500);
+  };
+  traceAlignRaf = requestAnimationFrame(tick);
 }
 function livesInsideExpandedFolder(file) {
   return !!file && ancestors(file).some(parent => parent.kind === 'folder' && parent.id !== rootFolder().id && expandedFolders.has(parent.id));
@@ -974,9 +1585,10 @@ function parentCanvasId(id) {
   const item = node(id);
   if (!item) return null;
   if (item.kind === 'module') return item.fileId;
-  const root = displayRootRaw();
+  const root = displayRoot();
   if (item.kind === 'file' && item.parentId === root?.id) return SYNTHETIC_ROOT_ID;
-  if (item.parentId && item.parentId !== root?.id && item.parentId !== rootFolder()?.id) return item.parentId;
+  // Nested under any folder that isn't the display root → parent canvas is that folder.
+  if (item.parentId && item.parentId !== root?.id) return item.parentId;
   return null;
 }
 /** Size frame chrome from label length so titles wrap instead of clipping. */
@@ -999,7 +1611,14 @@ function frameFileSize(file) {
     const size = frameModuleSize(file, module);
     return { id: module.id, item: module, w: size.w, h: size.h, size };
   });
-  const packed = packBoxes(boxes, { gap: MODULE_GAP, pad: 18, maxWidth: Math.max(720, header.w - 24), mode: layoutModes.get(file.id) || 'auto' });
+  const packed = packBoxes(boxes, {
+    gap: MODULE_GAP,
+    pad: 18,
+    maxWidth: Math.max(720, header.w - 24),
+    mode: layoutModes.get(file.id) || 'auto',
+    persistLocals: true,
+    anchors: layoutAnchorIds
+  });
   return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 12, headerH: header.h, children: packed.items };
 }
 function frameFolderSize(item, depth = 0) {
@@ -1015,23 +1634,27 @@ function frameFolderSize(item, depth = 0) {
     gap: NESTED_GAP,
     pad: 20,
     maxWidth: depth === 0 ? 1020 : 780,
-    mode: layoutModes.get(item.id) || 'auto'
+    mode: layoutModes.get(item.id) || 'auto',
+    persistLocals: true,
+    anchors: layoutAnchorIds
   });
   return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 16, headerH: header.h, children: packed.items };
 }
 /** Shelf-pack floating boxes left→right, wrap on maxWidth, then separate overlaps. */
-function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto' } = {}) {
+function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto', persistLocals = false, anchors = null } = {}) {
   let x = pad, y = pad, rowH = 0;
   const items = [];
+  // Keep shelf order stable across focus/defocus so related islands don't
+  // teleport in on select and vanish when the trace clears.
   const ordered = [...boxes].sort((a, b) => {
     const ia = a.item || node(a.id);
     const ib = b.item || node(b.id);
     return (mapRegionPriority[mapRegion(ia)] ?? 9) - (mapRegionPriority[mapRegion(ib)] ?? 9)
-      || primaryTraceScore(ib) - primaryTraceScore(ia)
       || (ia?.label || '').localeCompare(ib?.label || '');
   });
   const useRow = mode === 'row';
   const useCol = mode === 'column';
+  const fixed = anchors instanceof Set && anchors.size ? anchors : null;
   for (const box of ordered) {
     if (!useCol && !useRow && x > pad && x + box.w > maxWidth - pad) {
       x = pad;
@@ -1043,8 +1666,17 @@ function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto' } 
       y += rowH + gap;
       rowH = 0;
     }
-    const local = localOffsets.get(box.id) || { x: 0, y: 0 };
-    items.push({ ...box, x: x + local.x, y: y + local.y });
+    // User-dragged chips keep an absolute canvas seat when available so drops
+    // don't jump back to a stale shelf+local combo after re-pack.
+    const seat = userArranged.has(box.id) ? nestedSeats.get(box.id) : null;
+    const local = !seat && userArranged.has(box.id) ? (localOffsets.get(box.id) || { x: 0, y: 0 }) : { x: 0, y: 0 };
+    items.push({
+      ...box,
+      shelfX: x,
+      shelfY: y,
+      x: seat ? seat.x : x + local.x,
+      y: seat ? seat.y : y + local.y
+    });
     if (useRow || !useCol) {
       x += box.w + gap;
       rowH = Math.max(rowH, box.h);
@@ -1052,7 +1684,22 @@ function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto' } 
       rowH = box.h;
     }
   }
-  separateBoxes(items, { gap, passes: 36 });
+  separateBoxes(items, { gap, passes: 40, anchors: fixed });
+  if (persistLocals) {
+    for (const item of items) {
+      if (item.shelfX == null) continue;
+      if (!userArranged.has(item.id)) {
+        localOffsets.delete(item.id);
+        nestedSeats.delete(item.id);
+        continue;
+      }
+      nestedSeats.set(item.id, { x: item.x, y: item.y });
+      const dx = item.x - item.shelfX;
+      const dy = item.y - item.shelfY;
+      if (Math.abs(dx) < .5 && Math.abs(dy) < .5) localOffsets.delete(item.id);
+      else localOffsets.set(item.id, { x: dx, y: dy });
+    }
+  }
   let boundX = pad, boundY = pad;
   for (const item of items) {
     boundX = Math.max(boundX, item.x + item.w);
@@ -1060,9 +1707,10 @@ function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto' } 
   }
   return { items, w: Math.max(boundX + pad, pad * 2 + 120), h: Math.max(boundY + pad, pad * 2 + 48) };
 }
-/** Push overlapping boxes apart until they clear `gap`. */
-function separateBoxes(items, { gap = 12, passes = 28 } = {}) {
+/** Push boxes apart until they clear `gap`. Anchored ids stay put; others yield. */
+function separateBoxes(items, { gap = 12, passes = 28, anchors = null } = {}) {
   if (items.length < 2) return;
+  const fixed = anchors instanceof Set && anchors.size ? anchors : null;
   for (let pass = 0; pass < passes; pass++) {
     let hit = false;
     for (let i = 0; i < items.length; i++) {
@@ -1070,14 +1718,34 @@ function separateBoxes(items, { gap = 12, passes = 28 } = {}) {
         const A = items[i], B = items[j];
         const ox = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
         const oy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
-        if (ox <= gap || oy <= gap) continue;
+        // Need ox <= -gap and oy <= -gap for true clearance; collide while either axis is closer.
+        if (ox <= -gap || oy <= -gap) continue;
+        const moveA = !fixed?.has(A.id);
+        const moveB = !fixed?.has(B.id);
+        if (!moveA && !moveB) continue;
         hit = true;
-        if (ox < oy) {
-          const push = (ox - gap) / 2 + .5;
-          if (A.x <= B.x) { A.x -= push; B.x += push; } else { A.x += push; B.x -= push; }
-        } else {
-          const push = (oy - gap) / 2 + .5;
+        const penX = ox + gap;
+        const penY = oy + gap;
+        if (penX < penY) {
+          if (moveA && moveB) {
+            const push = penX / 2 + .5;
+            if (A.x <= B.x) { A.x -= push; B.x += push; } else { A.x += push; B.x -= push; }
+          } else if (moveB) {
+            const push = penX + .5;
+            B.x += A.x <= B.x ? push : -push;
+          } else {
+            const push = penX + .5;
+            A.x += B.x <= A.x ? push : -push;
+          }
+        } else if (moveA && moveB) {
+          const push = penY / 2 + .5;
           if (A.y <= B.y) { A.y -= push; B.y += push; } else { A.y += push; B.y -= push; }
+        } else if (moveB) {
+          const push = penY + .5;
+          B.y += A.y <= B.y ? push : -push;
+        } else {
+          const push = penY + .5;
+          A.y += B.y <= A.y ? push : -push;
         }
       }
     }
@@ -1091,19 +1759,66 @@ function separateBoxes(items, { gap = 12, passes = 28 } = {}) {
   if (Number.isFinite(minX) && (minX < gap || minY < gap)) {
     const dx = Math.max(0, gap - minX);
     const dy = Math.max(0, gap - minY);
-    for (const item of items) { item.x += dx; item.y += dy; }
+    for (const item of items) {
+      if (fixed?.has(item.id)) continue;
+      item.x += dx;
+      item.y += dy;
+    }
   }
+}
+function markExpandAnchor(id) {
+  layoutAnchorIds = new Set();
+  let cursor = node(id);
+  while (cursor) {
+    layoutAnchorIds.add(cursor.id);
+    if (cursor.id === SYNTHETIC_ROOT_ID) break;
+    cursor = cursor.parentId ? node(cursor.parentId) : null;
+  }
+  const top = dragIslandId(id);
+  if (top) layoutAnchorIds.add(top);
+}
+function clearExpandAnchor() {
+  layoutAnchorIds = new Set();
+}
+/** After expand/reflow, slowly ease overlapping top-level islands away from the grown one. */
+function softSettleAfterExpand(id, { duration = 1800 } = {}) {
+  const islandId = dragIslandId(id);
+  const islandEl = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(islandId)}"]`)
+    || scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`);
+  if (!islandEl) return;
+  softSettleNeighbors(islandId, islandEl, { duration });
 }
 function buildFloatLayout(root) {
   floatPlacements.clear();
   const view = root || displayRoot();
   if (!view) return { w: 800, h: 480, items: [] };
+  const prevPacked = new Map();
+  scene.querySelectorAll('.frame-artboard > .frame.float[data-drag-id]').forEach(el => {
+    const id = el.dataset.dragId;
+    if (!id) return;
+    prevPacked.set(id, { x: parseFloat(el.style.left) || 0, y: parseFloat(el.style.top) || 0 });
+  });
   const top = topLevelItems(view).map(child => {
     const size = child.kind === 'folder' || child.synthetic ? frameFolderSize(child, 0) : frameFileSize(child);
     return { id: child.id, item: child, w: size.w, h: size.h, size };
   });
   const packed = packBoxes(top, { gap: ISLAND_GAP + 16, pad: 40, maxWidth: Math.max(960, board.clientWidth - 60) });
-  relaxTopLevel(packed.items, ISLAND_GAP);
+  for (const entry of packed.items) {
+    const frozen = prevPacked.get(entry.id);
+    // Preserve prior island seats across focus/defocus so related nodes don't
+    // snap in then vanish - only brand-new islands take a fresh shelf seat.
+    if (!forceFreshPack && frozen) { entry.x = frozen.x; entry.y = frozen.y; }
+  }
+  forceFreshPack = false;
+  // Focus/trace align owns sibling motion via offsets - keep shelf seats still
+  // so pack/FLIP don't snap away then fight the slow align.
+  if (!alignMotionPending) {
+    // Only the expanding frame (and its ancestors) stay fixed. Pinning must NOT
+    // freeze every island or expand/overlap physics dies after a few drags.
+    const topAnchors = layoutAnchorIds.size ? new Set(layoutAnchorIds) : null;
+    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 40, anchors: topAnchors });
+    relaxTopLevel(packed.items, ISLAND_GAP);
+  }
   let maxX = 0, maxY = 0;
   for (const entry of packed.items) {
     maxX = Math.max(maxX, entry.x + entry.w);
@@ -1117,7 +1832,10 @@ function relaxTopLevel(items, pad) {
   if (items.length < 2) return;
   const byId = new Map(items.map(item => [item.id, item]));
   const focusSeeds = new Set(sourceSeeds(selected()));
-  const passes = traceActive() ? 32 : 22;
+  // Gentle clustering only - hard pulls made focus feel like a snap, and
+  // clearing the trace made related islands jump away / off-screen.
+  const passes = traceActive() ? 10 : 8;
+  const pinnedXY = new Map(items.filter(item => pinnedLayout.has(item.id)).map(item => [item.id, { x: item.x, y: item.y }]));
   for (let pass = 0; pass < passes; pass++) {
     for (const edge of edgeTypes()) {
       if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
@@ -1136,19 +1854,43 @@ function relaxTopLevel(items, pad) {
       const dx = bx - ax, dy = by - ay;
       const dist = Math.hypot(dx, dy) || 1;
       const desired = related && traceActive()
-        ? 150 + (A.w + B.w) * .14
-        : 210 + (A.w + B.w) * .2;
-      const pull = Math.min(related ? 14 : 10, (dist - desired) * (related ? .11 : .08));
+        ? 150 + (A.w + B.w) * .12
+        : 190 + (A.w + B.w) * .16;
+      // Pull together when farther than desired; never push apart here (separateBoxes does that).
+      const pull = Math.min(related ? 4.2 : 2.8, (dist - desired) * (related ? .05 : .032));
+      if (pull < 0.15) continue;
       const ux = dx / dist, uy = dy / dist;
-      const level = related && traceActive() ? (ay - by) * .04 : 0;
+      const level = related && traceActive() ? (ay - by) * .01 : 0;
       if (!pinnedLayout.has(aTop.id)) { A.x += ux * pull * .5; A.y += uy * pull * .5 - level; }
       if (!pinnedLayout.has(bTop.id)) { B.x -= ux * pull * .5; B.y -= uy * pull * .5 + level; }
     }
-    separateBoxes(items, { gap: ISLAND_GAP, passes: 12 });
+    // During expand, separate everyone (anchors stay put). Otherwise keep
+    // user-pinned seats and only pack the free islands.
+    if (layoutAnchorIds.size) {
+      separateBoxes(items, { gap: ISLAND_GAP, passes: 14, anchors: layoutAnchorIds });
+      for (const [id, xy] of pinnedXY) {
+        if (!layoutAnchorIds.has(id)) continue; // let non-anchor pins yield
+        const item = byId.get(id);
+        if (item) { item.x = xy.x; item.y = xy.y; }
+      }
+    } else {
+      separateBoxes(items.filter(item => !pinnedLayout.has(item.id)), { gap: ISLAND_GAP, passes: 12 });
+      for (const [id, xy] of pinnedXY) {
+        const item = byId.get(id);
+        if (item) { item.x = xy.x; item.y = xy.y; }
+      }
+    }
   }
   let minX = Infinity, minY = Infinity;
   for (const item of items) { minX = Math.min(minX, item.x); minY = Math.min(minY, item.y); }
-  for (const item of items) { item.x += pad - minX; item.y += pad - minY; }
+  const shiftX = pad - minX, shiftY = pad - minY;
+  for (const item of items) {
+    // Keep expand anchors (and idle pinned seats) fixed; everyone else can shift.
+    if (layoutAnchorIds.has(item.id)) continue;
+    if (!layoutAnchorIds.size && pinnedLayout.has(item.id)) continue;
+    item.x += shiftX;
+    item.y += shiftY;
+  }
 }
 function topLevelOwner(item) {
   const root = displayRoot();
@@ -1189,9 +1931,10 @@ function automaticLayout() {
 
 function sourceNotes(file) {
   const notes = new Map(); const local = new Set(modules(file).map(module => module.id));
+  const live = activeTraceEdges();
   const add = (line, side, edge) => { if (!line) return; const list = notes.get(line) || []; if (!list.some(note => note.edge.id === edge.id && note.side === side)) list.push({ side, edge }); notes.set(line, list); };
   for (const edge of edgeTypes()) {
-    if (traceActive() && !traceEdges.has(edge.id)) continue;
+    if (traceActive() && !live.has(edge.id)) continue;
     if (sameModuleOrInternalContainer(edge)) continue;
     if (local.has(edge.from) || edge.from === file.id) add(edge.line, 'out', edge);
     if (local.has(edge.to)) add(node(edge.to)?.loc?.start, 'in', edge);
@@ -1205,7 +1948,8 @@ function importPortId(edge, side) {
   return `import:${edge.id}:${side === 'from' ? 'out' : 'in'}`;
 }
 function importRowHtml(edge) {
-  return `<button class="inline-import ${selectedImportEdgeId === edge.id ? 'selected' : ''} ${traceActive() && !traceEdges.has(edge.id) ? 'dim' : ''}" data-inline-import="${edge.id}" title="${escape(edge.evidence)}">
+  const live = activeTraceEdges();
+  return `<button class="inline-import ${selectedImportEdgeId === edge.id ? 'selected' : ''} ${traceActive() && !live.has(edge.id) ? 'dim' : ''}" data-inline-import="${edge.id}" title="${escape(edge.evidence)}">
     <span class="port edge-port in import-edge-port" data-import-port="${importPortId(edge, 'to')}" data-port-for="${importPortId(edge, 'to')}" data-port-side="in"></span>
     <span class="import-kind">import</span><b>${escape(edge.evidence)}</b>
     <span class="port edge-port out import-edge-port" data-import-port="${importPortId(edge, 'from')}" data-port-for="${importPortId(edge, 'from')}" data-port-side="out"></span>
@@ -1230,11 +1974,11 @@ function moduleSourceHtml(file, module) {
     const badges = entries.map(note => `<button class="line-badge ${note.side}" data-pin="${note.side === 'out' ? note.edge.from : note.edge.to}" data-source-port="source:${note.edge.id}:${note.side}" title="${escape(note.edge.evidence)}">${note.side === 'in' ? 'IN' : 'OUT'} · ${escape(note.edge.type)}<i></i></button>`).join('');
     return `<span class="line ${klass} active-module" data-line="${line}" data-file="${file.id}"><i>${line}</i><code>${escape(text) || ' '}</code><span class="line-badges">${badges}</span></span>`;
   }).join('');
-  return `<section class="source module-source" data-module-source="${module.id}"><header><b>${escape(module.label)}()</b><span>source lines ${start}–${end}</span></header><pre>${lines || '<span class="line"><i>—</i><code>No source range found.</code><span></span></span>'}</pre></section>`;
+  return `<section class="source module-source" data-module-source="${module.id}"><header><b>${escape(module.label)}()</b><span>source lines ${start}-${end}</span></header><pre>${lines || '<span class="line"><i>-</i><code>No source range found.</code><span></span></span>'}</pre></section>`;
 }
 function formatDiffHtml(file, limit = 120) {
   const diff = file?.git?.diff;
-  if (!diff) return '<span class="diff-line meta">New or untracked file — full source is in the canvas.</span>';
+  if (!diff) return '<span class="diff-line meta">New or untracked file. Full source is in the canvas.</span>';
   return diff.split('\n').slice(0, limit).map(line => {
     let cls = 'diff-line';
     if (line.startsWith('+++') || line.startsWith('---')) cls += ' meta';
@@ -1253,7 +1997,7 @@ function diffPreviewHtml(file) {
   return '';
 }
 function framePorts(id) {
-  return `<span class="port edge-port in endpoint-port ${pinned.has(id) ? 'pinned' : ''}" data-pin="${id}" data-port-for="${id}" data-port-side="in" title="Trace in"></span><span class="port edge-port out endpoint-port ${pinned.has(id) ? 'pinned' : ''}" data-pin="${id}" data-port-for="${id}" data-port-side="out" title="Trace out"></span>`;
+  return `<span class="port edge-port in endpoint-port" data-port-for="${id}" data-port-side="in" title="Trace in"></span><span class="port edge-port out endpoint-port" data-port-for="${id}" data-port-side="out" title="Trace out"></span>`;
 }
 function frameStyle(placement, tint, id, { depth = 0, inertia = 0 } = {}) {
   // Only top-level islands carry world offsets; nested frames stay inside the parent canvas.
@@ -1295,7 +2039,7 @@ function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
       <button class="frame-title outline-label" data-inline="${file.id}" data-kind="file" data-focus-file="${file.id}" type="button">
         <span class="file-glyph" style="--glyph:${glyph.c}" title="${escape(file.extension || '')}">${escape(glyph.g)}</span>
         <b title="${escape(file.path)}">${escape(file.label)}</b>
-        <span>${modules(file).length || '—'}</span>
+        <span>${modules(file).length || '-'}</span>
       </button>
       <button class="port pin-btn ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" type="button" title="Pin"></button>
     </header>
@@ -1449,7 +2193,14 @@ function chromeHtml(layout) {
 }
 function render() {
   if (!graph) return;
-  // Nested frames must not keep independent world offsets — they live inside folders.
+  // Never rebuild DOM mid-drag - that orphans the pointer capture and jumps nodes.
+  if (app.classList.contains('dragging')) return;
+  const alignOwned = alignMotionPending;
+  if (alignOwned) {
+    skipFlipOnce = true;
+    cancelSoftSettle();
+  }
+  // Nested frames must not keep independent world offsets - they live inside folders.
   for (const id of [...offsets.keys()]) {
     if (dragIslandId(id) !== id) offsets.delete(id);
   }
@@ -1465,10 +2216,26 @@ function render() {
   bindHoverTrace();
   applyCanvas();
   refreshFocusClasses();
+  // Keep click under pointer before FLIP samples positions (avoids animate-then-snap).
+  if (clickAnchor) stabilizeClickAnchor();
   drawEdges();
   playFlip(before);
-  animateReflowEdges(920);
-  scheduleGravityDrift();
+  animateReflowEdges(alignOwned ? 400 : 920);
+  // Soft-settle fights trace align (snap away → glitch home → slow arrive).
+  if (layoutAnchorIds.size && !alignOwned) {
+    const settleId = [...layoutAnchorIds].find(id => {
+      const island = dragIslandId(id);
+      return scene.querySelector(`[data-drag-id="${CSS.escape(island)}"]`);
+    }) || [...layoutAnchorIds][0];
+    requestAnimationFrame(() => softSettleAfterExpand(settleId, { duration: 1800 }));
+  }
+  clearExpandAnchor();
+  if (alignOwned) {
+    alignMotionPending = false;
+    clearTimeout(gravityTimer);
+  } else {
+    scheduleGravityDrift();
+  }
   renderMinimap();
   renderActivityFeed();
 }
@@ -1487,8 +2254,14 @@ function endpointFor(edge, side) {
   if (scene.querySelector(`[data-source-port="${CSS.escape(sourcePort)}"]`)) return sourcePort;
   const importPort = importPortId(edge, side);
   if (CONTEXT_TYPES.has(edge.type) && scene.querySelector(`[data-import-port="${CSS.escape(importPort)}"]`)) return importPort;
-  if (item?.kind === 'module' && scene.querySelector(`[data-inline-module="${CSS.escape(item.id)}"],[data-module="${CSS.escape(item.id)}"]`)) {
-    return `inline-module:${item.id}`;
+  if (item?.kind === 'module') {
+    // Frame modules use data-module-box / data-drag-id (not data-inline-module).
+    if (scene.querySelector(`[data-module-box="${CSS.escape(item.id)}"],[data-drag-id="${CSS.escape(item.id)}"],[data-inline-module="${CSS.escape(item.id)}"]`)) {
+      return item.id;
+    }
+    if (scene.querySelector(`[data-module="${CSS.escape(item.id)}"]`)) {
+      return `module:${item.id}`;
+    }
   }
   if (file && scene.querySelector(`[data-inline-file="${CSS.escape(file.id)}"],[data-id="${CSS.escape(file.id)}"]`)) {
     if (fileOwnsEndpoint(file) || item?.kind === 'file') return file.id;
@@ -1518,13 +2291,30 @@ function sameModuleOrInternalContainer(edge) {
   }
   return false;
 }
+function endpointHost(id) {
+  if (!id) return null;
+  if (id.startsWith('source:')) return scene.querySelector(`[data-source-port="${CSS.escape(id)}"]`);
+  if (id.startsWith('import:')) return scene.querySelector(`[data-import-port="${CSS.escape(id)}"]`);
+  if (id.startsWith('inline-module:') || id.startsWith('module:')) {
+    const mid = id.startsWith('inline-module:') ? id.slice(14) : id.slice(7);
+    return scene.querySelector(`[data-module-box="${CSS.escape(mid)}"],[data-drag-id="${CSS.escape(mid)}"],[data-inline-module="${CSS.escape(mid)}"]`)
+      || scene.querySelector(`[data-module="${CSS.escape(mid)}"]`)?.closest('.frame')
+      || scene.querySelector(`[data-module="${CSS.escape(mid)}"]`);
+  }
+  if (id.startsWith('inline:')) return scene.querySelector(`[data-inline-file="${CSS.escape(id.slice(7))}"]`);
+  return scene.querySelector(`[data-id="${CSS.escape(id)}"],[data-module-box="${CSS.escape(id)}"],[data-drag-id="${CSS.escape(id)}"]`);
+}
+function endpointPortId(id) {
+  if (id.startsWith('inline-module:')) return id.slice(14);
+  if (id.startsWith('module:')) return id.slice(7);
+  if (id.startsWith('inline:')) return id.slice(7);
+  return id;
+}
 function markEndpoint(id, side) {
-  const selector = id.startsWith('source:') ? `[data-source-port="${CSS.escape(id)}"]` : id.startsWith('import:') ? `[data-import-port="${CSS.escape(id)}"]` : id.startsWith('inline-module:') ? `[data-inline-module="${CSS.escape(id.slice(14))}"]` : id.startsWith('module:') ? `[data-module="${CSS.escape(id.slice(7))}"]` : id.startsWith('inline:') ? `[data-inline-file="${CSS.escape(id.slice(7))}"]` : `[data-id="${CSS.escape(id)}"]`;
-  const element = scene.querySelector(selector); if (!element) return;
+  const element = endpointHost(id); if (!element) return;
   if (element.matches('[data-source-port],[data-import-port]')) { element.classList.add('connected-port'); return; }
-  const moduleId = id.startsWith('inline-module:') ? id.slice(14) : id.startsWith('module:') ? id.slice(7) : null;
-  const portId = moduleId || (id.startsWith('inline:') ? id.slice(7) : id);
-  const port = element.matches(`[data-source-port="${CSS.escape(id)}"]`) ? element : element.querySelector(`[data-port-for="${CSS.escape(portId)}"][data-port-side="${side}"]`);
+  const host = element.closest?.('.frame') || element;
+  const port = host.querySelector(`[data-port-for="${CSS.escape(endpointPortId(id))}"][data-port-side="${side}"]`);
   port?.classList.add('connected-port');
 }
 function crossingOffsets(edges) {
@@ -1566,26 +2356,38 @@ function moduleBusPath(a, b, spread, cross, backwards) {
   const midY = (a.y + b.y) / 2 + cross;
   return `M ${a.x} ${a.y + spread * .18} C ${sourceLaneX} ${a.y + spread * .18}, ${sourceLaneX} ${midY}, ${sourceLaneX} ${midY} L ${targetLaneX} ${midY} C ${targetLaneX} ${midY}, ${targetLaneX} ${b.y + spread * .18}, ${b.x} ${b.y + spread * .18}`;
 }
-/** Wires always leave the out-port going outward and enter the in-port from outside. */
+/** Out ports leave right, in ports arrive from the left.
+ *  One cubic (or a U-loop of two) with horizontal end tangents — no stub L segments,
+ *  which were causing a visible kink at the ports. */
 function directedWirePath(a, b, spread = 0, cross = 0) {
-  const outStub = 44; // exit to the right of out-port
-  const inStub = 44;  // approach from the left of in-port
-  const span = Math.max(80, Math.abs(b.x - a.x));
-  const c1x = a.x + outStub + span * .22;
-  const c2x = b.x - inStub - span * .22;
-  const c1y = a.y + spread * .12;
-  const c2y = b.y + spread * .12 + cross;
-  // Horizontal stubs so the tangent at each node faces the port direction.
-  return `M ${a.x} ${a.y} L ${a.x + outStub} ${a.y} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${b.x - inStub} ${b.y} L ${b.x} ${b.y}`;
+  const ay = a.y + spread * .1;
+  const by = b.y + spread * .1 + cross;
+  const dx = b.x - a.x;
+
+  // Nearby or backwards: soft outer loop, still horizontal at both ports.
+  if (dx < 72) {
+    const bow = Math.max(56, Math.min(120, 64 + Math.abs(dx) * .25 + Math.abs(cross) * .4));
+    const midY = (ay + by) / 2 + (Math.abs(ay - by) < 24 ? (cross >= 0 ? bow * .42 : -bow * .42) : cross * .08);
+    const right = Math.max(a.x, b.x) + bow;
+    const left = Math.min(a.x, b.x) - bow;
+    const midX = (a.x + b.x) / 2;
+    return `M ${a.x} ${ay} C ${a.x + bow * .55} ${ay}, ${right} ${midY}, ${midX} ${midY} C ${left} ${midY}, ${b.x - bow * .55} ${by}, ${b.x} ${by}`;
+  }
+
+  const reach = Math.min(Math.max(dx * .4, 48), 120);
+  return `M ${a.x} ${ay} C ${a.x + reach} ${ay}, ${b.x - reach} ${by}, ${b.x} ${by}`;
 }
 function drawEdges() {
-  wires.innerHTML = '';
   scene.querySelectorAll('.connected-port').forEach(port => port.classList.remove('connected-port'));
   scene.querySelectorAll('.frame.trace-lit').forEach(el => el.classList.remove('trace-lit'));
   const liveEdges = activeTraceEdges();
   const liveNodes = activeTraceNodes();
   const previewing = !!hoverPreviewTrace();
-  if (!liveEdges.size) return;
+  const keep = new Set();
+  if (!liveEdges.size) {
+    wires.replaceChildren();
+    return;
+  }
   for (const id of liveNodes) {
     scene.querySelector(`[data-id="${CSS.escape(id)}"],[data-module-box="${CSS.escape(id)}"]`)?.classList.add('trace-lit');
   }
@@ -1612,17 +2414,41 @@ function drawEdges() {
     const spread = (pairIndex - (total - 1) / 2) * Math.min(14, Math.max(6, 36 / total));
     const cross = crossOffsets.get(edge.id) || 0;
     const pathData = directedWirePath(a, b, spread, cross);
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', pathData);
+    const wireKey = edge.id;
+    keep.add(wireKey);
+    let path = wires.querySelector(`[data-wire="${CSS.escape(wireKey)}"]`);
     const origin = originTintForEdge(edge);
-    path.setAttribute('class', `wire ${traceMode ? 'moving' : 'static'} ${edge.type} flow-stage ${previewing ? 'preview' : 'committed'}`);
+    let dialect = '';
+    if (traceDialects) {
+      const fromFile = fileOf(node(edge.from));
+      const toFile = fileOf(node(edge.to));
+      const hot = (fromFile && recentFor(fromFile)) || (toFile && recentFor(toFile));
+      const orphaned = fromFile?.orphan || toFile?.orphan;
+      dialect = orphaned ? 'dialect-removed' : hot ? 'dialect-live' : 'dialect-unreviewed';
+    }
+    const cls = `wire ${traceMode ? 'moving' : 'static'} ${edge.type} flow-stage ${previewing ? 'preview' : 'committed'} ${dialect}`.trim();
+    if (!path) {
+      path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('data-wire', wireKey);
+      path.append(Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'title'), { textContent: `${edge.type}: ${edge.evidence}` }));
+      wires.append(path);
+    }
+    // Update geometry in place so dash animation doesn't restart every frame.
+    if (path.getAttribute('d') !== pathData) path.setAttribute('d', pathData);
+    if (path.getAttribute('class') !== cls) path.setAttribute('class', cls);
     if (origin) {
       path.style.stroke = origin;
       path.style.setProperty('--wire', origin);
+    } else {
+      path.style.removeProperty('stroke');
+      path.style.removeProperty('--wire');
     }
-    path.style.setProperty('--delay', `${index * -0.1}s`);
-    path.append(Object.assign(document.createElementNS('http://www.w3.org/2000/svg', 'title'), { textContent: `${edge.type}: ${edge.evidence}` }));
-    wires.append(path);
+    path.style.setProperty('--delay', `${index * -0.15}s`);
+    const title = path.querySelector('title');
+    if (title) title.textContent = `${edge.type}: ${edge.evidence}`;
+  });
+  [...wires.querySelectorAll('[data-wire]')].forEach(path => {
+    if (!keep.has(path.getAttribute('data-wire'))) path.remove();
   });
 }
 function originTintForEdge(edge) {
@@ -1652,18 +2478,27 @@ function bindHoverTrace() {
     });
     frame.addEventListener('pointerleave', event => {
       if (frame.contains(event.relatedTarget)) return;
+      // Moving into a parent/sibling frame: transfer hover (parent never gets pointerenter).
+      const next = event.relatedTarget?.closest?.('.frame.float');
+      if (next && scene.contains(next)) {
+        clearTimeout(hoverTimer);
+        setHover(next.dataset.moduleBox || next.dataset.id || next.dataset.hover);
+        return;
+      }
       clearTimeout(hoverTimer);
       hoverTimer = setTimeout(() => setHover(null), 60);
     });
   });
 }
 function point(id, side) {
-  const selector = id.startsWith('source:') ? `[data-source-port="${CSS.escape(id)}"]` : id.startsWith('import:') ? `[data-import-port="${CSS.escape(id)}"]` : id.startsWith('inline-module:') ? `[data-inline-module="${CSS.escape(id.slice(14))}"]` : id.startsWith('module:') ? `[data-module="${CSS.escape(id.slice(7))}"]` : id.startsWith('inline:') ? `[data-inline-file="${CSS.escape(id.slice(7))}"]` : `[data-id="${CSS.escape(id)}"]`;
-  const element = scene.querySelector(selector); if (!element) return null; const worldRect = world.getBoundingClientRect(), rect = element.getBoundingClientRect();
-  if (id.startsWith('source:') || id.startsWith('import:')) return { x: ((side === 'out' ? rect.right : rect.left) - worldRect.left) / canvas.scale, y: (rect.top - worldRect.top + rect.height / 2) / canvas.scale };
-  const moduleId = id.startsWith('inline-module:') ? id.slice(14) : id.startsWith('module:') ? id.slice(7) : null;
-  const portId = moduleId || (id.startsWith('inline:') ? id.slice(7) : id);
-  const port = element.querySelector(`[data-port-for="${CSS.escape(portId)}"][data-port-side="${side}"]`);
+  const element = endpointHost(id); if (!element) return null;
+  const worldRect = world.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
+  if (id.startsWith('source:') || id.startsWith('import:')) {
+    return { x: ((side === 'out' ? rect.right : rect.left) - worldRect.left) / canvas.scale, y: (rect.top - worldRect.top + rect.height / 2) / canvas.scale };
+  }
+  const host = element.closest?.('.frame') || element;
+  const port = host.querySelector(`[data-port-for="${CSS.escape(endpointPortId(id))}"][data-port-side="${side}"]`);
   if (port) {
     const portRect = port.getBoundingClientRect();
     return { x: ((side === 'out' ? portRect.right : portRect.left) - worldRect.left) / canvas.scale, y: (portRect.top - worldRect.top + portRect.height / 2) / canvas.scale };
@@ -1692,7 +2527,7 @@ function canvasFocusTarget(element) {
     scale
   };
 }
-function smoothFocusSelection({ duration = 1300 } = {}) {
+function smoothFocusSelection({ duration = 1900 } = {}) {
   const element = elementForSelection();
   const target = canvasFocusTarget(element);
   if (!target) return fitMap();
@@ -1727,7 +2562,7 @@ function dismissAgentEditReveal() {
   render();
   updateInspector();
 }
-function playAgentEditReveal(path) {
+function playAgentEditReveal(path, { theater = false } = {}) {
   if (!autoRevealChanges || !graph || !path) return;
   const normalized = String(path).replaceAll('\\', '/');
   const file = fileByPath(normalized);
@@ -1737,7 +2572,7 @@ function playAgentEditReveal(path) {
   agentRevealPath = normalized;
   agentRevealExpandedId = file.id;
   expandAncestors(file);
-  pruneFolderDepth();
+  pruneFolderDepth(2);
   expandedFiles.add(file.id);
   selectedId = file.id;
   layoutAnchorFileId = file.id;
@@ -1747,14 +2582,86 @@ function playAgentEditReveal(path) {
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    smoothFocusSelection({ duration: 1400 });
-    pulseSelection();
-    $('#diff-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    smoothFocusSelection({ duration: 2000 });
+    applyEditAnimBurst(file.id);
+    const burstKind = editAnimStyle === 'hearts' ? 'hearts' : editAnimStyle === 'spark' ? 'sparks' : 'sparks';
+    if (editAnimStyle !== 'lines' && editAnimStyle !== 'hearts') {
+      spawnParticleBurst(scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`), burstKind);
+    }
+    if (theater) playEditTheater(file).catch(() => {});
+    else $('#diff-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
   agentRevealTimer = setTimeout(() => {
     if (agentRevealPath !== normalized) return;
     dismissAgentEditReveal();
-  }, agentRevealDwellMs);
+  }, Math.max(agentRevealDwellMs, theater ? 9000 : agentRevealDwellMs));
+}
+function applyEditAnimBurst(fileId) {
+  const el = scene.querySelector(`.frame-file[data-id="${CSS.escape(fileId)}"]`);
+  if (!el || document.body.classList.contains('reduce-motion')) return;
+  el.classList.remove('edit-anim-burst', 'edit-anim-lines-on', 'edit-anim-hearts-on');
+  el.querySelector('.edit-anim-lines')?.remove();
+  el.querySelector('.edit-anim-hearts')?.remove();
+  void el.offsetWidth;
+  el.classList.add('edit-anim-burst');
+  if (editAnimStyle === 'hearts') {
+    mountEditHeartsAnim(el);
+    spawnParticleBurst(el, 'hearts');
+  } else if (editAnimStyle === 'lines') {
+    mountEditLinesAnim(el);
+  }
+  clearTimeout(el._editAnimTimer);
+  el._editAnimTimer = setTimeout(() => {
+    el.classList.remove('edit-anim-burst', 'edit-anim-lines-on', 'edit-anim-hearts-on');
+    el.querySelector('.edit-anim-lines')?.remove();
+    el.querySelector('.edit-anim-hearts')?.remove();
+  }, editAnimStyle === 'lines' ? 3200 : editAnimStyle === 'hearts' ? 2600 : 1800);
+}
+function mountEditLinesAnim(el) {
+  if (!el) return;
+  el.classList.add('edit-anim-lines-on');
+  const strip = document.createElement('div');
+  strip.className = 'edit-anim-lines';
+  strip.setAttribute('aria-hidden', 'true');
+  const rows = [
+    { w: 92, caret: true },
+    { w: 68 },
+    { w: 84 },
+    { w: 46 },
+    { w: 76 },
+    { w: 58, caret: true },
+    { w: 88 },
+    { w: 52 }
+  ];
+  strip.innerHTML = [
+    '<em class="edit-lines-label">editing</em>',
+    ...rows.map((row, i) =>
+      `<span class="${row.caret ? 'has-caret' : ''}" style="--w:${row.w}%;--d:${(i * 0.09).toFixed(2)}s"></span>`
+    )
+  ].join('');
+  el.appendChild(strip);
+}
+function mountEditHeartsAnim(el) {
+  if (!el) return;
+  el.classList.add('edit-anim-hearts-on');
+  const layer = document.createElement('div');
+  layer.className = 'edit-anim-hearts';
+  layer.setAttribute('aria-hidden', 'true');
+  const glyphs = ['♥', '♡', '♥', '♡', '♥', '♡', '♥', '♡', '♥', '♡', '♥', '♡'];
+  layer.innerHTML = glyphs.map((g, i) => {
+    const side = i % 2 === 0 ? -1 : 1;
+    const x = side * (22 + (i % 5) * 14);
+    const delay = (i * 0.1).toFixed(2);
+    const dur = (1.2 + (i % 4) * 0.22).toFixed(2);
+    return `<i style="--hx:${x}px;--hd:${delay}s;--hru:${dur}s">${g}</i>`;
+  }).join('');
+  el.appendChild(layer);
+}
+function syncEditAnim() {
+  document.body.dataset.editAnim = editAnimStyle;
+  $('#edit-anim-grid')?.querySelectorAll('[data-edit-anim]').forEach(button => {
+    button.classList.toggle('active', button.dataset.editAnim === editAnimStyle);
+  });
 }
 function directManipulation() {
   board.classList.add('panning', 'zooming');
@@ -1762,7 +2669,7 @@ function directManipulation() {
   directManipulationTimer = setTimeout(() => board.classList.remove('panning', 'zooming'), 140);
 }
 function scheduleDraw() { if (drawFrame) return; drawFrame = requestAnimationFrame(() => { drawFrame = 0; drawEdges(); }); }
-function animateReflowEdges(duration = 780) {
+function animateReflowEdges(duration = 900) {
   reflowDrawUntil = Math.max(reflowDrawUntil, performance.now() + duration);
   if (reflowFrame) return;
   const tick = () => {
@@ -1795,43 +2702,49 @@ function bindFrameDrag(frame) {
     if (!drag) return;
     const { dx, dy } = drag;
     if (drag.nested && drag.parentId) {
-      // Visual-only during drag; commit localOffsets on pointerup.
+      // Free nested drag from the chip's current seat (local + delta).
       frame.style.translate = `${dx}px ${dy}px`;
-      if (drag.parentEl) {
-        drag.parentEl.style.width = `${drag.parentBaseW + Math.abs(dx) * .4}px`;
-      }
-      if (drag.canvasEl) {
-        drag.canvasEl.style.height = `${drag.canvasBaseH + Math.abs(dy) * .4}px`;
-      }
+      frame.style.setProperty('--ox', `${dx}px`);
+      frame.style.setProperty('--oy', `${dy}px`);
     } else {
-      const allowOver = markDropTarget(drag.pointerX, drag.pointerY, drag.islandId);
-      const resolved = resolveIslandOverlapDrag(drag.islandId, drag.islandEl, drag.ox, drag.oy, dx, dy, allowOver);
-      drag.dx = resolved.x - drag.ox;
-      drag.dy = resolved.y - drag.oy;
-      const value = { x: resolved.x, y: resolved.y };
+      // Free island drag: no collision while held; neighbors yield only after drop.
+      markDropTarget(drag.pointerX, drag.pointerY, drag.islandId);
+      const value = { x: drag.ox + dx, y: drag.oy + dy };
       offsets.set(drag.islandId, value);
       drag.islandEl.style.translate = `${value.x}px ${value.y}px`;
       drag.islandEl.style.setProperty('--ox', `${value.x}px`);
       drag.islandEl.style.setProperty('--oy', `${value.y}px`);
     }
-    scheduleDraw();
+    // Skip wire redraw while dragging - continuous SVG rebuilds cause stutter.
   };
   frame.addEventListener('pointerdown', event => {
     if (event.button !== 0 || !onBar(event)) return;
     event.stopPropagation();
     clearTimeout(gravityTimer);
+    cancelTraceAlign();
     const islandId = dragIslandId(id);
     const islandEl = scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`) || frame;
+    // Kill in-flight FLIP / jelly so grab doesn't fight a mid-transition transform.
+    islandEl.classList.remove('flipping', 'jelly-wobble', 'calm-in');
+    frame.classList.remove('flipping', 'jelly-wobble', 'calm-in');
+    islandEl.style.transform = '';
+    frame.style.transform = '';
+    islandEl.style.transition = 'none';
+    frame.style.transition = 'none';
     const current = offsets.get(islandId) || { x: 0, y: 0 };
     const parentId = parentCanvasId(id);
     const parentEl = parentId ? scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`) : null;
     const local = localOffsets.get(id) || { x: 0, y: 0 };
     const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
+    const seat = nestedSeats.get(id);
+    const baseLeft = seat?.x ?? (parseFloat(frame.style.left) || 0);
+    const baseTop = seat?.y ?? (parseFloat(frame.style.top) || 0);
     drag = {
       id, islandId, islandEl, parentId, parentEl, canvasEl,
       nested: islandId !== id,
       parentBaseW: parentEl?.offsetWidth || 0,
       canvasBaseH: canvasEl?.offsetHeight || 0,
+      baseLeft, baseTop,
       x: event.clientX, y: event.clientY,
       ox: current.x, oy: current.y,
       lx: local.x, ly: local.y,
@@ -1842,15 +2755,20 @@ function bindFrameDrag(frame) {
     draggingTraceAnchorId = islandId;
     frame.classList.add('dragging');
     islandEl.classList.add('dragging');
-    parentEl?.classList.add('deforming');
+    if (drag.nested) {
+      parentEl?.classList.add('nest-drop-active');
+      canvasEl?.classList.add('nest-canvas-active');
+      frame.classList.add('nest-dragging');
+    }
     app.classList.add('dragging');
+    wires.style.opacity = '.2';
     frame.setPointerCapture(event.pointerId);
   });
   frame.addEventListener('pointermove', event => {
     if (!drag) return;
     const dx = (event.clientX - drag.x) / canvas.scale;
     const dy = (event.clientY - drag.y) / canvas.scale;
-    drag.moved ||= Math.abs(dx) + Math.abs(dy) > 3;
+    drag.moved ||= Math.abs(dx) + Math.abs(dy) > 6;
     if (drag.moved && !drag.remembered) { remember(); drag.remembered = true; }
     drag.dx = dx; drag.dy = dy;
     drag.pointerX = event.clientX;
@@ -1865,40 +2783,86 @@ function bindFrameDrag(frame) {
     const dx = drag.dx || 0, dy = drag.dy || 0;
     const draggedId = drag.id;
     const islandId = drag.islandId;
-    const lx = drag.lx, ly = drag.ly;
-    drag.parentEl?.classList.remove('deforming');
+    const islandEl = drag.islandEl;
+    const parentEl = drag.parentEl;
+    const canvasEl = drag.canvasEl;
+    const baseLeft = drag.baseLeft;
+    const baseTop = drag.baseTop;
     clearDropTargets();
+    clearNestDragChrome();
+    wires.style.opacity = '';
     if (drag.moved) {
       frame.dataset.dragged = String(Date.now());
-      pinnedLayout.add(islandId);
+      if (!nested) pinnedLayout.add(islandId);
       if (nested && parentId) {
-        // Keep visual translate until render() rebuilds — clearing it first snaps back.
-        localOffsets.set(draggedId, { x: lx + dx, y: ly + dy });
-        skipFlipOnce = true;
-        render();
-        requestAnimationFrame(() => animateReflowEdges(1400));
-      } else {
-        const settled = resolveIslandOverlapDrag(islandId, drag.islandEl, drag.ox, drag.oy, dx, dy, null);
-        offsets.set(islandId, { x: settled.x, y: settled.y });
-        drag.islandEl.style.translate = `${settled.x}px ${settled.y}px`;
-        drag.islandEl.style.setProperty('--ox', `${settled.x}px`);
-        drag.islandEl.style.setProperty('--oy', `${settled.y}px`);
-        animateReflowEdges(900);
-        scheduleGravityDrift(1200);
+        const dropX = baseLeft + dx;
+        const dropY = baseTop + dy;
+        userArranged.add(draggedId);
+        nestedSeats.set(draggedId, { x: dropX, y: dropY });
+        localOffsets.delete(draggedId);
+        frame.style.left = `${dropX}px`;
+        frame.style.top = `${dropY}px`;
+        frame.style.translate = '0px 0px';
+        frame.style.setProperty('--ox', '0px');
+        frame.style.setProperty('--oy', '0px');
+        islandEl?.classList.remove('dragging');
+        frame.classList.remove('dragging', 'nest-dragging');
+        frame.style.transition = '';
+        islandEl.style.transition = '';
+        app.classList.remove('dragging');
+        draggingTraceAnchorId = null;
+        drag = null;
+        reshapeParentCanvas(
+          parentEl,
+          canvasEl,
+          dropX + frame.offsetWidth + 20,
+          dropY + frame.offsetHeight + 20
+        );
+        softSettleNested(draggedId, parentId, { duration: 1500 });
+        scheduleDraw();
+        scheduleGravityDrift(900);
+        return;
       }
-    } else {
-      scheduleGravityDrift();
+      // Keep the dropped island where released; softly push neighbors aside.
+      const value = { x: drag.ox + dx, y: drag.oy + dy };
+      offsets.set(islandId, value);
+      islandEl.style.translate = `${value.x}px ${value.y}px`;
+      islandEl.style.setProperty('--ox', `${value.x}px`);
+      islandEl.style.setProperty('--oy', `${value.y}px`);
+      islandEl.classList.remove('dragging');
+      frame.classList.remove('dragging');
+      frame.style.transition = '';
+      islandEl.style.transition = '';
+      app.classList.remove('dragging');
+      draggingTraceAnchorId = null;
+      drag = null;
+      softSettleNeighbors(islandId, islandEl, { duration: 1600 });
+      scheduleDraw();
+      renderMinimap();
+      scheduleGravityDrift(1800);
+      return;
     }
-    drag.islandEl?.classList.remove('dragging');
-    drag = null;
-    frame.classList.remove('dragging');
+    islandEl?.classList.remove('dragging');
+    frame.classList.remove('dragging', 'nest-dragging');
+    frame.style.transition = '';
+    islandEl.style.transition = '';
     app.classList.remove('dragging');
     draggingTraceAnchorId = null;
-    drawEdges();
+    drag = null;
+    scheduleDraw();
     renderMinimap();
+    scheduleGravityDrift(400);
   };
   frame.addEventListener('pointerup', end);
   frame.addEventListener('pointercancel', end);
+}
+function beginFocusAlignMotion() {
+  cancelTraceAlign();
+  cancelSoftSettle();
+  stripFlipTransforms();
+  alignMotionPending = true;
+  skipFlipOnce = true;
+  clearTimeout(gravityTimer);
 }
 function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   if (!folder || folder.kind !== 'folder') return;
@@ -1909,21 +2873,23 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   }
   remember();
   if (event) captureClickAnchor(folder.id, event);
+  beginFocusAlignMotion();
+  markExpandAnchor(folder.id);
   activateFocus(folder);
   layoutAnchorFileId = folder.id;
   if (expand && folder.id !== displayRoot()?.id) {
     expandedFolders.add(folder.id);
-    pruneFolderDepth();
+    pruneFolderDepth(); // keep level-1 open only; no depth cap on manual focus
   }
-  selectItem(folder.id);
+  selectItem(folder.id, { record: false });
   flowMode = true;
   rebuildTrace();
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    stabilizeClickAnchor();
     animateReflowEdges(1400);
     pulseSelection();
+    scheduleTraceAlign(32);
   });
 }
 function focusFileFrame(file, { expand = true, event = null } = {}) {
@@ -1935,18 +2901,20 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
   }
   remember();
   if (event) captureClickAnchor(file.id, event);
+  beginFocusAlignMotion();
+  markExpandAnchor(file.id);
   activateFocus(file);
   layoutAnchorFileId = file.id;
   if (expand) expandedFiles.add(file.id);
-  selectItem(file.id);
+  selectItem(file.id, { record: false });
   flowMode = true;
   rebuildTrace();
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    stabilizeClickAnchor();
     animateReflowEdges(900);
     pulseSelection();
+    scheduleTraceAlign(32);
   });
 }
 function highlightLine(text, language = '') {
@@ -2002,10 +2970,10 @@ function codeBlockHtml(item, { edge, role } = {}) {
     const line = start + index;
     const hit = hitStart != null && line >= hitStart && line <= hitEnd;
     return `<span class="flow-line${hit ? ' hit' : ''}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
-  }).join('') || '<span class="flow-line"><i>—</i><code>No source</code></span>';
+  }).join('') || '<span class="flow-line"><i>-</i><code>No source</code></span>';
   const glyph = file ? fileGlyph(file) : { g: '·', c: 'var(--muted)' };
   const title = item.kind === 'module' ? `${item.label}()` : item.label;
-  const meta = edge ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}` : (item.kind === 'module' ? `L${start}–${end}` : file?.path || '');
+  const meta = edge ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}` : (item.kind === 'module' ? `L${start}-${end}` : file?.path || '');
   const connect = edge && file ? connectWindow(file, edge, role) : (role === 'here' && file && hitStart ? connectWindow(file, { type: 'focus', line: hitStart }, role) : '');
   return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}" data-flow-role="${role || ''}" data-flow-edge="${edge?.id || ''}">
     <div class="flow-card-head">
@@ -2048,9 +3016,9 @@ function drawFlowOverlayWires(upstream, downstream) {
   if (!focusCard) { svg.innerHTML = ''; return; }
   const focusRect = focusCard.getBoundingClientRect();
   const fx = focusRect.left - bodyRect.left;
-  const fy = focusRect.top - bodyRect.top + focusRect.height * .35;
+  const fy = focusRect.top - bodyRect.top + Math.min(focusRect.height * .35, 56);
   const paths = [];
-  const link = (card, side, type) => {
+  const link = (card, side, type, extraClass = '') => {
     if (!card) return;
     const rect = card.getBoundingClientRect();
     const x1 = side === 'from' ? rect.right - bodyRect.left : fx;
@@ -2058,15 +3026,39 @@ function drawFlowOverlayWires(upstream, downstream) {
     const x2 = side === 'from' ? fx : rect.left - bodyRect.left;
     const y2 = side === 'from' ? fy : rect.top - bodyRect.top + Math.min(rect.height * .4, 48);
     const mid = (x1 + x2) / 2;
-    paths.push(`<path class="flow-wire ${escape(type || '')}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" />`);
+    paths.push(`<path class="flow-wire flow-wire-live ${escape(type || '')} ${extraClass}" d="M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}" />`);
   };
-  $('#flow-upstream')?.querySelectorAll('.flow-card').forEach((card, index) => {
+  const upStack = $('#flow-upstream');
+  const downStack = $('#flow-downstream');
+  upStack?.querySelectorAll('.flow-card').forEach((card, index) => {
     link(card, 'from', upstream[index]?.edge?.type || 'calls');
   });
-  $('#flow-downstream')?.querySelectorAll('.flow-card').forEach((card, index) => {
+  downStack?.querySelectorAll('.flow-card').forEach((card, index) => {
     link(card, 'to', downstream[index]?.edge?.type || 'calls');
   });
-  svg.setAttribute('viewBox', `0 0 ${bodyRect.width} ${bodyRect.height}`);
+  // Ghost traces exiting the screen when more relationships live off the sides.
+  const moreLeft = (upstream?.length || 0) >= 16
+    || (upStack && (upStack.scrollTop > 8 || upStack.scrollHeight > upStack.clientHeight + 24));
+  const moreRight = (downstream?.length || 0) >= 16
+    || (downStack && (downStack.scrollTop > 8 || downStack.scrollHeight > downStack.clientHeight + 24));
+  if (moreLeft) {
+    for (let i = 0; i < 3; i++) {
+      const y = fy - 36 + i * 36;
+      const x0 = -28;
+      const mid = (x0 + fx) / 2;
+      paths.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-left" d="M${x0},${y} C${mid},${y} ${mid},${fy} ${fx},${fy}" />`);
+    }
+  }
+  if (moreRight) {
+    const xEnd = bodyRect.width + 28;
+    for (let i = 0; i < 3; i++) {
+      const y = fy - 36 + i * 36;
+      const mid = (fx + focusRect.width + xEnd) / 2;
+      const x1 = fx + Math.min(focusRect.width, 160);
+      paths.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-right" d="M${x1},${fy} C${mid},${fy} ${mid},${y} ${xEnd},${y}" />`);
+    }
+  }
+  svg.setAttribute('viewBox', `0 0 ${Math.max(1, bodyRect.width)} ${Math.max(1, bodyRect.height)}`);
   svg.innerHTML = paths.join('');
 }
 function openFlowOverlay(item, { narrative } = {}) {
@@ -2075,21 +3067,26 @@ function openFlowOverlay(item, { narrative } = {}) {
   const file = fileOf(focus) || (focus.kind === 'file' ? focus : null);
   const { upstream, downstream } = flowNeighbors(focus);
   const dialog = $('#flow-overlay');
+  if (!dialog) return;
   $('#flow-kicker').textContent = focus.kind === 'module' ? 'MODULE FLOW' : 'FILE FLOW';
   $('#flow-title').textContent = focus.kind === 'module' ? `${focus.label}()` : focus.label;
   $('#flow-path').textContent = file?.path || focus.path || '';
-  $('#flow-focus-meta').textContent = focus.kind === 'module' ? `lines ${focus.loc?.start || '?'}–${focus.loc?.end || '?'}` : `${modules(file || {}).length} modules`;
+  $('#flow-focus-meta').textContent = focus.kind === 'module'
+    ? `lines ${focus.loc?.start || '?'}-${focus.loc?.end || '?'}`
+    : `${file ? modules(file).length : 0} modules`;
   const story = narrative || [
     upstream.length ? `${upstream.length} upstream` : 'no upstream',
     downstream.length ? `${downstream.length} downstream` : 'no downstream'
   ].join(' · ');
   const narrativeEl = $('#flow-narrative');
-  narrativeEl.hidden = !story;
-  narrativeEl.textContent = story;
+  if (narrativeEl) {
+    narrativeEl.hidden = !story;
+    narrativeEl.textContent = story;
+  }
   $('#flow-upstream').innerHTML = upstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'from' })).join('') || '<p class="flow-empty">Nothing feeds into this node statically.</p>';
   $('#flow-focus').innerHTML = codeBlockHtml(focus, { role: 'here' });
   $('#flow-downstream').innerHTML = downstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'to' })).join('') || '<p class="flow-empty">Nothing consumes this node statically.</p>';
-  dialog?.querySelectorAll('[data-flow-jump]').forEach(card => card.addEventListener('click', event => {
+  dialog.querySelectorAll('[data-flow-jump]').forEach(card => card.addEventListener('click', event => {
     if (event.target.closest('.flow-code, .flow-connect')) return;
     const target = node(card.dataset.flowJump);
     if (!target) return;
@@ -2097,22 +3094,36 @@ function openFlowOverlay(item, { narrative } = {}) {
     if (target.kind === 'module') openFlowOverlay(target);
     else focusFileFrame(fileOf(target) || target);
   }));
-  if (dialog && !dialog.open) dialog.showModal();
-  selectItem(focus.id);
+  selectItem(focus.id, { record: false });
   activateFocus(focus);
   if (file) expandedFiles.add(file.id);
   rebuildTrace();
+  // Refresh the map under the dialog without stealing the modal open race.
   render();
   requestAnimationFrame(() => {
-    stabilizeClickAnchor();
+    try {
+      if (!dialog.open) dialog.showModal();
+    } catch {
+      dialog.setAttribute('open', '');
+    }
+    if (dialog._flowWireAbort) dialog._flowWireAbort.abort();
+    dialog._flowWireAbort = new AbortController();
+    const { signal } = dialog._flowWireAbort;
+    const redraw = () => drawFlowOverlayWires(upstream, downstream);
     animateReflowEdges(1000);
-    drawFlowOverlayWires(upstream, downstream);
-    const columns = dialog?.querySelector('.flow-columns');
-    columns?.addEventListener('scroll', () => drawFlowOverlayWires(upstream, downstream), { passive: true });
+    redraw();
+    dialog.querySelectorAll('.flow-stack, .flow-columns').forEach(el => {
+      el.addEventListener('scroll', redraw, { passive: true, signal });
+    });
+    window.addEventListener('resize', redraw, { passive: true, signal });
   });
 }
 function closeFlowOverlay() {
   const dialog = $('#flow-overlay');
+  if (dialog?._flowWireAbort) {
+    dialog._flowWireAbort.abort();
+    dialog._flowWireAbort = null;
+  }
   if (dialog?.open) dialog.close();
 }
 function bindScene() {
@@ -2124,14 +3135,14 @@ function bindScene() {
     if (!item) return;
     remember();
     captureClickAnchor(id, event);
+    markExpandAnchor(id);
     toggleFolder(id);
-    selectItem(id);
+    selectItem(id, { record: false });
     flowMode = true;
     rebuildTrace();
     render();
     updateInspector();
     requestAnimationFrame(() => {
-      stabilizeClickAnchor();
       animateReflowEdges(1400);
       pulseSelection();
     });
@@ -2143,14 +3154,12 @@ function bindScene() {
     if (expandedFiles.has(file.id)) {
       remember();
       captureClickAnchor(file.id, event);
+      markExpandAnchor(file.id);
       expandedFiles.delete(file.id);
-      selectItem(file.id);
+      selectItem(file.id, { record: false });
       render();
       updateInspector();
-      requestAnimationFrame(() => {
-        stabilizeClickAnchor();
-        animateReflowEdges(720);
-      });
+      requestAnimationFrame(() => animateReflowEdges(1200));
     } else {
       focusFileFrame(file, { expand: true, event });
     }
@@ -2168,12 +3177,17 @@ function bindScene() {
       if (!item) return;
       if (item.kind === 'file') return focusFileFrame(item, { expand: true, event });
       if (item.kind === 'folder') return focusFolderFrame(item, { expand: true, event });
+      beginFocusAlignMotion();
       activateFocus(item);
       captureClickAnchor(item.id, event);
       selectItem(item.id);
       render();
       updateInspector();
-      requestAnimationFrame(() => stabilizeClickAnchor());
+      requestAnimationFrame(() => {
+        animateReflowEdges(900);
+        pulseSelection();
+        scheduleTraceAlign(32);
+      });
     });
     row.addEventListener('dblclick', event => {
       event.stopPropagation();
@@ -2185,13 +3199,20 @@ function bindScene() {
       focusFolderFrame(item, { expand: false, event });
     });
   });
-  scene.querySelectorAll('.frame-fn[data-open-flow]').forEach(element => element.addEventListener('click', event => {
-    if (event.target.closest('[data-pin]')) return;
-    if (Date.now() - Number(element.dataset.dragged || 0) < 220) return;
-    event.stopPropagation();
-    const module = node(element.dataset.openFlow);
-    if (module) openFlowOverlay(module);
-  }));
+  scene.querySelectorAll('.frame-fn[data-open-flow]').forEach(element => {
+    element.addEventListener('click', event => {
+      if (event.target.closest('[data-pin]')) return;
+      const fromTitle = event.target.closest('button[data-open-flow], .frame-title, .frame-bar b, .fn-kind');
+      // Tiny bar drags used to stamp `dragged` and swallow the click that opens flow.
+      if (!fromTitle && Date.now() - Number(element.dataset.dragged || 0) < 220) return;
+      const id = element.dataset.openFlow;
+      const module = node(id);
+      if (!module) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openFlowOverlay(module);
+    });
+  });
   scene.querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => {
     event.stopPropagation();
     const id = button.dataset.pin;
@@ -2251,8 +3272,8 @@ function refreshFocusClasses() {
     box.classList.toggle('trace-lit', lit.has(box.dataset.moduleBox));
   });
 }
-function selectItem(id) {
-  if (selectedId !== id) remember();
+function selectItem(id, { record = true } = {}) {
+  if (record && selectedId !== id) remember();
   selectedId = id; selectedImportEdgeId = undefined; rebuildTrace(); refreshFocusClasses(); drawEdges(); renderMinimap(); updateInspector(); writeDeepLink();
 }
 function updateInspector() {
@@ -2264,7 +3285,7 @@ function updateInspector() {
   $('#inspect-title').textContent = item.kind === 'module' ? `${item.label}()` : item.label;
   $('#inspect-path').textContent = item.path || file?.path || '/';
   $('#inspect-trace').textContent = related.length
-    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}. Focused nodes slowly drift into a shared band.`
+    ? `${related.length} live relationship${related.length === 1 ? '' : 's'}. Related islands slowly untangle left → focus → right.`
     : 'No direct relationships with the current edge filters.';
   const structure = $('#inspect-structure');
   if (structure) {
@@ -2396,11 +3417,14 @@ function resetPresentation() {
   exitFlow();
   offsets.clear();
   localOffsets.clear();
+  nestedSeats.clear();
+  userArranged.clear();
   layoutModes.clear();
   pinnedLayout.clear();
   basePlacements.clear();
   layoutMemory.clear();
   basePlacementKey = '';
+  forceFreshPack = true;
   render();
   requestAnimationFrame(fitMap);
 }
@@ -2413,14 +3437,18 @@ function canvasControls() {
   board.addEventListener('click', event => {
     if (event.target.closest('.frame,button,#minimap,.frame-bar') || lastPanMoved) return;
     remember();
+    cancelTraceAlign();
     selectedImportEdgeId = undefined;
     exitFlow();
     pinned.clear();
     selectedId = rootFolder()?.id;
     rebuildTrace();
-    render();
+    // Keep the current map seats - only clear selection/trace chrome.
+    refreshFocusClasses();
+    drawEdges();
     updateInspector();
     syncToolbar();
+    writeDeepLink();
   });
   board.addEventListener('wheel', event => {
     event.preventDefault();
@@ -2439,9 +3467,22 @@ function canvasControls() {
     if (event.key !== 'Escape') return;
     if (expandedModules.size) { remember(); expandedModules.clear(); render(); }
     else if (sourceFiles.size) { remember(); sourceFiles.clear(); render(); }
+    else if (flowMode || pinned.size || (selectedId && selectedId !== rootFolder()?.id)) {
+      // Clear focus/trace first so related islands stay put instead of vanishing.
+      remember();
+      cancelTraceAlign();
+      exitFlow();
+      pinned.clear();
+      selectedId = rootFolder()?.id;
+      selectedImportEdgeId = undefined;
+      rebuildTrace();
+      refreshFocusClasses();
+      drawEdges();
+      updateInspector();
+      syncToolbar();
+    }
     else if (expandedFiles.size) { remember(); expandedFiles.clear(); render(); }
-    else if (expandedFolders.size) { remember(); expandedFolders.clear(); render(); }
-    else if (flowMode) { remember(); exitFlow(); rebuildTrace(); render(); updateInspector(); }
+    else if (expandedFolders.size) { remember(); ensureDefaultOutlineExpanded(); pruneFolderDepth(); render(); }
     else if (scopeId !== rootFolder().id) { remember(); scopeId = node(scopeId)?.parentId || rootFolder().id; layoutAnchorFileId = entryFile(folder())?.id; render(); }
   });
 }
@@ -2464,6 +3505,52 @@ function showOpenDialog() {
   if (dialog?.showModal) dialog.showModal();
   else openWorkspace();
 }
+function initWelcomeSplash() {
+  const dialog = $('#welcome-splash');
+  if (!dialog) return;
+  const seen = localStorage.getItem('deepflow-welcome-seen') === '1';
+  const startTour = async () => {
+    localStorage.setItem('deepflow-welcome-seen', '1');
+    if (!graph) {
+      try { await loadGraph(); } catch {}
+    }
+    playLocalCapabilityDemo();
+  };
+  $('#welcome-start-tour')?.addEventListener('click', event => {
+    event.preventDefault();
+    dialog.close('tour');
+    startTour();
+  });
+  $('#welcome-skip')?.addEventListener('click', () => {
+    localStorage.setItem('deepflow-welcome-seen', '1');
+  });
+  dialog.addEventListener('close', () => {
+    if (dialog.returnValue === 'tour') return;
+    localStorage.setItem('deepflow-welcome-seen', '1');
+  });
+  if (!seen && dialog.showModal) {
+    requestAnimationFrame(() => {
+      try { dialog.showModal(); } catch {}
+    });
+  }
+}
+async function playLocalCapabilityDemo() {
+  try {
+    const response = await fetch('/api/demo-steps');
+    if (response.ok) {
+      const data = await response.json();
+      if (data.steps?.length) {
+        await playTour(data.steps);
+        return;
+      }
+    }
+  } catch {}
+  // Minimal fallback if the viewer isn't serving demo steps yet.
+  await playTour([
+    { title: 'Welcome', narrative: 'Nested frames for architecture. Drag freely; neighbors yield when you drop.', dwellMs: 5200, legend: { kicker: 'Tour', title: 'DeepFlow', body: 'Agent-native architecture map.' }, command: { type: 'set-mode', mode: 'outline' } },
+    { title: 'Live traces', narrative: 'Turn on Live and hover to follow wires without changing selection.', dwellMs: 5000, legend: { kicker: 'Live', title: 'Hover traces', body: 'Ribbon → Live' }, command: { type: 'set-live', enabled: true } }
+  ]);
+}
 function initSettings() {
   const savedTheme = localStorage.getItem('deepflow-theme') || 'aurora';
   const knownThemes = new Set([...($('#theme-grid')?.querySelectorAll('[data-theme-choice]') || [])].map(button => button.dataset.themeChoice));
@@ -2472,9 +3559,13 @@ function initSettings() {
   const motion = localStorage.getItem('deepflow-motion') !== 'reduced';
   autoRevealChanges = localStorage.getItem('deepflow-auto-reveal') !== 'false';
   agentRevealDwellMs = Math.max(3000, Math.min(20000, Number(localStorage.getItem('deepflow-reveal-dwell') || 8000)));
+  const knownEditAnims = new Set(['pulse', 'ripple', 'flash', 'scan', 'beacon', 'spark', 'hearts', 'lines']);
+  const savedEditAnim = localStorage.getItem('deepflow-edit-anim') || 'pulse';
+  editAnimStyle = knownEditAnims.has(savedEditAnim) ? savedEditAnim : 'pulse';
   traceMode = localStorage.getItem('deepflow-live-trace') !== 'false';
   document.body.dataset.theme = theme;
   document.body.classList.toggle('reduce-motion', !motion);
+  syncEditAnim();
   $('#motion-toggle').checked = motion;
   $('#auto-reveal-toggle').checked = autoRevealChanges;
   const dwell = $('#reveal-dwell');
@@ -2506,6 +3597,14 @@ function initSettings() {
     localStorage.setItem('deepflow-reveal-dwell', String(agentRevealDwellMs));
     if ($('#reveal-dwell-value')) $('#reveal-dwell-value').textContent = `${event.target.value}s`;
   });
+  $('#edit-anim-grid')?.querySelectorAll('[data-edit-anim]').forEach(button => button.addEventListener('click', () => {
+    editAnimStyle = button.dataset.editAnim;
+    localStorage.setItem('deepflow-edit-anim', editAnimStyle);
+    syncEditAnim();
+    // Preview the style on the selected/focused file if present.
+    const previewId = agentRevealExpandedId || fileOf(selected())?.id || selectedId;
+    if (previewId) applyEditAnimBurst(previewId);
+  }));
 }
 function syncToolbar() {
   document.querySelectorAll('[data-toolbar-toggle]').forEach(button => {
@@ -2578,6 +3677,8 @@ function pulseSelection() {
   element.classList.add('pulse-hit');
   setTimeout(() => element.classList.remove('pulse-hit'), 1400);
 }
+let tourPlaying = false;
+let traceDialects = false;
 function showTourCard(title, body) {
   const card = $('#tour-card');
   if (!card) return;
@@ -2588,12 +3689,159 @@ function showTourCard(title, body) {
   clearTimeout(showTourCard.timer);
   showTourCard.timer = setTimeout(() => { card.classList.remove('visible'); card.hidden = true; }, 5200);
 }
+function showDemoLegend(step, index, total) {
+  const legend = $('#demo-legend');
+  if (!legend) return;
+  const meta = step.legend || {};
+  $('#demo-legend-kicker').textContent = meta.kicker || `Step ${index + 1}`;
+  $('#demo-legend-title').textContent = meta.title || step.title || 'DeepFlow';
+  $('#demo-legend-body').textContent = meta.body || step.narrative || '';
+  $('#demo-legend-step').textContent = `${index + 1} / ${total}`;
+  const bar = $('#demo-legend-bar');
+  if (bar) bar.style.width = `${((index + 1) / Math.max(1, total)) * 100}%`;
+  legend.hidden = false;
+  requestAnimationFrame(() => legend.classList.add('visible'));
+}
+function hideDemoLegend() {
+  const legend = $('#demo-legend');
+  if (!legend) return;
+  legend.classList.remove('visible');
+  setTimeout(() => { legend.hidden = true; }, 400);
+}
+function clearDemoSpotlight() {
+  const spot = $('#demo-spotlight');
+  if (spot) {
+    spot.hidden = true;
+    spot.innerHTML = '';
+  }
+  app.classList.remove('demo-spotlight-on');
+  scene.querySelectorAll('.demo-focus').forEach(el => el.classList.remove('demo-focus'));
+}
+function applyDemoSpotlight(step) {
+  clearDemoSpotlight();
+  const target = step?.spotlight;
+  if (!target) return;
+  let el = null;
+  if (target.module) {
+    const file = target.path ? fileByPath(target.path) : null;
+    const mod = file ? modules(file).find(m => m.label === target.module) : null;
+    if (mod) el = scene.querySelector(`[data-module-box="${CSS.escape(mod.id)}"],[data-drag-id="${CSS.escape(mod.id)}"]`);
+  }
+  if (!el && target.path) {
+    const item = fileByPath(target.path) || folderByPath(target.path);
+    if (item) el = scene.querySelector(`[data-id="${CSS.escape(item.id)}"],[data-drag-id="${CSS.escape(item.id)}"]`);
+  }
+  if (!el) return;
+  el.classList.add('demo-focus');
+  const boardRect = board.getBoundingClientRect();
+  const rect = el.getBoundingClientRect();
+  const pad = 16;
+  const spot = $('#demo-spotlight');
+  if (!spot) return;
+  const hole = document.createElement('div');
+  hole.className = 'demo-spotlight-hole';
+  Object.assign(hole.style, {
+    left: `${rect.left - boardRect.left - pad}px`,
+    top: `${rect.top - boardRect.top - pad}px`,
+    width: `${rect.width + pad * 2}px`,
+    height: `${rect.height + pad * 2}px`
+  });
+  spot.appendChild(hole);
+  spot.hidden = false;
+  app.classList.add('demo-spotlight-on');
+}
+function spawnParticleBurst(el, kind = 'hearts') {
+  if (!el || document.body.classList.contains('reduce-motion')) return;
+  const layer = document.createElement('div');
+  layer.className = `particle-burst ${kind}`;
+  const glyphs = kind === 'fire' ? ['*', '+', 'x', '.'] : kind === 'sparks' ? ['.', '+', '*'] : ['♥', '♡', '♥', '♡', '+'];
+  const count = kind === 'hearts' ? 18 : 14;
+  for (let i = 0; i < count; i++) {
+    const p = document.createElement('span');
+    p.textContent = glyphs[i % glyphs.length];
+    const angle = (i / count) * Math.PI * 2 + (Math.random() - .5) * .4;
+    const dist = kind === 'hearts' ? 36 + Math.random() * 54 : 28 + Math.random() * 50;
+    p.style.setProperty('--dx', `${Math.cos(angle) * dist}px`);
+    p.style.setProperty('--dy', `${Math.sin(angle) * dist - (kind === 'hearts' ? 28 : 10)}px`);
+    p.style.setProperty('--delay', `${Math.random() * 220}ms`);
+    p.style.setProperty('--spin', `${(Math.random() - .5) * 80}deg`);
+    p.style.setProperty('--scale', `${0.7 + Math.random() * 0.7}`);
+    layer.appendChild(p);
+  }
+  el.appendChild(layer);
+  setTimeout(() => layer.remove(), kind === 'hearts' ? 1900 : 1600);
+}
+function hideEditTheater() {
+  const theater = $('#edit-theater');
+  if (!theater) return;
+  theater.classList.remove('visible', 'folding');
+  theater.hidden = true;
+}
+function showEditTheater(file) {
+  const theater = $('#edit-theater');
+  if (!theater || !file) return;
+  const diff = String(file.git?.diff || '');
+  const rows = diff.split('\n').filter(line => /^[+-]/.test(line) && !/^(\+\+\+|---)/.test(line)).slice(0, 12);
+  let lineNo = file.loc?.start || 1;
+  const html = (rows.length ? rows : ['+ // agent edit…', '+ // refreshing map', '- // stale guard']).map((line, index) => {
+    const kind = line.startsWith('+') ? 'add' : 'remove';
+    const n = lineNo + index;
+    return `<div class="edit-theater-row ${kind}"><i>${n}</i><span></span><code>${escape(line.slice(0, 42))}</code></div>`;
+  }).join('');
+  $('#edit-theater-title').textContent = file.label || 'Editing';
+  $('#edit-theater-meta').textContent = file.git?.change || 'live edit';
+  $('#edit-theater-lines').innerHTML = html || '<div class="edit-theater-row add"><i>·</i><span></span><code>writing…</code></div>';
+  const host = scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`);
+  const boardRect = board.getBoundingClientRect();
+  if (host) {
+    const rect = host.getBoundingClientRect();
+    theater.style.left = `${Math.min(boardRect.width - 220, Math.max(12, rect.right - boardRect.left + 14))}px`;
+    theater.style.top = `${Math.max(56, rect.top - boardRect.top)}px`;
+  } else {
+    theater.style.left = '24px';
+    theater.style.top = '72px';
+  }
+  theater.hidden = false;
+  requestAnimationFrame(() => theater.classList.add('visible'));
+  return theater;
+}
+async function playEditTheater(file) {
+  const theater = showEditTheater(file);
+  if (!theater) return;
+  await new Promise(r => setTimeout(r, 2200));
+  theater.classList.add('folding');
+  await new Promise(r => setTimeout(r, 700));
+  hideEditTheater();
+  updateInspector();
+  $('#diff-panel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  $('#diff-panel')?.classList.add('diff-reveal');
+  setTimeout(() => $('#diff-panel')?.classList.remove('diff-reveal'), 1600);
+}
 async function playTour(steps = []) {
-  for (let index = 0; index < steps.length; index++) {
-    const step = steps[index];
-    showTourCard(`${index + 1}/${steps.length} · ${step.title}`, step.narrative);
-    handleViewerCommand({ ...step.command, type: step.command?.type });
-    await new Promise(resolve => setTimeout(resolve, 2200));
+  if (tourPlaying) return;
+  tourPlaying = true;
+  app.classList.add('demo-playing');
+  try {
+    for (let index = 0; index < steps.length; index++) {
+      const step = steps[index];
+      const dwell = Math.max(5600, Number(step.dwellMs) || 6400);
+      showDemoLegend(step, index, steps.length);
+      // Legend carries the story during the capability demo; keep the floating
+      // tour card off so it never fights the minimap / spotlight.
+      const card = $('#tour-card');
+      if (card) { card.classList.remove('visible'); card.hidden = true; }
+      if (step.command) await Promise.resolve(handleViewerCommand({ ...step.command, type: step.command.type }));
+      requestAnimationFrame(() => applyDemoSpotlight(step));
+      // Re-fit spotlight after layout settles from jump/expand.
+      setTimeout(() => applyDemoSpotlight(step), 420);
+      await new Promise(resolve => setTimeout(resolve, dwell));
+    }
+  } finally {
+    tourPlaying = false;
+    app.classList.remove('demo-playing');
+    clearDemoSpotlight();
+    hideDemoLegend();
+    hideEditTheater();
   }
 }
 function handleViewerCommand(command = {}) {
@@ -2614,8 +3862,83 @@ function handleViewerCommand(command = {}) {
     closeFlowOverlay();
     return;
   }
+  if (command.type === 'set-live') {
+    traceMode = command.enabled !== false;
+    localStorage.setItem('deepflow-live-trace', String(traceMode));
+    syncToolbar();
+    drawEdges();
+    return;
+  }
+  if (command.type === 'set-theme') {
+    const theme = command.theme || 'aurora';
+    document.body.dataset.theme = theme;
+    localStorage.setItem('deepflow-theme', theme);
+    $('#theme-grid')?.querySelectorAll('[data-theme-choice]').forEach(button => {
+      button.classList.toggle('active', button.dataset.themeChoice === theme);
+    });
+    if (graph) render();
+    return;
+  }
+  if (command.type === 'set-edit-anim') {
+    const known = new Set(['pulse', 'ripple', 'flash', 'scan', 'beacon', 'spark', 'hearts', 'lines']);
+    editAnimStyle = known.has(command.style) ? command.style : 'pulse';
+    localStorage.setItem('deepflow-edit-anim', editAnimStyle);
+    syncEditAnim();
+    const file = command.path ? fileByPath(command.path) : null;
+    if (file) {
+      applyEditAnimBurst(file.id);
+      const el = scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`);
+      el?.classList.add('agent-editing');
+      setTimeout(() => el?.classList.remove('agent-editing'), 2200);
+    }
+    return;
+  }
+  if (command.type === 'set-trace-dialects') {
+    traceDialects = command.enabled !== false;
+    document.body.classList.toggle('trace-dialects', traceDialects);
+    drawEdges();
+    return;
+  }
+  if (command.type === 'particle-burst') {
+    const file = fileByPath(command.path);
+    const el = file ? scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`) : null;
+    if (el) {
+      el.classList.add('demo-focus');
+      spawnParticleBurst(el, command.kind || 'hearts');
+      setTimeout(() => el.classList.remove('demo-focus'), 1600);
+    }
+    return;
+  }
+  if (command.type === 'pop-in') {
+    const file = fileByPath(command.path);
+    const el = file ? scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`) : null;
+    if (el) {
+      el.classList.remove('file-pop-in');
+      void el.offsetWidth;
+      el.classList.add('file-pop-in');
+      setTimeout(() => el.classList.remove('file-pop-in'), 1400);
+    }
+    return;
+  }
+  if (command.type === 'focus-folder') {
+    const folder = folderByPath(command.path) || graph?.nodes.find(n => n.kind === 'folder' && (n.path === command.path || n.label === command.path));
+    if (!folder) return;
+    focusFolderFrame(folder, { expand: command.expand !== false });
+    if (command.pulse) requestAnimationFrame(pulseSelection);
+    return;
+  }
+  if (command.type === 'simulate-edit') {
+    const path = command.path;
+    if (!path) return;
+    markRecent([path]);
+    playAgentEditReveal(path, { theater: !!command.theater });
+    return;
+  }
   if (command.type === 'clear-highlights') {
-    remember(); closeFlowOverlay(); pinned.clear(); exitFlow(); recentPaths.clear(); rebuildTrace(); render(); updateInspector(); writeDeepLink(); return;
+    remember(); closeFlowOverlay(); pinned.clear(); exitFlow(); recentPaths.clear(); traceDialects = false;
+    document.body.classList.remove('trace-dialects');
+    clearDemoSpotlight(); hideEditTheater();
+    rebuildTrace(); render(); updateInspector(); writeDeepLink(); return;
   }
   if (command.type === 'set-mode') {
     remember();
@@ -2658,7 +3981,9 @@ function handleViewerCommand(command = {}) {
   }
   if (command.type === 'tour-step') {
     showTourCard(command.title, command.narrative);
+    if (command.legend) showDemoLegend({ legend: command.legend, title: command.title, narrative: command.narrative }, command.index || 0, command.total || 1);
     if (command.command) handleViewerCommand(command.command);
+    if (command.spotlight) requestAnimationFrame(() => applyDemoSpotlight(command));
     return;
   }
   if (command.type === 'tour-play') {
@@ -2790,7 +4115,7 @@ function initSearch() {
 }
 function applyGraph(next, { preserve = false } = {}) {
   const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
-  if (!preserve) { offsets.clear(); localOffsets.clear(); layoutModes.clear(); pinnedLayout.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
+  if (!preserve) { offsets.clear(); localOffsets.clear(); nestedSeats.clear(); userArranged.clear(); layoutModes.clear(); pinnedLayout.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
   scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id;
   selectedId = preserve && node(previousSelected) ? previousSelected : rootFolder().id;
   layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
@@ -2810,6 +4135,7 @@ async function loadGraph({ preserve = false } = {}) { const response = await fet
 initSettings();
 initSearch();
 initFlowOverlay();
+initWelcomeSplash();
 $('#history-back').addEventListener('click', () => moveHistory(true)); $('#history-forward').addEventListener('click', () => moveHistory(false)); $('#reset-view').addEventListener('click', resetPresentation); $('#open-workspace').addEventListener('click', showOpenDialog); $('#choose-folder').addEventListener('click', openWorkspace); $('#copy-mcp').addEventListener('click', async () => { await navigator.clipboard?.writeText($('#mcp-snippet').textContent); $('#copy-mcp').textContent = 'Copied'; setTimeout(() => $('#copy-mcp').textContent = 'Copy MCP setup', 1200); }); $('#workspace-files').addEventListener('change', event => { if (event.target.files.length) snapshotFiles([...event.target.files]); event.target.value = ''; }); $('#inspector-toggle').addEventListener('click', () => app.classList.toggle('inspector-closed'));
 $('#focus-selection')?.addEventListener('click', focusSelection);
 window.addEventListener('hashchange', () => applyDeepLink());

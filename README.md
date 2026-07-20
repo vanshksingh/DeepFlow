@@ -1,9 +1,9 @@
 # DeepFlow
 
 **Local architecture signal map for agentic coding.**  
-Tree-sitter parses JS/TS + Python on your machine. An MCP bridge lets any agent open a workspace, narrate the graph, jump to impact, and pulse the live viewer as it edits — no cloud upload.
+Tree-sitter parses JS/TS + Python on your machine. An MCP bridge lets any agent open a workspace, narrate the graph, jump to impact, and pulse the live viewer as it edits, with no cloud upload.
 
-> OpenAI Build Week style pitch: the agent doesn’t just edit files — it *shows* the architecture moving.
+> OpenAI Build Week style pitch: the agent doesn’t just edit files; it *shows* the architecture moving.
 
 ---
 
@@ -34,7 +34,7 @@ Manual equivalent:
 
 ```sh
 npm install
-npm run dev          # terminal A — http://localhost:4317
+npm run dev          # terminal A: http://localhost:4317
 # terminal B / IDE MCP:
 # node /absolute/path/to/DeepFlow/mcp-server.js
 ```
@@ -82,7 +82,8 @@ Viewer must be up (`npm run dev`) for tools that animate the UI. Analysis tools 
 | `deepflow_clear_highlights` | Clear pins; return to rails |
 | `deepflow_set_mode` | Force `rails` or `signal` |
 | `deepflow_set_edges` | Toggle calls/imports/dataflow/events/… |
-| `deepflow_tour` | Built-in Atlas walkthrough (`autoPlay: true`) |
+| `deepflow_tour` | Short Atlas walkthrough (`autoPlay: true`) |
+| `deepflow_demo` | Full capability showcase: map, edges, Live, flow overlay, orphans, edit reveal (`autoPlay: true`) |
 | `deepflow_share_link` | Hash URL for the current focus |
 | `deepflow_file_diff` | Local `git diff` for one path |
 
@@ -113,7 +114,7 @@ deepflow_status
 ```
 
 `deepflow_setup_help` and `scripts/agent-bootstrap.sh` both emit this with the correct absolute path.  
-`deepflow.mcp.json` is a hand-maintained example — prefer the generated file.
+`deepflow.mcp.json` is a hand-maintained example; prefer the generated file.
 
 ---
 
@@ -121,7 +122,7 @@ deepflow_status
 
 | Path | Use |
 |------|-----|
-| `fixtures/atlas-workspace` | Messy TS monorepo — default viewer boot + tour |
+| `fixtures/atlas-workspace` | Messy TS monorepo, default viewer boot + tour |
 | `fixtures/python-mini` | Tiny Python import/call graph |
 
 Any other local JS/TS/Python (or full-stack) repo works via `deepflow_open_workspace` with an absolute path. Cross-language HTTP edges are not inferred yet; each language’s imports/calls are.

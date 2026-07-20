@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>DeepFlow — signal map</title><link rel="icon" href="/favicon.svg">
+  <title>DeepFlow signal map</title><link rel="icon" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=Sora:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/demo-polish.css">
@@ -36,8 +36,22 @@
           <span class="leg dataflow"><i></i>data</span>
           <span class="leg events"><i></i>events</span>
           <span class="leg orphan"><i></i>orphan</span>
+          <span class="leg unreviewed"><i></i>unreviewed</span>
+          <span class="leg removed"><i></i>removed</span>
         </div>
         <div class="canvas-hint">Drag islands · click folders/files to focus · opens under the pointer · Live = hover traces</div>
+        <div id="demo-spotlight" class="demo-spotlight" hidden aria-hidden="true"></div>
+        <div id="demo-legend" class="demo-legend" hidden>
+          <span class="demo-legend-kicker" id="demo-legend-kicker">DeepFlow demo</span>
+          <b id="demo-legend-title">Welcome</b>
+          <p id="demo-legend-body">Capability tour</p>
+          <div class="demo-legend-progress"><i id="demo-legend-bar"></i></div>
+          <span class="demo-legend-step" id="demo-legend-step">1 / 1</span>
+        </div>
+        <div id="edit-theater" class="edit-theater" hidden aria-hidden="true">
+          <header><b id="edit-theater-title">Editing…</b><span id="edit-theater-meta"></span></header>
+          <div class="edit-theater-lines" id="edit-theater-lines"></div>
+        </div>
         <div id="tour-card" class="tour-card" hidden>
           <span class="tour-kicker">Live tour</span>
           <b id="tour-title">Architecture rails</b>
@@ -90,27 +104,94 @@
       <section>
         <b>Theme</b>
         <div class="theme-grid" id="theme-grid">
-          <button type="button" data-theme-choice="aurora">Aurora</button>
-          <button type="button" data-theme-choice="catppuccin">Catppuccin</button>
-          <button type="button" data-theme-choice="tokyo">Tokyo Night</button>
-          <button type="button" data-theme-choice="nord">Nord</button>
-          <button type="button" data-theme-choice="dracula">Dracula</button>
-          <button type="button" data-theme-choice="github-dark">GitHub Dark</button>
-          <button type="button" data-theme-choice="solarized">Solarized</button>
-          <button type="button" data-theme-choice="gruvbox">Gruvbox</button>
-          <button type="button" data-theme-choice="material">Material</button>
-          <button type="button" data-theme-choice="one-dark">One Dark Pro</button>
-          <button type="button" data-theme-choice="everforest">Everforest</button>
+          <button type="button" data-theme-choice="aurora" data-theme-mode="light" style="--tp:#f7faf5;--ti:#14271f;--tg:#087c66;--tt:#26b98c;--tb:#36849d;--ta:#b16d27">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Aurora</b><em>Light</em></span>
+          </button>
+          <button type="button" data-theme-choice="bubblegum" data-theme-mode="light" style="--tp:#fff0f7;--ti:#4a1840;--tg:#e83e8c;--tt:#ff7eb6;--tb:#7c5cff;--ta:#ff9f43">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Bubblegum</b><em>Light</em></span>
+          </button>
+          <button type="button" data-theme-choice="volcano" data-theme-mode="light" style="--tp:#fff4ec;--ti:#2a1208;--tg:#d9480f;--tt:#f08c00;--tb:#c92a2a;--ta:#e67700">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Volcano</b><em>Light</em></span>
+          </button>
+          <button type="button" data-theme-choice="ocean" data-theme-mode="light" style="--tp:#eef6fb;--ti:#0b2540;--tg:#0e7c86;--tt:#14919b;--tb:#0b6e99;--ta:#f0a202">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Ocean</b><em>Light</em></span>
+          </button>
+          <button type="button" data-theme-choice="hacker" data-theme-mode="dark" style="--tp:#050a06;--ti:#b6f7c1;--tg:#33ff66;--tt:#00ffa3;--tb:#39ff14;--ta:#b8ff3c">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Hacker</b><em>Dark</em></span>
+          </button>
+          <button type="button" data-theme-choice="noir" data-theme-mode="dark" style="--tp:#0c0c0c;--ti:#ececec;--tg:#f5f5f5;--tt:#cfcfcf;--tb:#a8a8a8;--ta:#d4d4d4">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Noir</b><em>Dark</em></span>
+          </button>
+          <button type="button" data-theme-choice="catppuccin" data-theme-mode="dark" style="--tp:#1e1e2e;--ti:#cdd6f4;--tg:#a6e3a1;--tt:#94e2d5;--tb:#89b4fa;--ta:#f9e2af">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Catppuccin</b><em>Dark</em></span>
+          </button>
+          <button type="button" data-theme-choice="tokyo" data-theme-mode="dark" style="--tp:#16161e;--ti:#c0caf5;--tg:#9ece6a;--tt:#7dcfff;--tb:#7aa2f7;--ta:#e0af68">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Tokyo Night</b><em>Dark</em></span>
+          </button>
+          <button type="button" data-theme-choice="nord" data-theme-mode="dark" style="--tp:#2e3440;--ti:#d8dee9;--tg:#a3be8c;--tt:#8fbcbb;--tb:#88c0d0;--ta:#ebcb8b">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Nord</b><em>Dark</em></span>
+          </button>
+          <button type="button" data-theme-choice="dracula" data-theme-mode="dark" style="--tp:#282a36;--ti:#f8f8f2;--tg:#50fa7b;--tt:#8be9fd;--tb:#bd93f9;--ta:#ffb86c">
+            <span class="theme-swatch" aria-hidden="true"><i style="background:var(--tg)"></i><i style="background:var(--tt)"></i><i style="background:var(--tb)"></i><i style="background:var(--ta)"></i></span>
+            <span class="theme-meta"><b>Dracula</b><em>Dark</em></span>
+          </button>
         </div>
       </section>
       <section>
         <label class="setting-row"><span>Luxury motion</span><input id="motion-toggle" type="checkbox" checked></label>
         <label class="setting-row"><span>Auto reveal agent edits</span><input id="auto-reveal-toggle" type="checkbox" checked></label>
         <label class="setting-row"><span>Edit preview dwell</span><input id="reveal-dwell" type="range" min="3" max="20" step="1" value="8"><output id="reveal-dwell-value" for="reveal-dwell">8s</output></label>
+        <div class="setting-block">
+          <b>Edit animation</b>
+          <p class="setting-hint">How agent edits call out the file on the map.</p>
+          <div class="edit-anim-grid" id="edit-anim-grid">
+            <button type="button" data-edit-anim="pulse" class="active">
+              <span class="edit-anim-preview pulse" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Pulse</b><em>Soft hit ring</em></span>
+            </button>
+            <button type="button" data-edit-anim="ripple">
+              <span class="edit-anim-preview ripple" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Ripple</b><em>Expanding waves</em></span>
+            </button>
+            <button type="button" data-edit-anim="flash">
+              <span class="edit-anim-preview flash" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Flash</b><em>Quick highlight</em></span>
+            </button>
+            <button type="button" data-edit-anim="scan">
+              <span class="edit-anim-preview scan" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Scan</b><em>Diff sweep line</em></span>
+            </button>
+            <button type="button" data-edit-anim="beacon">
+              <span class="edit-anim-preview beacon" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Beacon</b><em>Calm breathe</em></span>
+            </button>
+            <button type="button" data-edit-anim="spark">
+              <span class="edit-anim-preview spark" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Spark</b><em>Corner ticks</em></span>
+            </button>
+            <button type="button" data-edit-anim="hearts">
+              <span class="edit-anim-preview hearts" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Hearts</b><em>Bloom particles</em></span>
+            </button>
+            <button type="button" data-edit-anim="lines">
+              <span class="edit-anim-preview lines" aria-hidden="true"></span>
+              <span class="edit-anim-meta"><b>Lines</b><em>Running edit strip</em></span>
+            </button>
+          </div>
+        </div>
       </section>
     </form>
   </dialog>
-  <dialog id="flow-overlay" class="flow-overlay">
+  <dialog id="flow-overlay" class="flow-overlay frameless">
     <div class="flow-shell">
       <header class="flow-head">
         <div>
@@ -125,20 +206,33 @@
         <svg class="flow-wires" id="flow-wires" aria-hidden="true"></svg>
         <div class="flow-columns">
           <section class="flow-col upstream">
-            <header><b>Comes from</b><span>inherits · callers · imports</span></header>
+            <header><b>Upstream</b><span>inherits · callers · imports</span></header>
             <div class="flow-stack" id="flow-upstream"></div>
           </section>
           <section class="flow-col focus">
-            <header><b>You are here</b><span id="flow-focus-meta"></span></header>
+            <header><b>Focus</b><span id="flow-focus-meta"></span></header>
             <div class="flow-stack" id="flow-focus"></div>
           </section>
           <section class="flow-col downstream">
-            <header><b>Goes to</b><span>calls · emits · consumers</span></header>
+            <header><b>Downstream</b><span>calls · emits · consumers</span></header>
             <div class="flow-stack" id="flow-downstream"></div>
           </section>
         </div>
       </div>
     </div>
+  </dialog>
+  <dialog id="welcome-splash" class="welcome-splash">
+    <form method="dialog" class="welcome-shell">
+      <div class="welcome-mark" aria-hidden="true"></div>
+      <p class="welcome-kicker">DeepFlow</p>
+      <h1>See the architecture. Follow the signal.</h1>
+      <p class="welcome-copy">Nested frames for folders and files. Live traces. Agent-driven edits. A map your IDE agent can narrate.</p>
+      <div class="welcome-actions">
+        <button type="submit" value="tour" id="welcome-start-tour" class="welcome-primary">Start guided tour</button>
+        <button type="submit" value="skip" id="welcome-skip" class="welcome-ghost">Explore freely</button>
+      </div>
+      <p class="welcome-hint">Tip: agents call <code>deepflow_demo</code> with <code>autoPlay: true</code> on the Atlas fixture.</p>
+    </form>
   </dialog>
   <input id="workspace-files" type="file" webkitdirectory directory multiple hidden>
   <script type="module" src="/app.js"></script>

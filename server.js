@@ -4,6 +4,7 @@ import { watch as watchFilesystem } from 'node:fs';
 import { extname, join, dirname, resolve, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositoryGraph } from './src/repository-graph.js';
+import { CAPABILITY_DEMO_STEPS } from './src/graph-insights.js';
 
 const appRoot = new URL('.', import.meta.url).pathname;
 const fixtureRoot = join(appRoot, 'fixtures', 'atlas-workspace');
@@ -77,7 +78,7 @@ createServer(async (req, res) => {
         clients: clients.size,
         watching: workspaceWatchers.length,
         defaultFixture: fixtureRoot,
-        hint: clients.size ? 'Viewer connected — MCP jumps will animate live.' : 'Open http://127.0.0.1:4317 in a browser, then call deepflow_open_workspace.'
+        hint: clients.size ? 'Viewer connected. MCP jumps will animate live.' : 'Open http://127.0.0.1:4317 in a browser, then call deepflow_open_workspace.'
       });
     }
     if (req.url === '/api/changes' && req.method === 'GET') {
@@ -95,6 +96,9 @@ createServer(async (req, res) => {
     // where a recursive file event may be delayed.
     if (req.url === '/api/mcp-change' && req.method === 'POST') {
       const payload = await readJson(req); const root = await startTracking(payload.root); publishChange(payload.paths || []); return sendJson(res, { root, tracked: true });
+    }
+    if (req.url === '/api/demo-steps' && req.method === 'GET') {
+      return sendJson(res, { demo: 'capabilities', steps: CAPABILITY_DEMO_STEPS });
     }
     if (req.url === '/api/mcp-command' && req.method === 'POST') {
       const payload = await readJson(req); publishViewerCommand(payload); return sendJson(res, { delivered: clients.size, command: payload });

@@ -3,6 +3,8 @@
 **Local architecture signal map for agentic coding.**  
 Tree-sitter parses JS/TS + Python on your machine. An MCP bridge lets any agent open a workspace, narrate the graph, jump to impact, and pulse the live viewer as it edits, with no cloud upload.
 
+<img width="1587" height="1049" alt="Screenshot 2026-07-20 at 11 37 27 AM" src="https://github.com/user-attachments/assets/82dfc7fb-505d-4bf6-a7b9-329aa038f927" />
+
 > OpenAI Build Week style pitch: the agent doesn’t just edit files; it *shows* the architecture moving.
 
 ---

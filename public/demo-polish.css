@@ -3790,10 +3790,6 @@ body.reduce-motion .edit-anim-preview::after {
   stroke-width: 1.8;
   filter: drop-shadow(0 0 4px color-mix(in srgb, var(--ink) 12%, transparent));
 }
-.flow-node.hub {
-  stroke-width: 2.4;
-  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--ink) 16%, transparent));
-}
 .flow-node.exit { opacity: .55; }
 @keyframes flow-wire-dash {
   to { stroke-dashoffset: -28; }

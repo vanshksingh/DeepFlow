@@ -4794,9 +4794,6 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
       parts.push(`<circle class="flow-node out exit" cx="${x1}" cy="${fy}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
     }
   }
-  if (upstream?.length || downstream?.length) {
-    parts.push(`<circle class="flow-node hub" cx="${(fxIn + fxOut) / 2}" cy="${fy}" r="6.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.28" />`);
-  }
   svg.setAttribute('viewBox', `0 0 ${Math.max(1, bodyRect.width)} ${Math.max(1, bodyRect.height)}`);
   svg.innerHTML = parts.join('');
 }

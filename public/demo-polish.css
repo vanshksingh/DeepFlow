@@ -3534,10 +3534,16 @@ body.reduce-motion .frame-file.edit-anim-burst {
 .frame.trace-flying {
   z-index: 60 !important;
   pointer-events: none;
-  filter: drop-shadow(0 16px 28px color-mix(in srgb, var(--ink) 18%, transparent));
-  will-change: translate;
+  /* --fly-shadow eases 1→0 near landing so the lift shadow fades out, not snaps. */
+  filter: drop-shadow(
+    0
+    calc(4px + 12px * var(--fly-shadow, 1))
+    calc(8px + 20px * var(--fly-shadow, 1))
+    color-mix(in srgb, var(--ink) calc(18% * var(--fly-shadow, 1)), transparent)
+  );
+  will-change: translate, filter;
   /* Flight owns motion via translate — freeze left/top so bake cannot ease twice. */
-  transition: box-shadow .25s ease, border-color .2s ease, filter .25s ease !important;
+  transition: box-shadow .25s ease, border-color .2s ease !important;
 }
 .frame.trace-align-focus {
   z-index: 70 !important;

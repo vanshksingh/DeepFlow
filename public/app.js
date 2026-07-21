@@ -1971,6 +1971,7 @@ function cancelTraceAlign() {
   scene?.querySelectorAll('.trace-flying, .trace-align-focus').forEach(el => {
     el.classList.remove('trace-flying', 'trace-align-focus');
     el.style.zIndex = '';
+    el.style.removeProperty('--fly-shadow');
   });
   scene?.classList.remove('trace-aligning');
   // Viewfinder park gravity must keep running after align is cancelled.
@@ -2457,6 +2458,7 @@ function runTraceAlign(token) {
   for (const mover of movers) {
     mover.el.classList.remove('flipping', 'jelly-wobble');
     mover.el.style.transform = '';
+    mover.el.style.setProperty('--fly-shadow', '1');
     mover.el.classList.add('trace-flying');
     mover.el.style.zIndex = '60';
   }
@@ -2469,21 +2471,29 @@ function runTraceAlign(token) {
   }
   const blockersDone = settleClear(duration);
 
+  const clearFlightChrome = () => {
+    for (const mover of movers) {
+      mover.el.classList.remove('trace-flying');
+      mover.el.style.removeProperty('--fly-shadow');
+      mover.el.style.zIndex = '';
+    }
+    focusEl?.classList.remove('trace-align-focus');
+    if (focusEl) focusEl.style.zIndex = '';
+    scene.classList.remove('trace-aligning');
+  };
+
   const tick = now => {
     if (token !== traceAlignToken || app.classList.contains('dragging')) {
-      for (const mover of movers) {
-        mover.el.classList.remove('trace-flying');
-        mover.el.style.zIndex = '';
-      }
-      focusEl?.classList.remove('trace-align-focus');
-      if (focusEl) focusEl.style.zIndex = '';
-      scene.classList.remove('trace-aligning');
+      clearFlightChrome();
       traceAlignRaf = 0;
       scheduleGravityDrift(280);
       return;
     }
     const t = Math.min(1, (now - start) / duration);
     const ease = 1 - Math.pow(1 - t, 4);
+    // Hold full lift shadow through most of the flight, then ease it to zero.
+    const shadowT = t < 0.62 ? 1 : Math.max(0, 1 - (t - 0.62) / 0.38);
+    const shadowEase = shadowT * shadowT;
     for (const mover of movers) {
       const x = mover.from.x + (mover.to.x - mover.from.x) * ease;
       const y = mover.from.y + (mover.to.y - mover.from.y) * ease;
@@ -2491,6 +2501,7 @@ function runTraceAlign(token) {
       mover.el.style.translate = `${x}px ${y}px`;
       mover.el.style.setProperty('--ox', `${x}px`);
       mover.el.style.setProperty('--oy', `${y}px`);
+      mover.el.style.setProperty('--fly-shadow', String(shadowEase));
     }
     if (t < 1) {
       traceAlignRaf = requestAnimationFrame(tick);
@@ -2501,15 +2512,10 @@ function runTraceAlign(token) {
       mover.el.style.translate = `${mover.to.x}px ${mover.to.y}px`;
       mover.el.style.setProperty('--ox', `${mover.to.x}px`);
       mover.el.style.setProperty('--oy', `${mover.to.y}px`);
+      mover.el.style.setProperty('--fly-shadow', '0');
     }
     bakeFlight();
-    for (const mover of movers) {
-      mover.el.classList.remove('trace-flying');
-      mover.el.style.zIndex = '';
-    }
-    focusEl?.classList.remove('trace-align-focus');
-    if (focusEl) focusEl.style.zIndex = '';
-    scene.classList.remove('trace-aligning');
+    clearFlightChrome();
     traceAlignRaf = 0;
     blockersDone.then(() => {
       finishClear().then(() => {

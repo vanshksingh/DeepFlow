@@ -2071,8 +2071,9 @@ body.trace-dialects .wire.dialect-live {
   flex-grow: 0;
 }
 .frame.float > .frame-canvas.float-canvas {
-  flex: 1 1 auto;
-  min-height: 0;
+  /* Grow to fill, but never flex-shrink under the bar. */
+  flex: 1 0 auto;
+  min-height: 72px;
 }
 
 .frame.float:hover,
@@ -2090,6 +2091,7 @@ body.trace-dialects .wire.dialect-live {
 
 /* Folders: glass shells — deeper nesting fills in (less translucent). */
 .frame-folder {
+  min-width: 360px;
   border: 1px solid color-mix(in srgb, var(--node) calc(22% + var(--depth, 0) * 10%), transparent);
   background:
     linear-gradient(
@@ -2121,6 +2123,10 @@ body.trace-dialects .wire.dialect-live {
 .frame-folder > .frame-bar {
   background: color-mix(in srgb, var(--node) calc(10% + var(--depth, 0) * 4%), transparent);
   border-radius: 14px 14px 0 0;
+  align-items: start;
+  min-height: 72px;
+  padding-top: 14px;
+  padding-bottom: 14px;
 }
 .frame-folder:not(.expanded) > .frame-bar {
   border-radius: 14px;
@@ -2379,7 +2385,9 @@ body.trace-dialects .wire.dialect-live {
 
 .frame-canvas.float-canvas {
   position: relative;
-  padding: 14px;
+  /* Abspos children ignore padding — NEST_PAD in JS is the real inset.
+     Keep CSS padding light so border-box shells don't look horizontally crushed. */
+  padding: 12px;
   overflow: visible;
   min-width: 0;
 }
@@ -3056,8 +3064,9 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
 .frame.float.collapsing > .frame-canvas.float-canvas {
   overflow: hidden !important;
   pointer-events: none;
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 1 auto !important;
+  flex-shrink: 1 !important;
+  min-height: 0 !important;
 }
 .frame.float.size-morph,
 .frame.float.size-morph > .frame-canvas.float-canvas {
@@ -3521,9 +3530,17 @@ body.reduce-motion .frame-file.edit-anim-burst {
   pointer-events: none;
   filter: drop-shadow(0 16px 28px color-mix(in srgb, var(--ink) 18%, transparent));
   will-change: translate;
+  /* Flight owns motion via translate — freeze left/top so bake cannot ease twice. */
+  transition: box-shadow .25s ease, border-color .2s ease, filter .25s ease !important;
 }
 .frame.trace-align-focus {
   z-index: 70 !important;
+}
+.frame.float.seat-baking,
+.frame-fn.float.seat-baking,
+.frame-canvas > .frame.float.seat-baking {
+  transition: none !important;
+  animation: none !important;
 }
 #scene.trace-aligning .frame.float:not(.trace-flying):not(.trace-align-focus) {
   transition: opacity .2s ease;

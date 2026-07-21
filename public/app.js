@@ -72,9 +72,14 @@ let forceFreshPack = false;
 let layoutAnchorIds = new Set();
 /** Sticky expand target — survives until morph end so idle packs keep the grown chip fixed. */
 let stickyExpandId = null;
+/** After minimize: hold island seats so relax/constellation cannot suck small folders to the center. */
+let seatLock = new Set();
+/** True while stickyExpandId is a collapse (not an open). */
+let collapseMotion = false;
 /** Focus/trace align owns motion - skip pack snap, FLIP, and soft-settle fights. */
 let alignMotionPending = false;
 let softSettleToken = 0;
+let softSettleRunning = 0;
 /** Pending constellation after expand morph completes. */
 let pendingAlignAfterMorph = 0;
 /** Trail of nodes visited inside the three-plane flow overlay. */
@@ -797,17 +802,19 @@ function playFlip(before) {
         el.style.width = `${nextW}px`;
         el.style.height = `${nextH}px`;
         if (canvasEl) canvasEl.style.height = nextCanvasH ? `${nextCanvasH}px` : '';
+        const pending = new Set(['width', 'height']);
         const done = (event) => {
-          if (event?.propertyName && event.propertyName !== 'width' && event.propertyName !== 'height') return;
+          if (event?.propertyName) {
+            pending.delete(event.propertyName);
+            if (pending.size) return;
+          }
           el.classList.remove('flipping', 'size-morph');
+          commitFrameLayoutSize(el, canvasEl);
           el.removeEventListener('transitionend', done);
           onFlipDone(id);
         };
         el.addEventListener('transitionend', done);
-        setTimeout(() => {
-          el.classList.remove('flipping', 'size-morph');
-          onFlipDone(id);
-        }, 1100);
+        setTimeout(() => done(), 1100);
       });
       return;
     }
@@ -844,18 +851,22 @@ function playFlip(before) {
         if (canvasEl) canvasEl.style.height = nextCanvasH ? `${nextCanvasH}px` : '';
       }
       el.style.transform = '';
+      const pending = new Set();
+      if (moved) pending.add('transform');
+      if (resized) { pending.add('width'); pending.add('height'); }
       const done = (event) => {
-        if (event?.propertyName && event.propertyName !== 'transform'
-          && event.propertyName !== 'width' && event.propertyName !== 'height') return;
+        if (event?.propertyName) {
+          pending.delete(event.propertyName);
+          if (pending.size) return;
+        }
         el.classList.remove('flipping', 'size-morph');
+        el.style.transform = '';
+        if (resized) commitFrameLayoutSize(el, canvasEl);
         el.removeEventListener('transitionend', done);
         onFlipDone(id);
       };
       el.addEventListener('transitionend', done);
-      setTimeout(() => {
-        el.classList.remove('flipping', 'size-morph');
-        onFlipDone(id);
-      }, 1300);
+      setTimeout(() => done(), 1300);
     });
   });
   if (flipping <= 0) finishExpandMorph();
@@ -869,11 +880,64 @@ function triggerJelly(el, strength = 1) {
   clearTimeout(el._jellyTimer);
   el._jellyTimer = setTimeout(() => el.classList.remove('jelly-wobble'), 1400);
 }
-const ISLAND_GAP = 64; // breathing room between top-level islands
-const MODULE_GAP = 18; // air between fn modules inside a file
-const NESTED_GAP = 28; // padding between sibling folders/files inside a parent
-const NEST_PAD = 20; // inner canvas padding — keep counts/chips off the rim
+const ISLAND_GAP = 80; // breathing room between top-level islands — never touch
+const MODULE_GAP = 24; // air between fn modules inside a file
+const NESTED_GAP = 40; // padding between sibling folders/files inside a parent
+const NEST_PAD = 32; // inner canvas padding — keep counts/chips off the rim
 const NEST_SNAP = 16; // soft edge-align threshold for in-folder cleanup
+/**
+ * Push free boxes away from fixed walls (and each other) until `gap` clears.
+ * Used to reserve constellation landing seats before flight.
+ */
+function yieldBoxesFromWalls(movers, walls, { gap = ISLAND_GAP, passes = 48, pad = 0 } = {}) {
+  if (!movers?.length) return;
+  const yieldAway = (mover, wall, penX, penY) => {
+    if (penX < penY) {
+      const moverCx = mover.x + mover.w / 2;
+      const wallCx = wall.x + wall.w / 2;
+      mover.x += moverCx >= wallCx ? (penX + 0.5) : -(penX + 0.5);
+    } else {
+      const moverCy = mover.y + mover.h / 2;
+      const wallCy = wall.y + wall.h / 2;
+      mover.y += moverCy >= wallCy ? (penY + 0.5) : -(penY + 0.5);
+    }
+  };
+  for (let pass = 0; pass < passes; pass++) {
+    let hit = false;
+    for (const m of movers) {
+      for (const wall of walls) {
+        if (wall.id && wall.id === m.id) continue;
+        const ox = Math.min(m.x + m.w, wall.x + wall.w) - Math.max(m.x, wall.x);
+        const oy = Math.min(m.y + m.h, wall.y + wall.h) - Math.max(m.y, wall.y);
+        if (ox <= -gap || oy <= -gap) continue;
+        yieldAway(m, wall, ox + gap, oy + gap);
+        hit = true;
+      }
+    }
+    for (let i = 0; i < movers.length; i++) {
+      for (let j = i + 1; j < movers.length; j++) {
+        const A = movers[i], B = movers[j];
+        const ox = Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x);
+        const oy = Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y);
+        if (ox <= -gap || oy <= -gap) continue;
+        const penX = ox + gap, penY = oy + gap;
+        if (penX < penY) {
+          const push = penX / 2 + 0.5;
+          if (A.x <= B.x) { A.x -= push; B.x += push; } else { A.x += push; B.x -= push; }
+        } else {
+          const push = penY / 2 + 0.5;
+          if (A.y <= B.y) { A.y -= push; B.y += push; } else { A.y += push; B.y -= push; }
+        }
+        hit = true;
+      }
+    }
+    for (const m of movers) {
+      m.x = Math.max(pad, m.x);
+      m.y = Math.max(pad, m.y);
+    }
+    if (!hit) break;
+  }
+}
 function topLevelIslandElements() {
   return [...scene.querySelectorAll('.frame-artboard > .frame.float[data-drag-id]')];
 }
@@ -974,6 +1038,7 @@ function applyIslandTranslate(entry, next) {
 function resolveIslandOverlapDrag(islandId, islandEl, ox, oy, dx, dy, allowOverId) {
   let tx = ox + dx, ty = oy + dy;
   const scale = Math.max(.35, canvas.scale || 1);
+  const gapPx = ISLAND_GAP * scale;
   for (let pass = 0; pass < 8; pass++) {
     islandEl.style.translate = `${tx}px ${ty}px`;
     islandEl.style.setProperty('--ox', `${tx}px`);
@@ -984,8 +1049,8 @@ function resolveIslandOverlapDrag(islandId, islandEl, ox, oy, dx, dy, allowOverI
       const otherId = other.dataset.dragId;
       if (otherId === islandId || otherId === allowOverId) continue;
       const oRect = other.getBoundingClientRect();
-      if (!rectsOverlap(myRect, oRect)) continue;
-      const { dx: fixX, dy: fixY } = separationPush(myRect, oRect);
+      if (!rectsOverlap(myRect, oRect, gapPx)) continue;
+      const { dx: fixX, dy: fixY } = separationPush(myRect, oRect, gapPx);
       tx += fixX / scale;
       ty += fixY / scale;
       hit = true;
@@ -1008,6 +1073,81 @@ function clearDropTargets() {
 /** After a free drop, animate other islands aside so the dropped one keeps its place. */
 function cancelSoftSettle() {
   softSettleToken += 1;
+}
+/**
+ * Ease any still-overlapping top-level islands apart (keep `anchorId` fixed).
+ * Used after focus flight so nothing stays buried under another folder.
+ */
+function softHealIslandGaps(anchorId, { duration = 520 } = {}) {
+  if (!anchorId || !scene) return Promise.resolve();
+  const boxes = [];
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (!id) continue;
+    if (pinnedLayout.has(id) && id !== anchorId) continue;
+    const shelf = islandShelfBox(el, id);
+    boxes.push({
+      id,
+      el,
+      left: shelf.left,
+      top: shelf.top,
+      x: shelf.x,
+      y: shelf.y,
+      w: shelf.w,
+      h: shelf.h,
+      from: { ...(offsets.get(id) || { x: 0, y: 0 }) }
+    });
+  }
+  if (boxes.length < 2) return Promise.resolve();
+  separateBoxes(boxes, { gap: ISLAND_GAP, passes: 48, anchors: new Set([anchorId]), pad: 0 });
+  const movers = [];
+  for (const box of boxes) {
+    if (box.id === anchorId) continue;
+    const to = { x: box.x - box.left, y: box.y - box.top };
+    if (Math.abs(to.x - box.from.x) < 1 && Math.abs(to.y - box.from.y) < 1) continue;
+    movers.push({ id: box.id, el: box.el, from: box.from, to });
+  }
+  if (!movers.length) return Promise.resolve();
+  const token = ++softSettleToken;
+  const start = performance.now();
+  softSettleRunning += 1;
+  return new Promise(resolve => {
+    const done = () => {
+      softSettleRunning = Math.max(0, softSettleRunning - 1);
+      for (const m of movers) bakeIslandOffset(m.id, m.el);
+      resolve();
+    };
+    if (duration <= 0 || document.body.classList.contains('reduce-motion')) {
+      for (const m of movers) {
+        offsets.set(m.id, { ...m.to });
+        m.el.style.translate = `${m.to.x}px ${m.to.y}px`;
+        m.el.style.setProperty('--ox', `${m.to.x}px`);
+        m.el.style.setProperty('--oy', `${m.to.y}px`);
+      }
+      done();
+      return;
+    }
+    const tick = now => {
+      if (token !== softSettleToken) {
+        softSettleRunning = Math.max(0, softSettleRunning - 1);
+        resolve();
+        return;
+      }
+      const t = Math.min(1, (now - start) / duration);
+      const ease = 1 - Math.pow(1 - t, 4);
+      for (const m of movers) {
+        const x = m.from.x + (m.to.x - m.from.x) * ease;
+        const y = m.from.y + (m.to.y - m.from.y) * ease;
+        offsets.set(m.id, { x, y });
+        m.el.style.translate = `${x}px ${y}px`;
+        m.el.style.setProperty('--ox', `${x}px`);
+        m.el.style.setProperty('--oy', `${y}px`);
+      }
+      if (t < 1) requestAnimationFrame(tick);
+      else done();
+    };
+    requestAnimationFrame(tick);
+  });
 }
 /** Screen-space rect for an island using final layout size (not mid-FLIP geometry). */
 function islandSettleRect(islandId, islandEl) {
@@ -1036,24 +1176,37 @@ function islandSettleRect(islandId, islandEl) {
 function softSettleNeighbors(islandId, islandEl, {
   duration = 780,
   protectIds = null,
-  againstBoxes = null
+  againstBoxes = null,
+  plannedMoves = null
 } = {}) {
   if (!islandEl) return Promise.resolve();
   const token = ++softSettleToken;
   const scale = Math.max(.35, canvas.scale || 1);
+  // Overlap tests use screen-space rects — gap must scale with zoom or
+  // islands look like they touch when zoomed in.
+  const gapPx = ISLAND_GAP * scale;
   const start = performance.now();
   const protectedIds = new Set(protectIds || []);
   protectedIds.add(islandId);
+  const planned = new Map((plannedMoves || []).map(m => [m.id, m]));
   const movers = [];
   for (const other of topLevelIslandElements()) {
     const otherId = other.dataset.dragId;
     if (!otherId || protectedIds.has(otherId)) continue;
-    // Focused parent + already-flown trace seats stay put — blockers yield.
+    // Focused parent stays put — blockers yield. Prior constellation seats
+    // that are NOT in this pull must still move aside so landings stay clear.
     if (isLockedFocusIsland(otherId)) continue;
-    if (traceArranged.has(otherId)) continue;
     if (pinnedLayout.has(otherId)) continue;
+    // seatLock must not block overlap clear — remapper / settle owns these seats.
     const cur = offsets.get(otherId) || { x: 0, y: 0 };
-    movers.push({ id: otherId, el: other, from: { ...cur }, to: { ...cur } });
+    const preset = planned.get(otherId);
+    movers.push({
+      id: otherId,
+      el: other,
+      from: { ...cur },
+      to: preset ? { x: preset.ox, y: preset.oy } : { ...cur },
+      planned: !!preset
+    });
   }
   const shelfRect = (box, ox = 0, oy = 0) => {
     const worldRect = world.getBoundingClientRect();
@@ -1075,21 +1228,19 @@ function softSettleNeighbors(islandId, islandEl, {
     if (againstBoxes?.length) {
       for (const box of againstBoxes) anchors.push(shelfRect(box));
     }
-    for (const m of movers) m.to = { ...(offsets.get(m.id) || m.from) };
-    for (let pass = 0; pass < 16; pass++) {
+    for (const m of movers) {
+      if (!m.planned) m.to = { ...(offsets.get(m.id) || m.from) };
+    }
+    for (let pass = 0; pass < 28; pass++) {
       let hit = false;
       for (const m of movers) {
-        m.el.style.translate = `${m.to.x}px ${m.to.y}px`;
         const place = floatPlacements.get(m.id);
-        let oRect;
-        if (place) {
-          oRect = shelfRect({ x: place.x, y: place.y, w: place.w, h: place.h }, m.to.x, m.to.y);
-        } else {
-          oRect = m.el.getBoundingClientRect();
-        }
+        let oRect = place
+          ? shelfRect({ x: place.x, y: place.y, w: place.w, h: place.h }, m.to.x, m.to.y)
+          : (m.el.style.translate = `${m.to.x}px ${m.to.y}px`, m.el.getBoundingClientRect());
         for (const wall of anchors) {
-          if (!rectsOverlap(wall, oRect, ISLAND_GAP)) continue;
-          const { dx, dy } = separationPush(oRect, wall, ISLAND_GAP);
+          if (!rectsOverlap(wall, oRect, gapPx)) continue;
+          const { dx, dy } = separationPush(oRect, wall, gapPx);
           if (!dx && !dy) continue;
           m.to.x += dx / scale;
           m.to.y += dy / scale;
@@ -1105,12 +1256,16 @@ function softSettleNeighbors(islandId, islandEl, {
       for (let i = 0; i < movers.length; i++) {
         for (let j = i + 1; j < movers.length; j++) {
           const A = movers[i], B = movers[j];
-          A.el.style.translate = `${A.to.x}px ${A.to.y}px`;
-          B.el.style.translate = `${B.to.x}px ${B.to.y}px`;
-          const aRect = A.el.getBoundingClientRect();
-          const bRect = B.el.getBoundingClientRect();
-          if (!rectsOverlap(aRect, bRect, ISLAND_GAP)) continue;
-          const { dx, dy } = separationPush(aRect, bRect, ISLAND_GAP);
+          const aPlace = floatPlacements.get(A.id);
+          const bPlace = floatPlacements.get(B.id);
+          const aRect = aPlace
+            ? shelfRect({ x: aPlace.x, y: aPlace.y, w: aPlace.w, h: aPlace.h }, A.to.x, A.to.y)
+            : (A.el.style.translate = `${A.to.x}px ${A.to.y}px`, A.el.getBoundingClientRect());
+          const bRect = bPlace
+            ? shelfRect({ x: bPlace.x, y: bPlace.y, w: bPlace.w, h: bPlace.h }, B.to.x, B.to.y)
+            : (B.el.style.translate = `${B.to.x}px ${B.to.y}px`, B.el.getBoundingClientRect());
+          if (!rectsOverlap(aRect, bRect, gapPx)) continue;
+          const { dx, dy } = separationPush(aRect, bRect, gapPx);
           if (!dx && !dy) continue;
           A.to.x += dx / scale * .5;
           A.to.y += dy / scale * .5;
@@ -1129,6 +1284,9 @@ function softSettleNeighbors(islandId, islandEl, {
     m.el.style.setProperty('--ox', `${x}px`);
     m.el.style.setProperty('--oy', `${y}px`);
   };
+  // resolveTargets parks movers on their TO seat while measuring — put them
+  // back on FROM before the ease so the first paint isn't a snap flash.
+  for (const m of movers) applyMover(m, m.from.x, m.from.y);
   const changed = movers.some(m => Math.hypot(m.to.x - m.from.x, m.to.y - m.from.y) > 1);
   if (!changed) return Promise.resolve();
   if (duration <= 0 || document.body.classList.contains('reduce-motion')) {
@@ -1136,10 +1294,15 @@ function softSettleNeighbors(islandId, islandEl, {
     scheduleDraw();
     return Promise.resolve();
   }
+  softSettleRunning += 1;
   return new Promise(resolve => {
+    const done = () => {
+      softSettleRunning = Math.max(0, softSettleRunning - 1);
+      resolve();
+    };
     const tick = now => {
       if (token !== softSettleToken) {
-        resolve();
+        done();
         return;
       }
       const t = Math.min(1, (now - start) / duration);
@@ -1150,7 +1313,7 @@ function softSettleNeighbors(islandId, islandEl, {
       if (t < 1) requestAnimationFrame(tick);
       else {
         scheduleDraw();
-        resolve();
+        done();
       }
     };
     requestAnimationFrame(tick);
@@ -1274,6 +1437,13 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
     el.style.setProperty('--ox', '0px');
     el.style.setProperty('--oy', '0px');
   };
+  // Kill CSS left/top transitions while RAF owns the ease — otherwise the
+  // stylesheet fights each frame and seats look like they snap.
+  for (const el of kids) {
+    el.style.transition = 'none';
+  }
+  parentEl.style.transition = 'width .55s cubic-bezier(.22, 1, .36, 1), height .55s cubic-bezier(.22, 1, .36, 1)';
+  canvasEl.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), min-height .55s cubic-bezier(.22, 1, .36, 1)';
   const rawX = Math.max(NEST_PAD, parseFloat(mine.style.left) || 0);
   const rawY = Math.max(NEST_PAD, parseFloat(mine.style.top) || 0);
   const mineSize = frameLayoutSize(mine);
@@ -1350,27 +1520,13 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
     ...siblings
   ];
 
-  // Measure grow with everyone at final seats, then rewind for the ease.
-  for (const m of movers) {
-    m.el.style.left = `${m.to.x}px`;
-    m.el.style.top = `${m.to.y}px`;
-  }
-  parentEl.style.transition = 'width .4s cubic-bezier(.22, 1, .36, 1), height .4s cubic-bezier(.22, 1, .36, 1)';
-  canvasEl.style.transition = 'height .4s cubic-bezier(.22, 1, .36, 1), min-height .4s cubic-bezier(.22, 1, .36, 1)';
-  // Grow or shrink to fit the new stack — reclaim empty space when modules don't need it.
-  encapsulateNestedChild(parentEl, canvasEl, mine, mineTo.x, mineTo.y, {
-    skipId: draggedId,
-    deep: true,
-    allowShrink: true
-  });
-  // Also size from full content bounds (all siblings), not only the dragged chip.
+  // Grow from computed seats — don't paint TO before the ease (that snapped).
   let maxX = NEST_PAD, maxY = NEST_PAD;
   for (const m of movers) {
     maxX = Math.max(maxX, m.to.x + m.w);
     maxY = Math.max(maxY, m.to.y + m.h);
   }
   reshapeParentCanvas(parentEl, canvasEl, maxX + NEST_PAD, maxY + NEST_PAD, { allowShrink: true });
-  // Deep-grow/shrink the enclosing folder around the file.
   const grandparentEl = parentEl.parentElement?.closest('.frame.float[data-drag-id]');
   const grandparentCanvas = grandparentEl?.querySelector(':scope > .frame-canvas');
   if (grandparentEl && grandparentCanvas) {
@@ -1383,11 +1539,7 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
       { skipId: parentEl.dataset.dragId, deep: true, allowShrink: true }
     );
   }
-  for (const m of movers) {
-    m.el.style.left = `${m.from.x}px`;
-    m.el.style.top = `${m.from.y}px`;
-  }
-  applySeat(mine, rawX, rawY);
+  for (const m of movers) applySeat(m.el, m.from.x, m.from.y);
   nestedSeats.set(draggedId, { ...mineTo });
   userArranged.add(draggedId);
 
@@ -1396,8 +1548,8 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
     canvasEl.style.transition = '';
     for (const m of movers) {
       applySeat(m.el, m.to.x, m.to.y);
+      m.el.style.transition = '';
       nestedSeats.set(m.id, { ...m.to });
-      userArranged.add(m.id);
     }
     // Re-assert size after seats land — shrink when content no longer needs the room.
     let endX = NEST_PAD, endY = NEST_PAD;
@@ -1419,7 +1571,7 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
     const islandId = dragIslandId(parentId);
     const islandEl = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(islandId)}"]`)
       || scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`);
-    if (islandEl) softSettleNeighbors(islandId, islandEl, { duration: 0 });
+    if (islandEl) softSettleNeighbors(islandId, islandEl, { duration: 720 });
     scheduleDraw();
     animateReflowEdges(360);
     clearTimeout(softSettleNested._reconcile);
@@ -1450,61 +1602,29 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
 function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH, { allowShrink = false } = {}) {
   if (!parentEl || !canvasEl) return;
   const header = parentEl.querySelector(':scope > .frame-bar');
-  const headerH = header?.offsetHeight || 54;
-  const pad = 16;
-  const wantW = Math.ceil((contentW || canvasEl.scrollWidth) + pad);
-  const wantH = Math.ceil(headerH + Math.max(64, contentH || canvasEl.scrollHeight) + 12);
-  // Mid-drag shrink makes nested coords jump; only settle may tighten.
-  const needW = allowShrink ? wantW : Math.max(parentEl.offsetWidth || 0, wantW);
-  const needH = allowShrink ? wantH : Math.max(parentEl.offsetHeight || 0, wantH);
+  const headerH = header?.offsetHeight || 86;
+  const pad = NEST_PAD;
+  const layoutW = parseFloat(parentEl.dataset.layoutW) || 0;
+  const layoutH = parseFloat(parentEl.dataset.layoutH) || 0;
+  const contentNeedW = Math.ceil(Math.max(contentW || canvasEl.scrollWidth, 320) + pad);
+  const contentNeedH = Math.ceil(headerH + Math.max(72, contentH || canvasEl.scrollHeight) + pad);
+  // Mid-drag / post-expand: never shrink below authored layout — that looked
+  // like folders horizontally collapsing and glitching against FLIP.
+  const floorW = Math.max(parentEl.offsetWidth || 0, layoutW, FRAME_LABEL_CHROME.folder.minW);
+  const floorH = Math.max(parentEl.offsetHeight || 0, layoutH);
+  const needW = allowShrink
+    ? Math.max(contentNeedW, FRAME_LABEL_CHROME.folder.minW)
+    : Math.max(floorW, contentNeedW);
+  const needH = allowShrink ? contentNeedH : Math.max(floorH, contentNeedH);
   parentEl.style.width = `${needW}px`;
   parentEl.style.height = `${needH}px`;
-  canvasEl.style.height = `${Math.max(64, needH - headerH - 10)}px`;
+  canvasEl.style.height = `${Math.max(72, needH - headerH - 12)}px`;
   canvasEl.style.minHeight = canvasEl.style.height;
-}
-/** Shift nested seats/DOM when the canvas origin moves left/up to encapsulate a child. */
-function shiftNestedCanvasOrigin(parentEl, canvasEl, skipId, shiftX, shiftY) {
-  if (!parentEl || !canvasEl || (!shiftX && !shiftY)) return;
-  for (const el of canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')) {
-    const kidId = el.dataset.dragId;
-    const left = (parseFloat(el.style.left) || 0) + shiftX;
-    const top = (parseFloat(el.style.top) || 0) + shiftY;
-    el.style.left = `${left}px`;
-    el.style.top = `${top}px`;
-    if (kidId === skipId) continue;
-    const seat = nestedSeats.get(kidId);
-    if (seat) nestedSeats.set(kidId, { x: seat.x + shiftX, y: seat.y + shiftY });
-    else if (userArranged.has(kidId)) nestedSeats.set(kidId, { x: left, y: top });
-  }
-  // Parent island moves opposite so the rest of the world stays put while the
-  // canvas grows left/up around the dragged chip.
-  const parentId = parentEl.dataset.dragId;
-  if (!parentId) return;
-  const islandId = dragIslandId(parentId);
-  if (islandId === parentId) {
-    const off = offsets.get(islandId) || { x: 0, y: 0 };
-    const next = { x: off.x - shiftX, y: off.y - shiftY };
-    offsets.set(islandId, next);
-    parentEl.style.translate = `${next.x}px ${next.y}px`;
-    parentEl.style.setProperty('--ox', `${next.x}px`);
-    parentEl.style.setProperty('--oy', `${next.y}px`);
-  } else {
-    // Parent itself is nested — nudge its seat the same way.
-    const seat = nestedSeats.get(parentId) || {
-      x: parseFloat(parentEl.style.left) || 0,
-      y: parseFloat(parentEl.style.top) || 0
-    };
-    const next = { x: seat.x - shiftX, y: seat.y - shiftY };
-    userArranged.add(parentId);
-    nestedSeats.set(parentId, next);
-    parentEl.style.left = `${next.x}px`;
-    parentEl.style.top = `${next.y}px`;
-  }
 }
 /** Grow the parent folder around a nested child. Never shifts canvas origin —
  *  left/top overflow is clamped so siblings and selection stay put. */
 function encapsulateNestedChild(parentEl, canvasEl, childEl, childX, childY, {
-  skipId = null,
+  skipId: _skipId = null,
   deep = false,
   allowShrink = false
 } = {}) {
@@ -1563,7 +1683,7 @@ function scheduleGravityDrift(delay = 160) {
 }
 function softGravityStep(pass) {
   if (!graph) return;
-  if (traceAlignRaf) {
+  if (traceAlignRaf || softSettleRunning > 0) {
     gravityTimer = setTimeout(() => softGravityStep(0), 280);
     return;
   }
@@ -1597,7 +1717,8 @@ function softGravityStep(pass) {
     // Only far-off islands drift to the park rim just outside the view.
     // Never park-pull anything still in (or near) the viewfinder.
     // Focused parent island never parks or drifts.
-    if (!A.far || A.locked) continue;
+    // Post-minimize seats stay frozen until the user drags or expands.
+    if (!A.far || A.locked || seatLock.has(A.item.id)) continue;
     const { pullX, pullY } = pullTowardViewField(A.rect);
     if (Math.abs(pullX) < 2 && Math.abs(pullY) < 2) continue;
     // Long-distance strays catch the rim faster; near-rim stays gentle.
@@ -1613,14 +1734,16 @@ function softGravityStep(pass) {
   }
   // Soft padding: keep in-view seats still when a stray brushes them.
   // Far ↔ in-view: only the stray yields. In-view ↔ in-view: gentle shared nudge.
+  // Gap is screen-space (rects are getBoundingClientRect).
+  const gapPx = ISLAND_GAP * scale;
   for (let i = 0; i < centers.length; i++) {
     for (let j = i + 1; j < centers.length; j++) {
       const A = centers[i], B = centers[j];
-      if (!rectsOverlap(A.rect, B.rect, ISLAND_GAP)) continue;
-      const { dx, dy } = separationPush(A.rect, B.rect);
+      if (!rectsOverlap(A.rect, B.rect, gapPx)) continue;
+      const { dx, dy } = separationPush(A.rect, B.rect, gapPx);
       if (!dx && !dy) continue;
-      const aPinned = pinnedLayout.has(A.item.id) || A.locked;
-      const bPinned = pinnedLayout.has(B.item.id) || B.locked;
+      const aPinned = pinnedLayout.has(A.item.id) || seatLock.has(A.item.id) || A.locked;
+      const bPinned = pinnedLayout.has(B.item.id) || seatLock.has(B.item.id) || B.locked;
       const aArranged = traceArranged.has(A.item.id);
       const bArranged = traceArranged.has(B.item.id);
       const aFar = A.far, bFar = B.far;
@@ -1634,6 +1757,16 @@ function softGravityStep(pass) {
       if (B.locked && !A.locked) {
         applyIslandTranslate(A, { x: A.off.x + dx / scale, y: A.off.y + dy / scale });
         A.far = islandFarFromView(A.rect);
+        moved = true;
+        continue;
+      }
+      // Two constellation seats still overlapping: never freeze — clear the stack.
+      // Prefer the lower hop / earlier id as the keeper when neither is focus.
+      if (aArranged && bArranged) {
+        applyIslandTranslate(A, { x: A.off.x + (dx / scale) * 0.5, y: A.off.y + (dy / scale) * 0.5 });
+        applyIslandTranslate(B, { x: B.off.x - (dx / scale) * 0.5, y: B.off.y - (dy / scale) * 0.5 });
+        A.far = islandFarFromView(A.rect);
+        B.far = islandFarFromView(B.rect);
         moved = true;
         continue;
       }
@@ -1657,7 +1790,7 @@ function softGravityStep(pass) {
         const sx = (dx / scale) * sign;
         const sy = (dy / scale) * sign;
         if (Math.abs(sx) < 0.04 && Math.abs(sy) < 0.04) continue;
-        if (!pinnedLayout.has(stray.item.id) && !stray.locked) {
+        if (!pinnedLayout.has(stray.item.id) && !seatLock.has(stray.item.id) && !stray.locked) {
           applyIslandTranslate(stray, { x: stray.off.x + sx, y: stray.off.y + sy });
           stray.far = islandFarFromView(stray.rect);
           moved = true;
@@ -1731,6 +1864,12 @@ function stripFlipTransforms() {
   scene?.querySelectorAll('.frame.flipping, .frame.size-morph, .frame.jelly-wobble').forEach(el => {
     el.classList.remove('flipping', 'size-morph', 'jelly-wobble');
     el.style.transform = '';
+    if (el.dataset.layoutW) el.style.width = `${el.dataset.layoutW}px`;
+    else el.style.width = '';
+    if (el.dataset.layoutH) el.style.height = `${el.dataset.layoutH}px`;
+    else el.style.height = '';
+    const canvasEl = el.querySelector(':scope > .frame-canvas');
+    if (canvasEl) canvasEl.style.height = '';
   });
 }
 function bfsDist(adj, start) {
@@ -1746,16 +1885,39 @@ function bfsDist(adj, start) {
   }
   return dist;
 }
-/**
- * One-shot on-click constellation: related islands fly into clear hop rings
- * around focus (hops 1–3), then hold until the next selection.
- * Unlinked islands ease aside after — they never join the flight.
- */
+/** Bake translate offset into shelf left/top so idle pack cannot desync seats.
+ *  Must be instant — CSS left/top transitions would clear translate first and
+ *  then ease left/top (= snap back, then animate again). */
+function bakeIslandOffset(id, el) {
+  if (!id || !el) return;
+  const left = parseFloat(el.style.left) || 0;
+  const top = parseFloat(el.style.top) || 0;
+  const off = offsets.get(id) || { x: 0, y: 0 };
+  if (!off.x && !off.y) return;
+  const nx = left + off.x;
+  const ny = top + off.y;
+  el.classList.add('seat-baking');
+  el.style.left = `${nx}px`;
+  el.style.top = `${ny}px`;
+  el.style.translate = '0px 0px';
+  el.style.setProperty('--ox', '0px');
+  el.style.setProperty('--oy', '0px');
+  // Flush so the browser commits the baked seat before transitions return.
+  void el.offsetWidth;
+  el.style.translate = '';
+  el.classList.remove('seat-baking');
+  offsets.delete(id);
+  const place = floatPlacements.get(id);
+  if (place) floatPlacements.set(id, { ...place, x: nx, y: ny });
+}
 function computeConstellationMovers() {
+  const empty = { movers: [], stickIds: [], focusTopId: null, packSeats: [], packIds: new Set(), bystanderMoves: [] };
   const focus = selected();
-  if (!focus || (focus.kind === 'folder' && focus.depth === 0)) return { movers: [], stickIds: [] };
+  if (!focus || (focus.kind === 'folder' && focus.depth === 0)) {
+    return empty;
+  }
   const focusTop = topLevelOwner(fileOf(focus) || focus);
-  if (!focusTop) return { movers: [], stickIds: [] };
+  if (!focusTop) return empty;
 
   const MAX_HOP = 3;
   const MAX_HOP2 = 10;
@@ -1773,10 +1935,14 @@ function computeConstellationMovers() {
     if (id !== focusTop.id && pinnedLayout.has(id)) continue;
     candidates.push(islandShelfBox(el, id));
   }
-  if (candidates.length < 2) return { movers: [], stickIds: [] };
+  if (candidates.length < 2) {
+    const focusEl = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(focusTop.id)}"]`);
+    const box = focusEl ? islandShelfBox(focusEl, focusTop.id) : null;
+    const packSeats = box ? [{ id: focusTop.id, x: box.x, y: box.y, w: box.w, h: box.h }] : [];
+    return { movers: [], stickIds: [], focusTopId: focusTop.id, packSeats, packIds: new Set([focusTop.id]), bystanderMoves: [] };
+  }
 
   const candById = new Map(candidates.map(box => [box.id, box]));
-  // Hop graph: walk + imports only (readable architectural edges).
   const undirected = new Map(candidates.map(box => [box.id, []]));
   const directed = [];
   const closerLinkCount = new Map(candidates.map(box => [box.id, 0]));
@@ -1787,13 +1953,14 @@ function computeConstellationMovers() {
     const bTop = topLevelOwner(fileOf(node(edge.to)) || node(edge.to));
     if (!aTop || !bTop || aTop.id === bTop.id) continue;
     if (!candById.has(aTop.id) || !candById.has(bTop.id)) continue;
-    undirected.get(aTop.id)?.push(bTop.id);
-    undirected.get(bTop.id)?.push(aTop.id);
+    const aList = undirected.get(aTop.id);
+    const bList = undirected.get(bTop.id);
+    if (aList && !aList.includes(bTop.id)) aList.push(bTop.id);
+    if (bList && !bList.includes(aTop.id)) bList.push(aTop.id);
     directed.push({ from: aTop.id, to: bTop.id });
   }
   const hopDist = bfsDist(undirected, focusTop.id);
 
-  // Rank hop-2/3 by links into closer hops; cap membership.
   const scored = candidates.filter(box => {
     if (box.id === focusTop.id) return true;
     const hop = hopDist.get(box.id);
@@ -1835,7 +2002,6 @@ function computeConstellationMovers() {
   const world = new Map();
   world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
 
-  // --- Hop 1: left emitters / right receivers, stacked by current Y ---
   const leftCol = [];
   const rightCol = [];
   for (const box of hop1) {
@@ -1860,10 +2026,8 @@ function computeConstellationMovers() {
   stackCol(leftCol, -1);
   stackCol(rightCol, 1);
 
-  // --- Hop 2 / 3: ring outside nearer-hop anchors ---
   const placeDeep = (list, hop) => {
     const ring = RING[hop];
-    // Group by primary closer neighbor for readable fans.
     const groups = new Map();
     for (const box of list) {
       const closer = (undirected.get(box.id) || [])
@@ -1892,9 +2056,9 @@ function computeConstellationMovers() {
   placeDeep(hop2, 2);
   placeDeep(hop3, 3);
 
-  // Separate pack; focus stays put.
+  // 1) Clear overlaps among pulled islands (focus stays put).
   const movable = [...world.entries()].map(([id, box]) => ({ id, ...box }));
-  separateBoxes(movable, { gap: ISLAND_GAP + 8, passes: 32, anchors: new Set([focusTop.id]) });
+  separateBoxes(movable, { gap: ISLAND_GAP, passes: 64, anchors: new Set([focusTop.id]), pad: 0 });
   for (const box of movable) {
     if (box.id === focusTop.id) {
       world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
@@ -1905,6 +2069,45 @@ function computeConstellationMovers() {
   world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
 
   const packSeats = [...world.entries()].map(([id, box]) => ({ id, ...box }));
+  const packIdsFinal = new Set(packSeats.map(s => s.id));
+
+  // 2) Plan bystander seats so landing zones are vacant before flight.
+  //    Anything already on a pack seat yields aside (with gap) — never stays buried.
+  const bystanderBoxes = [];
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (!id || packIdsFinal.has(id)) continue;
+    if (pinnedLayout.has(id)) continue;
+    const box = islandShelfBox(el, id);
+    bystanderBoxes.push({
+      id,
+      el: box.el,
+      left: box.left,
+      top: box.top,
+      x: box.x,
+      y: box.y,
+      w: box.w,
+      h: box.h
+    });
+  }
+  const walls = packSeats.map(s => ({ id: s.id, x: s.x, y: s.y, w: s.w, h: s.h }));
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (!id || packIdsFinal.has(id) || bystanderBoxes.some(b => b.id === id)) continue;
+    if (!pinnedLayout.has(id)) continue;
+    const box = islandShelfBox(el, id);
+    walls.push({ id, x: box.x, y: box.y, w: box.w, h: box.h });
+  }
+  yieldBoxesFromWalls(bystanderBoxes, walls, { gap: ISLAND_GAP, passes: 56, pad: 0 });
+
+  const bystanderMoves = [];
+  for (const box of bystanderBoxes) {
+    const ox = box.x - box.left;
+    const oy = box.y - box.top;
+    const cur = offsets.get(box.id) || { x: 0, y: 0 };
+    if (Math.abs(ox - cur.x) < 1 && Math.abs(oy - cur.y) < 1) continue;
+    bystanderMoves.push({ id: box.id, ox, oy, x: box.x, y: box.y, w: box.w, h: box.h });
+  }
 
   const movers = [];
   const stickIds = [];
@@ -1913,27 +2116,24 @@ function computeConstellationMovers() {
     const ideal = world.get(box.id);
     if (!ideal) continue;
     stickIds.push(box.id);
-    const dist = Math.hypot(ideal.x - box.x, ideal.y - box.y);
-    // Already on seat — skip micro-jitter; still stick after arrive.
-    if (dist < 40) continue;
-    // Hard arrive (near-full blend). Tiny soften only when already close.
-    const blend = dist < 80 ? 0.95 : 1;
-    const tx = box.x + (ideal.x - box.x) * blend;
-    const ty = box.y + (ideal.y - box.y) * blend;
+    const tx = ideal.x;
+    const ty = ideal.y;
+    const dist = Math.hypot(tx - box.x, ty - box.y);
+    // Always commit to the cleared seat — short blends left islands overlapping
+    // the bystander lane they were supposed to claim.
     const to = { x: tx - box.left, y: ty - box.top };
-    if (Math.abs(to.x - box.off.x) < 2 && Math.abs(to.y - box.off.y) < 2) continue;
+    if (Math.abs(to.x - box.off.x) < 1.5 && Math.abs(to.y - box.off.y) < 1.5) continue;
     movers.push({
       id: box.id,
       el: box.el,
       from: { ...box.off },
       to,
-      dist: Math.hypot(tx - box.x, ty - box.y),
+      dist: Math.max(dist, 1),
       kind: 'trace',
       stick: true
     });
   }
-  // Unlinked islands never join the flight; soft-settle clears pack overlaps after.
-  return { movers, stickIds, focusTopId: focusTop.id, packSeats, packIds };
+  return { movers, stickIds, focusTopId: focusTop.id, packSeats, packIds: packIdsFinal, bystanderMoves };
 }
 function scheduleTraceAlign(delay = 90) {
   cancelTraceAlign();
@@ -1944,30 +2144,73 @@ function scheduleTraceAlign(delay = 90) {
   }, delay);
 }
 function runTraceAlign(token) {
-  if (!graph || app.classList.contains('dragging')) return;
+  if (!graph || app.classList.contains('dragging')) {
+    if (app.classList.contains('dragging')) {
+      const retryToken = token;
+      setTimeout(() => {
+        if (retryToken !== traceAlignToken) return;
+        if (!app.classList.contains('dragging')) runTraceAlign(retryToken);
+      }, 220);
+    }
+    return;
+  }
   if (token !== traceAlignToken) return;
   cancelSoftSettle();
-  stripFlipTransforms();
+  if (scene?.querySelector?.('.frame.flipping, .frame.size-morph')) stripFlipTransforms();
   clearTimeout(gravityTimer);
-  const { movers, stickIds, focusTopId, packSeats } = computeConstellationMovers();
+  clearSeatLock();
+  const { movers, stickIds, focusTopId, packSeats, bystanderMoves } = computeConstellationMovers();
   const focusIsland = focusTopId
     ? scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(focusTopId)}"]`)
     : null;
   const protectIds = new Set([focusTopId, ...(stickIds || []), ...(movers || []).map(m => m.id)].filter(Boolean));
+  const walls = [...(packSeats || [])];
+  // Pinned islands are hard walls too.
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (!id || (packSeats || []).some(p => p.id === id)) continue;
+    if (pinnedLayout.has(id)) walls.push(islandShelfBox(el, id));
+  }
+
+  const settleClear = (ms) => {
+    if (!focusIsland || !focusTopId) return Promise.resolve();
+    return softSettleNeighbors(focusTopId, focusIsland, {
+      duration: ms,
+      protectIds,
+      againstBoxes: walls.length ? walls : null,
+      plannedMoves: bystanderMoves || null
+    });
+  };
+
+  const bakeFlight = () => {
+    for (const mover of movers || []) {
+      bakeIslandOffset(mover.id, mover.el);
+      if (mover.stick) traceArranged.add(mover.id);
+    }
+    for (const id of stickIds || []) {
+      const el = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(id)}"]`);
+      if (el) bakeIslandOffset(id, el);
+      traceArranged.add(id);
+    }
+    if (focusTopId) traceArranged.add(focusTopId);
+  };
 
   if (!movers.length) {
     for (const id of stickIds || []) traceArranged.add(id);
-    if (focusIsland && focusTopId) {
-      softSettleNeighbors(focusTopId, focusIsland, {
-        duration: 720,
-        protectIds,
-        againstBoxes: null
+    if (focusTopId) traceArranged.add(focusTopId);
+    settleClear(820).then(() => {
+      // Bake any settle translates so idle pack cannot re-stack folders.
+      for (const el of topLevelIslandElements()) {
+        const id = el.dataset.dragId;
+        if (id && !protectIds.has(id)) bakeIslandOffset(id, el);
+      }
+      softHealIslandGaps(focusTopId, { duration: 520 }).then(() => {
+        scheduleGravityDrift(400);
       });
-    }
-    scheduleGravityDrift(400);
+    });
     return;
   }
-  // One continuous ease to the final seat - no pack/FLIP snap beforehand.
+
   const maxDist = Math.max(...movers.map(m => m.dist || 0), 80);
   const duration = Math.min(1400, Math.max(700, 480 + maxDist * 0.9));
   const start = performance.now();
@@ -1984,9 +2227,11 @@ function runTraceAlign(token) {
     || scene.querySelector('.frame.selected, .frame.focus-anchor');
   if (focusEl) {
     focusEl.classList.add('trace-align-focus');
-    // Keep the focused top-level island above flying peers.
     focusEl.style.zIndex = '70';
   }
+  // Clear overlaps in the SAME beat as the flight — not a second snap after.
+  const blockersDone = settleClear(duration);
+
   const tick = now => {
     if (token !== traceAlignToken || app.classList.contains('dragging')) {
       for (const mover of movers) {
@@ -2001,7 +2246,6 @@ function runTraceAlign(token) {
       return;
     }
     const t = Math.min(1, (now - start) / duration);
-    // Ease-out quart: arrive at the final seat and stop (no linger mid-path).
     const ease = 1 - Math.pow(1 - t, 4);
     for (const mover of movers) {
       const x = mover.from.x + (mover.to.x - mover.from.x) * ease;
@@ -2020,31 +2264,33 @@ function runTraceAlign(token) {
       mover.el.style.translate = `${mover.to.x}px ${mover.to.y}px`;
       mover.el.style.setProperty('--ox', `${mover.to.x}px`);
       mover.el.style.setProperty('--oy', `${mover.to.y}px`);
+    }
+    // Bake while still .trace-flying (left/top transitions frozen), then clear classes.
+    bakeFlight();
+    for (const mover of movers) {
       mover.el.classList.remove('trace-flying');
       mover.el.style.zIndex = '';
-    }
-    for (const id of stickIds || []) traceArranged.add(id);
-    for (const mover of movers) {
-      if (mover.stick) traceArranged.add(mover.id);
     }
     focusEl?.classList.remove('trace-align-focus');
     if (focusEl) focusEl.style.zIndex = '';
     scene.classList.remove('trace-aligning');
     traceAlignRaf = 0;
-    // Ease blockers off pack seats — they never join the constellation flight.
-    if (focusEl && focusTopId) {
-      softSettleNeighbors(focusTopId, focusEl, {
-        duration: 720,
-        protectIds,
-        againstBoxes: packSeats
+    blockersDone.then(() => {
+      for (const el of topLevelIslandElements()) {
+        const id = el.dataset.dragId;
+        if (id && !protectIds.has(id)) bakeIslandOffset(id, el);
+      }
+      // Final gap heal — anything still stacked eases apart (focus stays).
+      softHealIslandGaps(focusTopId, { duration: 520 }).then(() => {
+        scheduleDraw();
+        renderMinimap();
+        scheduleGravityDrift(400);
       });
-    }
-    scheduleDraw();
-    renderMinimap();
-    scheduleGravityDrift(500);
+    });
   };
   traceAlignRaf = requestAnimationFrame(tick);
 }
+
 function livesInsideExpandedFolder(file) {
   return !!file && ancestors(file).some(parent => parent.kind === 'folder' && parent.id !== rootFolder().id && expandedFolders.has(parent.id));
 }
@@ -2149,11 +2395,12 @@ function parentCanvasId(id) {
  * Underestimating chrome is what made module names paint past the chip border. */
 const FRAME_LABEL_CHROME = {
   // barPadX + toggle + pin + gaps + titlePadL/R
-  folder: { chrome: 32 + 28 + 28 + 16 + 16, minW: 260, maxW: 520, baseH: 74 },
+  // minW must leave a readable title column after chrome; baseH clears 2-line titles.
+  folder: { chrome: 32 + 28 + 28 + 16 + 16, minW: 360, maxW: 720, baseH: 86 },
   // barPadX + toggle + flow + pin + gaps + titlePad
-  file: { chrome: 32 + 28 + 52 + 28 + 30 + 16, minW: 320, maxW: 560, baseH: 74 },
+  file: { chrome: 32 + 28 + 52 + 28 + 30 + 16, minW: 340, maxW: 620, baseH: 78 },
   // barPadX + flow + pin + gaps + titlePad (no toggle)
-  module: { chrome: 26 + 52 + 28 + 20 + 14, minW: 260, maxW: 420, baseH: 70 }
+  module: { chrome: 26 + 52 + 28 + 20 + 14, minW: 280, maxW: 460, baseH: 70 }
 };
 function frameLabelMetrics(label = '', {
   kind = 'file',
@@ -2170,10 +2417,12 @@ function frameLabelMetrics(label = '', {
   const hi = maxW ?? budget.maxW;
   const base = baseH ?? budget.baseH;
   const text = String(label || '');
-  // Grow width so the name fits in ≤ maxLines inside the real title column.
-  const targetTextW = Math.ceil(text.length * charW / maxLines);
+  // Folders: prefer a wider single-line title over a cramped wrap (that looked
+  // horizontally squished after chrome grew to 28px toggle + padding).
+  const lineBudget = kind === 'folder' ? 1 : maxLines;
+  const targetTextW = Math.ceil(text.length * charW / lineBudget);
   const w = Math.min(hi, Math.max(lo, targetTextW + chrome));
-  const textW = Math.max(56, w - chrome);
+  const textW = Math.max(96, w - chrome);
   const charsPerLine = Math.max(10, Math.floor(textW / charW));
   const lines = Math.min(maxLines, Math.max(1, Math.ceil(text.length / charsPerLine) || 1));
   return { w, h: base + (lines - 1) * lineH, lines, textW };
@@ -2208,7 +2457,7 @@ function frameFileSize(file) {
 function frameFolderSize(item, depth = 0) {
   const header = frameLabelMetrics(item.label, {
     kind: 'folder',
-    minW: depth ? 240 : FRAME_LABEL_CHROME.folder.minW
+    minW: depth ? 320 : FRAME_LABEL_CHROME.folder.minW
   });
   if ((!expandedFolders.has(item.id) && item.id !== SYNTHETIC_ROOT_ID) || depth > 8) {
     return { w: header.w, h: header.h, headerH: header.h, children: [] };
@@ -2226,7 +2475,14 @@ function frameFolderSize(item, depth = 0) {
     persistLocals: true,
     anchors: stickyExpandId ? new Set([stickyExpandId]) : (layoutAnchorIds.size ? layoutAnchorIds : null)
   });
-  return { w: Math.max(header.w, packed.w + 8), h: Math.max(header.h, 48) + packed.h + 10, headerH: header.h, children: packed.items };
+  // Floor width so a single narrow child can't leave the glass shell skinny.
+  const minShell = depth ? 340 : 380;
+  return {
+    w: Math.max(header.w, packed.w + 8, minShell),
+    h: Math.max(header.h, 56) + packed.h + 18,
+    headerH: header.h,
+    children: packed.items
+  };
 }
 /** Shelf-pack floating boxes left→right, wrap on maxWidth, then separate overlaps. */
 function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto', persistLocals = false, anchors = null } = {}) {
@@ -2399,13 +2655,33 @@ function markExpandAnchor(id) {
 function clearExpandAnchor() {
   layoutAnchorIds = new Set();
   stickyExpandId = null;
+  collapseMotion = false;
 }
-/** After expand morph finishes — drop sticky pack lock, then constellation. */
+/** Freeze current top-level seats so post-minimize clustering cannot pull them in. */
+function lockCurrentIslandSeats() {
+  seatLock = new Set();
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (id) seatLock.add(id);
+  }
+}
+function clearSeatLock() {
+  seatLock = new Set();
+}
+/** After expand morph finishes — drop sticky pack lock, then ONE layout motion.
+ *  Collapse must NOT settle/align. Never cleanup + constellation (double snap). */
 function finishExpandMorph() {
   const alignDelay = pendingAlignAfterMorph;
+  const expandedId = stickyExpandId;
+  const wasCollapse = collapseMotion;
   pendingAlignAfterMorph = 0;
   clearExpandAnchor();
-  if (alignDelay > 0) scheduleTraceAlign(alignDelay);
+  if (wasCollapse) return;
+  if (alignDelay > 0) {
+    scheduleTraceAlign(alignDelay);
+    return;
+  }
+  if (expandedId) softSettleAfterExpand(expandedId, { duration: 900 });
 }
 /** Pin a nested frame's current canvas seat so open/resize grows in place
  *  and the parent expands sideways instead of teleporting the chip. */
@@ -2419,6 +2695,23 @@ function pinNestedSeatFromDom(id) {
     y: parseFloat(el.style.top) || 0
   });
   return true;
+}
+/** Lock a frame to its authored layout size after a morph — clearing width
+ *  to '' dropped the inline size and folders looked horizontally collapsed. */
+function commitFrameLayoutSize(el, canvasEl = null) {
+  if (!el) return;
+  const w = parseFloat(el.dataset.layoutW);
+  const h = parseFloat(el.dataset.layoutH);
+  if (w) el.style.width = `${w}px`;
+  if (h) el.style.height = `${h}px`;
+  if (canvasEl) {
+    const header = el.querySelector(':scope > .frame-bar');
+    const headerH = header?.offsetHeight || (el.classList.contains('frame-folder') ? 86 : 78);
+    if (h) {
+      canvasEl.style.height = `${Math.max(64, h - headerH - 12)}px`;
+      canvasEl.style.minHeight = canvasEl.style.height;
+    }
+  }
 }
 /** Prefer authored layout size over mid-FLIP offsetWidth. */
 function frameLayoutSize(el) {
@@ -2477,10 +2770,12 @@ function softSnapNestedSeats(entries) {
  * In-folder cleanup: iPhone-style shelf reflow so siblings sit in loose rows
  * side-by-side. Used after expand/reset (drop uses softSettleNested).
  */
-function cleanupNestedLayout(parentId, { duration = 520, anchorId = null } = {}) {
+function cleanupNestedLayout(parentId, { duration = 520, anchorId = null, allowShrink = false } = {}) {
   const parentEl = scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`);
   const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
   if (!canvasEl) return;
+  // Don't fight an in-flight size morph — that glitched folder widths.
+  if (parentEl.classList.contains('flipping') || parentEl.classList.contains('size-morph')) return;
   const token = ++softSettleToken;
   const kids = [...canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')];
   if (!kids.length) return;
@@ -2492,6 +2787,7 @@ function cleanupNestedLayout(parentId, { duration = 520, anchorId = null } = {})
   const canvasW = Math.max(
     canvasEl.clientWidth || 0,
     parseFloat(parentEl.style.width) || parentEl.offsetWidth || 0,
+    parseFloat(parentEl.dataset.layoutW) || 0,
     480
   );
   const shelf = computeNestedShelfSeats(kids, pivotId, dropX, dropY, {
@@ -2505,29 +2801,32 @@ function cleanupNestedLayout(parentId, { duration = 520, anchorId = null } = {})
     const from = { x: parseFloat(el.style.left) || 0, y: parseFloat(el.style.top) || 0 };
     const seat = shelf.seats.get(id) || from;
     const size = frameLayoutSize(el);
-    return { id, el, from, to: { x: seat.x, y: seat.y }, w: size.w, h: size.h };
+    return {
+      id,
+      el,
+      from,
+      to: { x: Math.max(NEST_PAD, seat.x), y: Math.max(NEST_PAD, seat.y) },
+      w: size.w,
+      h: size.h
+    };
   });
-  for (const e of entries) {
-    e.el.style.left = `${e.to.x}px`;
-    e.el.style.top = `${e.to.y}px`;
-  }
   const grow = entries.reduce((acc, e) => ({
     x: Math.max(acc.x, e.to.x + e.w),
     y: Math.max(acc.y, e.to.y + e.h)
   }), { x: NEST_PAD, y: NEST_PAD });
-  const anchor = entries.find(e => e.id === pivotId) || entries[0];
-  if (anchor) {
-    encapsulateNestedChild(parentEl, canvasEl, anchor.el, anchor.to.x, anchor.to.y, {
-      skipId: anchor.id,
-      deep: true,
-      allowShrink: true
-    });
-  } else {
-    reshapeParentCanvas(parentEl, canvasEl, grow.x + NEST_PAD, grow.y + NEST_PAD, { allowShrink: true });
-  }
-  for (const e of entries) {
-    e.el.style.left = `${e.from.x}px`;
-    e.el.style.top = `${e.from.y}px`;
+  // Grow from computed seats — never paint TO seats before the ease (that snapped).
+  reshapeParentCanvas(parentEl, canvasEl, grow.x + NEST_PAD, grow.y + NEST_PAD, { allowShrink });
+  const grandparentEl = parentEl.parentElement?.closest('.frame.float[data-drag-id]');
+  const grandparentCanvas = grandparentEl?.querySelector(':scope > .frame-canvas');
+  if (grandparentEl && grandparentCanvas) {
+    encapsulateNestedChild(
+      grandparentEl,
+      grandparentCanvas,
+      parentEl,
+      parseFloat(parentEl.style.left) || 0,
+      parseFloat(parentEl.style.top) || 0,
+      { skipId: parentEl.dataset.dragId, deep: true, allowShrink }
+    );
   }
   const applySeat = (el, x, y) => {
     el.style.left = `${x}px`;
@@ -2536,17 +2835,28 @@ function cleanupNestedLayout(parentId, { duration = 520, anchorId = null } = {})
     el.style.setProperty('--ox', '0px');
     el.style.setProperty('--oy', '0px');
   };
+  for (const e of entries) {
+    e.el.style.transition = 'none';
+    applySeat(e.el, e.from.x, e.from.y);
+  }
   if (duration <= 0 || document.body.classList.contains('reduce-motion')) {
     for (const e of entries) {
       applySeat(e.el, e.to.x, e.to.y);
+      e.el.style.transition = '';
       nestedSeats.set(e.id, { ...e.to });
-      userArranged.add(e.id);
+      if (anchorId && e.id === anchorId) userArranged.add(e.id);
     }
     scheduleDraw();
     return;
   }
-  parentEl.style.transition = 'width .4s cubic-bezier(.22, 1, .36, 1), height .4s cubic-bezier(.22, 1, .36, 1)';
-  canvasEl.style.transition = 'height .4s cubic-bezier(.22, 1, .36, 1), min-height .4s cubic-bezier(.22, 1, .36, 1)';
+  // Only ease parent size when we actually grew — width thrash looked like a collapse glitch.
+  const grew =
+    (parseFloat(parentEl.style.width) || 0) > (parseFloat(parentEl.dataset.layoutW) || 0) + 1
+    || allowShrink;
+  if (grew) {
+    parentEl.style.transition = 'width .55s cubic-bezier(.22, 1, .36, 1), height .55s cubic-bezier(.22, 1, .36, 1)';
+    canvasEl.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), min-height .55s cubic-bezier(.22, 1, .36, 1)';
+  }
   const start = performance.now();
   const tick = now => {
     if (token !== softSettleToken) return;
@@ -2565,8 +2875,9 @@ function cleanupNestedLayout(parentId, { duration = 520, anchorId = null } = {})
       canvasEl.style.transition = '';
       for (const e of entries) {
         applySeat(e.el, e.to.x, e.to.y);
+        e.el.style.transition = '';
         nestedSeats.set(e.id, { ...e.to });
-        userArranged.add(e.id);
+        if (anchorId && e.id === anchorId) userArranged.add(e.id);
       }
       scheduleDraw();
       animateReflowEdges(360);
@@ -2583,8 +2894,13 @@ function softSettleAfterExpand(id, { duration = 1800 } = {}) {
     if (!islandEl) return;
     softSettleNeighbors(islandId, islandEl, { duration: Math.max(720, Math.min(1100, duration)) });
     // Nested open: shelf-resolve siblings inside the parent canvas around the grown chip.
+    // Grow-only — shrinking the shell here collapsed folders horizontally mid-morph.
     const parentId = parentCanvasId(id);
-    if (parentId) cleanupNestedLayout(parentId, { duration: Math.min(520, duration), anchorId: id });
+    if (parentId) cleanupNestedLayout(parentId, {
+      duration: Math.min(520, duration),
+      anchorId: id,
+      allowShrink: false
+    });
   };
   // Wait two frames so playFlip commits final width/height before any live measure fallback.
   requestAnimationFrame(() => requestAnimationFrame(run));
@@ -2640,19 +2956,30 @@ function buildFloatLayout(root) {
       }
       offsets.delete(entry.id);
     }
-    // Only the top-level island of the expand target stays fixed — not the whole ancestor set.
-    const topAnchors = new Set();
-    const stickyTop = stickyExpandId ? dragIslandId(stickyExpandId) : null;
-    if (stickyTop) topAnchors.add(stickyTop);
-    for (const id of layoutAnchorIds) {
-      const top = dragIslandId(id);
-      if (top) topAnchors.add(top);
+    // Minimize: keep every island put. separateBoxes/relax would drift small
+    // folders into the freed hole toward the map center.
+    // Focus-open: skip pack-separate here — constellation + settleClear own
+    // one motion. Doing both was the expand-FLIP then fly double-snap.
+    if (!collapseMotion && pendingAlignAfterMorph <= 0) {
+      // Only the top-level island of the expand target stays fixed — not the whole ancestor set.
+      const topAnchors = new Set();
+      const stickyTop = stickyExpandId ? dragIslandId(stickyExpandId) : null;
+      if (stickyTop) topAnchors.add(stickyTop);
+      for (const id of layoutAnchorIds) {
+        const top = dragIslandId(id);
+        if (top) topAnchors.add(top);
+      }
+      separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 56, anchors: topAnchors, pad: 40 });
     }
-    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 48, anchors: topAnchors, pad: 40 });
     // Do not relaxTopLevel during expand — clustering pulls neighbors back into the grow.
   } else if (!alignMotionPending) {
     const locked = lockedFocusIslandId();
-    const topAnchors = locked ? new Set([locked]) : null;
+    // Hard anchors only — never freeze every constellation seat. That left
+    // overlapping focus-arranged folders permanently stacked.
+    const topAnchors = new Set();
+    if (locked) topAnchors.add(locked);
+    for (const id of pinnedLayout) topAnchors.add(id);
+    // seatLock only gates clustering — never freeze all islands as anchors.
     // Idle reflow: separate in visual space, then write shelf by subtracting offsets.
     for (const entry of packed.items) {
       const off = offsets.get(entry.id) || { x: 0, y: 0 };
@@ -2661,8 +2988,9 @@ function buildFloatLayout(root) {
       entry._ox = off.x;
       entry._oy = off.y;
     }
-    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 40, anchors: topAnchors });
-    relaxTopLevel(packed.items, ISLAND_GAP);
+    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 48, anchors: topAnchors.size ? topAnchors : null, pad: 0 });
+    // Post-minimize seatLock: heal overlaps only — never cluster toward center.
+    if (!seatLock.size) relaxTopLevel(packed.items, ISLAND_GAP);
     for (const entry of packed.items) {
       entry.x -= entry._ox || 0;
       entry.y -= entry._oy || 0;
@@ -2689,7 +3017,9 @@ function relaxTopLevel(items, pad) {
   // Gentle clustering only - hard pulls made focus feel like a snap, and
   // clearing the trace made related islands jump away / off-screen.
   const passes = traceActive() ? 10 : 8;
-  const pinnedXY = new Map(items.filter(item => pinnedLayout.has(item.id) || item.id === locked).map(item => [item.id, { x: item.x, y: item.y }]));
+  // Prefer seats for user-pinned / focus / post-minimize lock — NOT every
+  // constellation id (restoring those re-stacked overlaps every pass).
+  const pinnedXY = new Map(items.filter(item => pinnedLayout.has(item.id) || seatLock.has(item.id) || item.id === locked).map(item => [item.id, { x: item.x, y: item.y }]));
   for (let pass = 0; pass < passes; pass++) {
     for (const edge of edgeTypes()) {
       if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
@@ -2699,7 +3029,8 @@ function relaxTopLevel(items, pad) {
       const aTop = topLevelOwner(aFile);
       const bTop = topLevelOwner(bFile);
       if (!aTop || !bTop || aTop.id === bTop.id) continue;
-      if ((pinnedLayout.has(aTop.id) || aTop.id === locked) && (pinnedLayout.has(bTop.id) || bTop.id === locked)) continue;
+      if ((pinnedLayout.has(aTop.id) || traceArranged.has(aTop.id) || seatLock.has(aTop.id) || aTop.id === locked)
+        && (pinnedLayout.has(bTop.id) || traceArranged.has(bTop.id) || seatLock.has(bTop.id) || bTop.id === locked)) continue;
       const A = byId.get(aTop.id), B = byId.get(bTop.id);
       if (!A || !B) continue;
       const related = focusSeeds.has(edge.from) || focusSeeds.has(edge.to) || hasTrace(aTop) || hasTrace(bTop);
@@ -2715,24 +3046,29 @@ function relaxTopLevel(items, pad) {
       if (pull < 0.15) continue;
       const ux = dx / dist, uy = dy / dist;
       const level = related && traceActive() ? (ay - by) * .01 : 0;
-      if (!pinnedLayout.has(aTop.id) && aTop.id !== locked) { A.x += ux * pull * .5; A.y += uy * pull * .5 - level; }
-      if (!pinnedLayout.has(bTop.id) && bTop.id !== locked) { B.x -= ux * pull * .5; B.y -= uy * pull * .5 + level; }
+      if (!pinnedLayout.has(aTop.id) && !traceArranged.has(aTop.id) && !seatLock.has(aTop.id) && aTop.id !== locked) {
+        A.x += ux * pull * .5; A.y += uy * pull * .5 - level;
+      }
+      if (!pinnedLayout.has(bTop.id) && !traceArranged.has(bTop.id) && !seatLock.has(bTop.id) && bTop.id !== locked) {
+        B.x -= ux * pull * .5; B.y -= uy * pull * .5 + level;
+      }
     }
-    // During expand, separate everyone (anchors stay put). Otherwise keep
-    // user-pinned seats and only pack the free islands.
+    // Hard anchors: focus + user pins + seatLock. Constellation seats may
+    // still yield so overlaps clear instead of freezing stacked folders.
     const anchors = new Set([
       ...(layoutAnchorIds.size ? layoutAnchorIds : []),
-      ...(locked ? [locked] : [])
+      ...(locked ? [locked] : []),
+      ...pinnedLayout,
+      ...seatLock
     ]);
     if (anchors.size) {
       separateBoxes(items, { gap: ISLAND_GAP, passes: 14, anchors });
       for (const [id, xy] of pinnedXY) {
-        if (!anchors.has(id)) continue; // let non-anchor pins yield
         const item = byId.get(id);
         if (item) { item.x = xy.x; item.y = xy.y; }
       }
     } else {
-      separateBoxes(items.filter(item => !pinnedLayout.has(item.id)), { gap: ISLAND_GAP, passes: 12 });
+      separateBoxes(items.filter(item => !pinnedLayout.has(item.id) && !seatLock.has(item.id)), { gap: ISLAND_GAP, passes: 12 });
       for (const [id, xy] of pinnedXY) {
         const item = byId.get(id);
         if (item) { item.x = xy.x; item.y = xy.y; }
@@ -2910,7 +3246,7 @@ function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
       <button class="fn-flow-hint" data-open-file-flow="${file.id}" type="button" title="Open code flow">flow</button>
       <button class="port pin-btn ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" type="button" title="Pin"></button>
     </header>
-    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(64, placement.h - (size.headerH || 54) - 10)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
+    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(64, placement.h - (size.headerH || 78) - 12)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
   </section>`;
 }
 function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth = 0) {
@@ -2942,7 +3278,7 @@ function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth
       </button>
       <button class="port pin-btn ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" type="button" title="Pin"></button>
     </header>
-    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(72, placement.h - (size.headerH || 54) - 10)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
+    ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(88, placement.h - (size.headerH || 86) - 14)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
   </section>`;
 }
 function frameTreeHtml(root, packed) {
@@ -3096,8 +3432,10 @@ function render() {
   bindHoverTrace();
   applyCanvas();
   refreshFocusClasses();
-  // Keep click under pointer before FLIP samples positions (avoids animate-then-snap).
-  if (clickAnchor && !overlayOpen) stabilizeClickAnchor();
+  // Keep click under pointer only during open morph — focus-only align must not
+  // pre-nudge (that read as the first snap before constellation).
+  if (clickAnchor && !overlayOpen && expanding) stabilizeClickAnchor();
+  else clickAnchor = null;
   drawEdges();
   playFlip(before);
   animateReflowEdges(overlayOpen ? 400 : expanding ? 1100 : alignOwned ? 400 : 920);
@@ -3772,6 +4110,7 @@ function bindFrameDrag(frame) {
     wires.style.opacity = '';
     if (drag.moved) {
       frame.dataset.dragged = String(Date.now());
+      clearSeatLock();
       if (!nested) {
         pinnedLayout.add(islandId);
         // User seat wins over focus-rearrange memory.
@@ -3823,7 +4162,7 @@ function bindFrameDrag(frame) {
       app.classList.remove('dragging');
       draggingTraceAnchorId = null;
       drag = null;
-      softSettleNeighbors(islandId, islandEl, { duration: 0 });
+      softSettleNeighbors(islandId, islandEl, { duration: 720 });
       scheduleDraw();
       renderMinimap();
       scheduleGravityDrift(1400);
@@ -3865,6 +4204,7 @@ function clearNestedSeatsFor(file) {
 function beginFocusAlignMotion({ animateOpen = true } = {}) {
   cancelTraceAlign();
   cancelSoftSettle();
+  clearSeatLock();
   // Only strip mid-flight FLIP when something is actually flipping.
   if (scene?.querySelector?.('.frame.flipping, .frame.size-morph')) stripFlipTransforms();
   alignMotionPending = true;
@@ -3873,8 +4213,8 @@ function beginFocusAlignMotion({ animateOpen = true } = {}) {
     app.classList.remove('layout-quiet');
     clearTimeout(quietLayoutMotion._t);
   } else {
+    // Re-focus: skip FLIP, but do NOT quiet CSS — that made the rearranger look dead.
     skipFlipOnce = true;
-    quietLayoutMotion(280);
   }
   scheduleGravityDrift(animateOpen ? 1300 : 700);
 }
@@ -3888,11 +4228,13 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   remember();
   if (event) captureClickAnchor(folder.id, event);
   const opening = expand && folder.id !== displayRoot()?.id && !expandedFolders.has(folder.id);
-  beginFocusAlignMotion({ animateOpen: opening || !!expand });
+  // Only morph when actually opening — re-focus must not FLIP then constellation.
+  beginFocusAlignMotion({ animateOpen: opening });
   if (opening) {
+    clearSeatLock();
     markExpandAnchor(folder.id);
     pinNestedSeatFromDom(folder.id);
-    pendingAlignAfterMorph = 120;
+    pendingAlignAfterMorph = 160;
   }
   activateFocus(folder);
   layoutAnchorFileId = folder.id;
@@ -3906,9 +4248,9 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    animateReflowEdges(opening ? 1100 : 900);
+    animateReflowEdges(opening ? 1100 : 700);
     pulseSelection();
-    if (!opening) scheduleTraceAlign(200);
+    if (!opening) scheduleTraceAlign(120);
   });
 }
 function focusFileFrame(file, { expand = true, event = null } = {}) {
@@ -3921,12 +4263,13 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
   remember();
   if (event) captureClickAnchor(file.id, event);
   const opening = expand && !expandedFiles.has(file.id);
-  beginFocusAlignMotion({ animateOpen: opening || !!expand });
+  beginFocusAlignMotion({ animateOpen: opening });
   if (opening) {
+    clearSeatLock();
     markExpandAnchor(file.id);
     pinNestedSeatFromDom(file.id);
     clearNestedSeatsFor(file);
-    pendingAlignAfterMorph = 120;
+    pendingAlignAfterMorph = 160;
   }
   activateFocus(file);
   layoutAnchorFileId = file.id;
@@ -3937,9 +4280,9 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    animateReflowEdges(opening ? 1100 : 900);
+    animateReflowEdges(opening ? 1100 : 700);
     pulseSelection();
-    if (!opening) scheduleTraceAlign(200);
+    if (!opening) scheduleTraceAlign(120);
   });
 }
 function highlightLine(text, language = '') {
@@ -4377,20 +4720,20 @@ function waitMs(ms) {
 }
 /** Final collapsed chrome size — same math render() will use after minimize. */
 function collapsedFrameSize(item) {
-  if (!item) return { w: 280, h: 74 };
+  if (!item) return { w: 360, h: 86 };
   if (item.kind === 'file') {
     const header = frameLabelMetrics(item.label, { kind: 'file' });
-    return { w: header.w, h: Math.max(74, header.h), headerH: header.h };
+    return { w: header.w, h: Math.max(78, header.h), headerH: header.h };
   }
   if (item.kind === 'folder') {
     const depth = Math.max(0, (item.depth || 1) - 1);
     const header = frameLabelMetrics(item.label, {
       kind: 'folder',
-      minW: depth ? 240 : FRAME_LABEL_CHROME.folder.minW
+      minW: depth ? 320 : FRAME_LABEL_CHROME.folder.minW
     });
-    return { w: header.w, h: Math.max(74, header.h), headerH: header.h };
+    return { w: header.w, h: Math.max(86, header.h), headerH: header.h };
   }
-  return { w: 280, h: 74, headerH: 74 };
+  return { w: 360, h: 86, headerH: 86 };
 }
 /**
  * Minimize morph — two phases so the title never gets flex-crushed.
@@ -4520,9 +4863,13 @@ function bindScene() {
     const opening = !expandedFolders.has(id);
     if (!opening) {
       const el = scene.querySelector(`[data-drag-id="${CSS.escape(id)}"]`);
+      collapseMotion = true;
+      lockCurrentIslandSeats();
       await morphCollapseFrame(el);
       markExpandAnchor(id);
-      pendingAlignAfterMorph = 80;
+      collapseMotion = true;
+      // No constellation / settle after minimize — that pulled small folders to the center.
+      pendingAlignAfterMorph = 0;
       toggleFolder(id);
       selectItem(id, { record: false });
       flowMode = true;
@@ -4539,6 +4886,7 @@ function bindScene() {
       return;
     }
     // Pin seat first so the parent grows around this folder instead of moving it.
+    clearSeatLock();
     pinNestedSeatFromDom(id);
     markExpandAnchor(id);
     pendingAlignAfterMorph = 120;
@@ -4564,9 +4912,12 @@ function bindScene() {
       remember();
       captureClickAnchor(file.id, event);
       const el = scene.querySelector(`[data-drag-id="${CSS.escape(file.id)}"]`);
+      collapseMotion = true;
+      lockCurrentIslandSeats();
       await morphCollapseFrame(el);
       markExpandAnchor(file.id);
-      pendingAlignAfterMorph = 80;
+      collapseMotion = true;
+      pendingAlignAfterMorph = 0;
       expandedFiles.delete(file.id);
       selectItem(file.id, { record: false });
       skipFlipOnce = false;
@@ -4617,16 +4968,29 @@ function bindScene() {
       if (!item) return;
       if (item.kind === 'file') return focusFileFrame(item, { expand: true, event });
       if (item.kind === 'folder') return focusFolderFrame(item, { expand: true, event });
-      beginFocusAlignMotion();
+      // Module / inline: open ancestors first, then one constellation (never align mid-FLIP).
+      const file = fileOf(item);
+      const openingFile = !!(file && !expandedFiles.has(file.id));
+      beginFocusAlignMotion({ animateOpen: openingFile });
+      if (openingFile) {
+        clearSeatLock();
+        markExpandAnchor(file.id);
+        pinNestedSeatFromDom(file.id);
+        clearNestedSeatsFor(file);
+        pendingAlignAfterMorph = 160;
+        expandedFiles.add(file.id);
+      }
       activateFocus(item);
       captureClickAnchor(item.id, event);
-      selectItem(item.id);
+      selectItem(item.id, { record: false });
+      flowMode = true;
+      rebuildTrace();
       render();
       updateInspector();
       requestAnimationFrame(() => {
-        animateReflowEdges(900);
+        animateReflowEdges(openingFile ? 1100 : 700);
         pulseSelection();
-        scheduleTraceAlign(200);
+        if (!openingFile) scheduleTraceAlign(120);
       });
     });
     row.addEventListener('dblclick', event => {
@@ -4742,7 +5106,8 @@ function selectItem(id, { record = true } = {}) {
   if (selectedId !== id) traceArranged.clear();
   selectedId = id; selectedImportEdgeId = undefined; rebuildTrace(); refreshFocusClasses(); drawEdges(); renderMinimap(); updateInspector(); writeDeepLink();
   // Park gravity only — constellation pack is one-shot via scheduleTraceAlign.
-  if (traceEdges.size && !app.classList.contains('dragging')) {
+  // Don't kick gravity early during focus align; that nudged islands before the flight.
+  if (traceEdges.size && !app.classList.contains('dragging') && !alignMotionPending && !stickyExpandId) {
     scheduleGravityDrift(180);
   }
 }
@@ -4901,6 +5266,8 @@ function resetPresentation() {
   layoutModes.clear();
   pinnedLayout.clear();
   traceArranged.clear();
+  seatLock = new Set();
+  collapseMotion = false;
   basePlacements.clear();
   layoutMemory.clear();
   basePlacementKey = '';
@@ -5710,7 +6077,7 @@ function initSearch() {
 }
 function applyGraph(next, { preserve = false } = {}) {
   const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
-  if (!preserve) { offsets.clear(); localOffsets.clear(); nestedSeats.clear(); userArranged.clear(); layoutModes.clear(); pinnedLayout.clear(); traceArranged.clear(); basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
+  if (!preserve) { offsets.clear(); localOffsets.clear(); nestedSeats.clear(); userArranged.clear(); layoutModes.clear(); pinnedLayout.clear(); traceArranged.clear(); seatLock = new Set(); collapseMotion = false; basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
   scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id;
   selectedId = preserve && node(previousSelected) ? previousSelected : rootFolder().id;
   layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;

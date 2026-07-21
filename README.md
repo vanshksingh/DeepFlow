@@ -26,6 +26,15 @@ GPT-5.6 Terra drove the core coding loop. Medium reasoning for architecture disc
 
 ---
 
+## Hosted Demo
+
+A live, interactive fixture version of DeepFlow is available here:
+**[Explore DeepFlow Live](https://deepflow-42li.onrender.com/#path=services&mode=signal)**
+
+*(Note: The demo is running on a free Render instance. If it hasn't been accessed recently, it may take up to 50 seconds to spin back up on your first visit. Please be patient!)*
+
+---
+
 ## Quick Start
 
 Paste this into any agent chat (Cursor, Claude, Codex, Antigravity, etc.) and it will install, start, and wire DeepFlow automatically.

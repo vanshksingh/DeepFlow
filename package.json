@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node server.js",
     "mcp": "node mcp-server.js",
-    "test": "node --test",
+    "test": "node --test test/",
     "bootstrap": "bash scripts/agent-bootstrap.sh"
   },
   "bin": {

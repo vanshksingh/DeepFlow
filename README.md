@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./public/favicon.png" width="100" height="100" alt="DeepFlow Logo" />
   <h1>DeepFlow</h1>
-  <p><strong>Local architecture signal map for agentic coding</strong></p>
+  <p><strong>Live architecture signal map for agentic coding</strong></p>
 </div>
 
 <br/>
@@ -10,30 +10,40 @@
 
 <br/>
 
-Tree-sitter parses JS/TS + Python on your machine. An MCP bridge lets any agent open a workspace, narrate the graph, jump to impact, and pulse the live viewer as it edits - with no cloud upload.
+Most code tools either show the human the architecture, or feed context to the agent. DeepFlow does both at the same time. Tree-sitter parses your JS/TS and Python files locally, and an MCP bridge lets any agent open a workspace, query the graph, and animate the viewer as it edits -- so you can actually watch your agent navigate the codebase in real time.
 
 > The agent doesn't just edit files. It shows the architecture moving.
 
 ---
 
+## Built with Codex and GPT-5.6
+
+DeepFlow was built during OpenAI Build Week using the $100 promotional API credits.
+
+The project started in Codex -- it was the main environment for ideating, prototyping fast, and trying out different ways to represent graph data visually. A lot of early decisions around the layout engine, animation system, and signal mode came from iterating quickly inside Codex sessions and seeing what actually looked and felt good. The Devpost plugin also helped keep the project scoped to what the hackathon was actually asking for.
+
+GPT-5.6 Terra drove the core coding loop. Medium reasoning for architecture discussions and tradeoffs, high for precise edits and tricky bugs, and goal mode for the bigger refactors where I wanted it to run farther without stopping.
+
+---
+
 ## Quick Start
 
-Paste into an agent chat (Cursor, Claude, Codex, Antigravity, etc.) - it will install, start, and wire DeepFlow automatically.
+Paste this into any agent chat (Cursor, Claude, Codex, Antigravity, etc.) and it will install, start, and wire DeepFlow automatically.
 
 ```text
 Setup DeepFlow (local codebase visualizer + MCP):
-1. Clone & Bootstrap:
+1. Clone and Bootstrap:
    git clone https://github.com/vanshksingh/DeepFlow.git && cd DeepFlow && bash scripts/agent-bootstrap.sh
    (Installs deps, starts viewer on http://127.0.0.1:4317, generates config in .deepflow.mcp.generated.json)
 2. Connect: Merge generated config into your IDE's MCP settings. Verify via `deepflow_status`.
 3. Usage in any repo:
    - Connect workspace: `deepflow_open_workspace {"root": "<ABS_PATH>"}`
    - Sync writes: `deepflow_after_edit {"paths": ["rel/path/to/edited"]}`
-   - Trace/Explain: `deepflow_jump_to`, `deepflow_impact`, or `deepflow_summary` for maps/signals.
-   - Keep `npm run dev` running in DeepFlow checkout.
+   - Trace/Explain: `deepflow_jump_to`, `deepflow_impact`, or `deepflow_summary`
+   - Keep `npm run dev` running in the DeepFlow checkout.
 ```
 
-**One-liner (already in the checkout):**
+**One-liner:**
 ```sh
 bash scripts/agent-bootstrap.sh
 ```
@@ -48,16 +58,16 @@ npm run dev          # viewer on http://localhost:4317
 
 ---
 
-## What you get
+## What it does
 
 | | |
 |--|--|
-| **Nested frames** | Figma-style encapsulation - folder frames wrap file frames wrap function frames |
-| **Trace focus** | Select or pin any node; unrelated rows dim; wires follow calls and imports |
-| **Live agent loop** | `deepflow_after_edit` refreshes diffs and animations without a page reload |
-| **Signal animations** | Particle bursts, fire embers, heart blooms, and typewriter line effects on every edit |
+| **Live agent loop** | `deepflow_after_edit` refreshes the graph and triggers animations the moment an agent writes a file |
+| **Nested frames** | Folder frames wrap file frames wrap function frames, like Figma for your codebase |
+| **Trace focus** | Pin any node; unrelated rows dim and wires follow calls and imports |
+| **Signal animations** | Particle bursts, fire embers, heart blooms, and typewriter effects on every edit |
 
-**Keyboard:** `⌘K` / `Ctrl+K` search - double-click a function for source - `Esc` collapses - drag to pan - scroll to zoom.
+**Keyboard:** `Cmd+K` / `Ctrl+K` to search, double-click a function to open source, `Esc` to collapse, drag to pan, scroll to zoom.
 
 **Deep link:** `#path=apps/gateway/src/routes.ts&module=startIngest&mode=signal`
 
@@ -65,12 +75,12 @@ npm run dev          # viewer on http://localhost:4317
 
 ## MCP Tools
 
-The viewer (`npm run dev`) must be running for tools that animate the UI. Analysis tools still work headless and print JSON.
+The viewer (`npm run dev`) needs to be running for tools that animate the UI. Analysis tools work headless too and return JSON.
 
 | Tool | What it does |
 |------|-------------|
-| `deepflow_status` | Health check - viewer, root, connected browsers |
-| `deepflow_open_workspace` | Connect a repo + start FS watcher (**always call first**) |
+| `deepflow_status` | Health check -- viewer, root, connected browsers |
+| `deepflow_open_workspace` | Connect a repo and start the FS watcher (call this first) |
 | `deepflow_summary` | Compact brief: languages, entrypoints, orphans, hot files |
 | `deepflow_find` | Search files and modules by substring |
 | `deepflow_explain` | One node: region, modules, typed edges with evidence |
@@ -79,9 +89,9 @@ The viewer (`npm run dev`) must be running for tools that animate the UI. Analys
 | `deepflow_entrypoints` | Detected entry files |
 | `deepflow_orphans` | Unreferenced code, highlighted in viewer |
 | `deepflow_diagnostics` | Unresolved imports, parse issues, TODOs |
-| `deepflow_after_edit` | Refresh map + trigger edit animation after a write |
-| `deepflow_jump_to` | Focus a file or module; enter signal path; pulse |
-| `deepflow_open_flow` | Code-flow overlay: upstream - focus - downstream + snippets |
+| `deepflow_after_edit` | Refresh map and trigger edit animation after a write |
+| `deepflow_jump_to` | Focus a file or module, enter signal path, pulse |
+| `deepflow_open_flow` | Code-flow overlay: upstream, focus, downstream + snippets |
 | `deepflow_explain_flow` | Structured flow story for agents, optionally opens overlay |
 | `deepflow_close_flow` | Close the code-flow overlay |
 | `deepflow_highlight_paths` | Multi-select highlight and pin |
@@ -114,10 +124,10 @@ deepflow_impact { root, path }
 
 | Path | Use |
 |------|-----|
-| `fixtures/atlas-workspace` | Messy TS monorepo - default boot target and full demo |
+| `fixtures/atlas-workspace` | Messy TS monorepo -- default boot target and full demo |
 | `fixtures/python-mini` | Tiny Python import and call graph |
 
-Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP edges are not inferred; each language's own imports and calls are.
+Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP edges are not inferred; each language's own imports and calls are tracked separately.
 
 ---
 
@@ -135,15 +145,15 @@ Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP e
 ## Requirements
 
 - Node.js **18+** (20+ recommended)
-- A native build toolchain only if `tree-sitter` needs to compile on your platform - standard `npm install` is enough on macOS and Linux
+- A native build toolchain only if `tree-sitter` needs to compile on your platform -- standard `npm install` is enough on macOS and Linux
 - A browser open to the viewer for live animations
-- Git (optional - enables diff badges on file nodes)
+- Git (optional, enables diff badges on file nodes)
 
 ---
 
 ## Privacy
 
-Everything runs locally. The browser folder picker builds a static snapshot on your machine. Live watching, Git integration, and agent sync all go through MCP `deepflow_open_workspace` pointing at your disk. No source code or graph data is ever uploaded.
+Everything runs locally. No source code or graph data is ever uploaded. The browser folder picker builds a static snapshot on your machine. Live watching, Git integration, and agent sync all go through MCP `deepflow_open_workspace` pointing at your disk.
 
 ```
 server.js                 HTTP viewer + SSE + track API

@@ -18,9 +18,33 @@ Most code tools either show the human the architecture, or feed context to the a
 
 DeepFlow was built during OpenAI Build Week using the $100 promotional API credits.
 
-The project started in Codex -- it was the main environment for ideating, prototyping fast, and trying out different ways to represent graph data visually. A lot of early decisions around the layout engine, animation system, and signal mode came from iterating quickly inside Codex sessions and seeing what actually looked and felt good. The Devpost plugin also helped keep the project scoped to what the hackathon was actually asking for.
+### Where Codex accelerated the workflow
 
-GPT-5.6 Terra drove the core coding loop. Medium reasoning for architecture discussions and tradeoffs, high for precise edits and tricky bugs, and goal mode for the bigger refactors where I wanted it to run farther without stopping.
+**Ideation → prototype in a single session.** Codex was the main environment from day one. Rather than sketching ideas in a doc and then coding, I described the concept — "a graph where the agent's edits animate the architecture in real time" — and Codex produced a working physics layout with SSE streaming within the same session. That collapsed what would normally be a multi-day spike into an afternoon.
+
+**Visual iteration on the layout engine.** The force-directed layout, signal-mode particle bursts, and nested folder frames all went through many visual iterations. Because Codex keeps code context live, I could say "the nodes drift too far apart on dense graphs" and get a targeted tweak to the alpha decay and repulsion constants rather than describing a whole file. The animation system (`public/app.js`) went through roughly 15 rounds of this kind of tight loop.
+
+**Scoping with the Devpost plugin.** The Devpost plugin inside Codex helped anchor the work to what the hackathon was actually asking for. When I started drifting toward a full IDE plugin, the plugin flagged the scope and I re-focused on the MCP bridge as the agent-integration surface — which turned out to be the right call.
+
+**Concrete decisions driven by Codex sessions:**
+- Chose Tree-sitter (over Babel / AST-grep) for language-agnostic parsing after Codex produced a side-by-side benchmark inside the same chat
+- Chose SSE over WebSockets for the change stream after Codex explained the reconnect semantics difference on ephemeral cloud hosts like Render
+- Settled on a hash-based deep-link scheme (`#path=...&module=...&mode=...`) so the viewer URL is shareable without a backend session — Codex proposed and implemented it in one pass
+
+### How GPT-5.6 Terra was used
+
+GPT-5.6 drove the sustained coding loop across the full build:
+
+| Mode | Where it was applied |
+|------|----------------------|
+| **Medium reasoning** | Architecture discussions: MCP stdio protocol design, Tree-sitter grammar selection, edge type taxonomy (calls / imports / dataflow / events) |
+| **High reasoning** | Precise multi-file edits: AST extraction in `src/repository-graph.js`, path sandbox hardening in `mcp-server.js`, minimap viewport sync, constellation layout |
+| **Goal mode** | Large refactors without stopping: the full rework of focus-rearrange physics (15 commits), the MCP audit hardening pass (P0–P2 issues in a single goal run) |
+
+**Key technical decisions made with GPT-5.6:**
+- **Graph schema** — GPT-5.6 proposed the `{ nodes, edges, roots, diagnostics }` wire format after reviewing what an agent actually needs to answer "what does this file touch?" That format is now the contract between `repository-graph.js`, `graph-insights.js`, and the MCP tools.
+- **MCP sandbox** — When GPT-5.6 ran the P0 audit, it found that path traversal was possible through unsanitized `root` arguments. It rewrote the sandbox checks in `mcp-server.js` and added tests in the same pass.
+- **Constellation layout** — The "focus pull" that brings traced nodes into a readable frame while leaving unrelated islands still was designed collaboratively: I described the desired behaviour, GPT-5.6 proposed the physics approach (one-shot bake + linger shadow), and iterated on it across several high-reasoning passes until the landing was stable.
 
 ---
 

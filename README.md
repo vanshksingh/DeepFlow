@@ -2,6 +2,14 @@
   <img src="./public/favicon.png" width="100" height="100" alt="DeepFlow Logo" />
   <h1>DeepFlow</h1>
   <p><strong>Live architecture signal map for agentic coding</strong></p>
+  <p>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
+    <img src="https://img.shields.io/badge/node-18%2B-brightgreen.svg" alt="Node 18+" />
+    <img src="https://img.shields.io/badge/tests-13%20passing-brightgreen.svg" alt="13 tests passing" />
+    <a href="https://deepflow-42li.onrender.com/#path=services&mode=signal"><img src="https://img.shields.io/badge/demo-live-orange.svg" alt="Live Demo" /></a>
+    <img src="https://img.shields.io/badge/MCP-25%20tools-blueviolet.svg" alt="25 MCP tools" />
+    <img src="https://img.shields.io/badge/built%20with-Codex%20%2B%20GPT--5.6-black.svg" alt="Built with Codex + GPT-5.6" />
+  </p>
 </div>
 
 <img width="1587" height="1049" alt="DeepFlow - interactive architecture signal map" src="https://github.com/user-attachments/assets/82dfc7fb-505d-4bf6-a7b9-329aa038f927" />

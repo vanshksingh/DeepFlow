@@ -1075,18 +1075,16 @@ function cancelSoftSettle() {
   softSettleToken += 1;
 }
 /**
- * Ease residual overlaps among constellation seats only (keep `anchorId` fixed).
- * Never shuffles unrelated islands — that read as random snapping on focus.
+ * Clear real overlaps only (keep focus + pinned fixed).
+ * Stacked folders always unstack; islands that aren't overlapping stay put.
  */
-function softHealIslandGaps(anchorId, { duration = 520, packIds = null } = {}) {
+function softHealIslandGaps(anchorId, { duration = 560 } = {}) {
   if (!anchorId || !scene) return Promise.resolve();
-  const allow = packIds instanceof Set && packIds.size ? packIds : null;
+  const hard = new Set([anchorId, ...pinnedLayout]);
   const boxes = [];
   for (const el of topLevelIslandElements()) {
     const id = el.dataset.dragId;
     if (!id) continue;
-    if (allow && !allow.has(id)) continue;
-    if (pinnedLayout.has(id) && id !== anchorId) continue;
     const shelf = islandShelfBox(el, id);
     boxes.push({
       id,
@@ -1101,10 +1099,10 @@ function softHealIslandGaps(anchorId, { duration = 520, packIds = null } = {}) {
     });
   }
   if (boxes.length < 2) return Promise.resolve();
-  separateBoxes(boxes, { gap: ISLAND_GAP, passes: 48, anchors: new Set([anchorId]), pad: 0 });
+  separateBoxes(boxes, { gap: ISLAND_GAP, passes: 56, anchors: hard, pad: 0 });
   const movers = [];
   for (const box of boxes) {
-    if (box.id === anchorId) continue;
+    if (hard.has(box.id)) continue;
     const to = { x: box.x - box.left, y: box.y - box.top };
     if (Math.abs(to.x - box.from.x) < 1 && Math.abs(to.y - box.from.y) < 1) continue;
     movers.push({ id: box.id, el: box.el, from: box.from, to });
@@ -2340,12 +2338,11 @@ function runTraceAlign(token) {
   if (scene?.querySelector?.('.frame.flipping, .frame.size-morph')) stripFlipTransforms();
   clearTimeout(gravityTimer);
   clearSeatLock();
-  const { movers, stickIds, focusTopId, packSeats, packIds, bystanderMoves } = computeConstellationMovers();
+  const { movers, stickIds, focusTopId, packSeats, bystanderMoves } = computeConstellationMovers();
   const focusIsland = focusTopId
     ? scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(focusTopId)}"]`)
     : null;
   const protectIds = new Set([focusTopId, ...(stickIds || []), ...(movers || []).map(m => m.id)].filter(Boolean));
-  const packIdSet = packIds instanceof Set ? packIds : new Set((packSeats || []).map(p => p.id));
   const clearerIds = new Set((bystanderMoves || []).map(m => m.id));
   // Landing seats only — not pinned islands as extra walls that shove neighbors.
   const walls = [...(packSeats || [])];
@@ -2386,7 +2383,7 @@ function runTraceAlign(token) {
     if (focusTopId) traceArranged.add(focusTopId);
     settleClear(820).then(() => {
       bakeClearers();
-      softHealIslandGaps(focusTopId, { duration: 420, packIds: packIdSet }).then(() => {
+      softHealIslandGaps(focusTopId, { duration: 560 }).then(() => {
         scheduleGravityDrift(400);
       });
     });
@@ -2459,8 +2456,8 @@ function runTraceAlign(token) {
     traceAlignRaf = 0;
     blockersDone.then(() => {
       bakeClearers();
-      // Heal residual overlaps among traced seats only — never unrelated islands.
-      softHealIslandGaps(focusTopId, { duration: 420, packIds: packIdSet }).then(() => {
+      // Unstack anything still overlapping — only islands that overlapped move.
+      softHealIslandGaps(focusTopId, { duration: 560 }).then(() => {
         scheduleDraw();
         renderMinimap();
         scheduleGravityDrift(400);
@@ -3153,10 +3150,13 @@ function buildFloatLayout(root) {
     // Do not relaxTopLevel during expand — clustering pulls neighbors back into the grow.
   } else if (!alignMotionPending) {
     const locked = lockedFocusIslandId();
+    // Hard anchors: focus + user pins only.
+    // Never freeze every constellation seat — that left arranged folders stacked.
+    // separateBoxes only moves islands that actually overlap, so unrelated
+    // non-overlapping islands stay put (no speculative reshuffle).
     const topAnchors = new Set();
     if (locked) topAnchors.add(locked);
     for (const id of pinnedLayout) topAnchors.add(id);
-    // Idle reflow: separate in visual space, then write shelf by subtracting offsets.
     for (const entry of packed.items) {
       const off = offsets.get(entry.id) || { x: 0, y: 0 };
       entry.x += off.x;
@@ -3164,18 +3164,10 @@ function buildFloatLayout(root) {
       entry._ox = off.x;
       entry._oy = off.y;
     }
-    if (traceArranged.size) {
-      // After focus pull: freeze constellation seats. Only islands that sit on
-      // a reserved seat yield — never reshuffle the rest of the map.
-      for (const id of traceArranged) topAnchors.add(id);
-      const walls = packed.items.filter(item => topAnchors.has(item.id));
-      const free = packed.items.filter(item => !topAnchors.has(item.id));
-      yieldBoxesFromWalls(free, walls, { gap: ISLAND_GAP, passes: 36, pad: 0 });
-    } else {
-      separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 48, anchors: topAnchors.size ? topAnchors : null, pad: 0 });
-      // Post-minimize seatLock: heal overlaps only — never cluster toward center.
-      if (!seatLock.size) relaxTopLevel(packed.items, ISLAND_GAP);
-    }
+    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 56, anchors: topAnchors.size ? topAnchors : null, pad: 0 });
+    // Skip edge-clustering while a constellation is live — that tugged non-trace
+    // neighbors. Overlap clear above already unstacks anything sitting on top.
+    if (!seatLock.size && !traceArranged.size) relaxTopLevel(packed.items, ISLAND_GAP);
     for (const entry of packed.items) {
       entry.x -= entry._ox || 0;
       entry.y -= entry._oy || 0;

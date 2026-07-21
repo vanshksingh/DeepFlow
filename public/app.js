@@ -6215,7 +6215,7 @@ function handleViewerCommand(command = {}) {
     const file = fileByPath(command.path);
     const el = file ? scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`) : null;
     if (el) {
-      el.classList.remove('file-pop-in', 'file-pop-out');
+      el.classList.remove('file-pop-in', 'file-pop-out', 'file-shredding');
       void el.offsetWidth;
       el.classList.add('file-pop-in');
       setTimeout(() => el.classList.remove('file-pop-in'), 1400);
@@ -6413,19 +6413,79 @@ function initSearch() {
 }
 function playFilePopOut(el) {
   if (!el) return Promise.resolve();
-  if (document.body.classList.contains('reduce-motion')) {
-    el.classList.add('file-pop-out');
-    return new Promise(resolve => setTimeout(resolve, 320));
+  const reduce = document.body.classList.contains('reduce-motion');
+  el.classList.remove('file-pop-in', 'file-pop-out', 'file-shredding');
+  if (reduce) {
+    el.classList.add('file-shredding');
+    return new Promise(resolve => setTimeout(resolve, 280));
   }
-  el.classList.remove('file-pop-in', 'file-pop-out');
-  void el.offsetWidth;
-  el.classList.add('file-pop-out');
-  spawnParticleBurst(el, 'sparks');
-  return new Promise(resolve => setTimeout(resolve, 760));
+  const boardRect = board.getBoundingClientRect();
+  const rect = el.getBoundingClientRect();
+  const w = Math.max(24, rect.width);
+  const h = Math.max(24, rect.height);
+  const cols = Math.max(3, Math.min(6, Math.round(w / 46)));
+  const rows = Math.max(3, Math.min(5, Math.round(h / 38)));
+  const tw = w / cols;
+  const th = h / rows;
+  const layer = document.createElement('div');
+  layer.className = 'file-shred-layer';
+  layer.setAttribute('aria-hidden', 'true');
+  Object.assign(layer.style, {
+    left: `${rect.left - boardRect.left + board.scrollLeft}px`,
+    top: `${rect.top - boardRect.top + board.scrollTop}px`,
+    width: `${w}px`,
+    height: `${h}px`
+  });
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const shard = document.createElement('div');
+      shard.className = 'file-shred-shard';
+      Object.assign(shard.style, {
+        left: `${c * tw}px`,
+        top: `${r * th}px`,
+        width: `${tw + 0.6}px`,
+        height: `${th + 0.6}px`
+      });
+      const clone = el.cloneNode(true);
+      clone.classList.remove('file-pop-in', 'file-pop-out', 'file-shredding', 'edit-anim-burst', 'agent-editing', 'pulse-hit');
+      clone.removeAttribute('data-drag-id');
+      Object.assign(clone.style, {
+        position: 'absolute',
+        left: `${-c * tw}px`,
+        top: `${-r * th}px`,
+        width: `${w}px`,
+        height: `${h}px`,
+        margin: '0',
+        transform: 'none',
+        animation: 'none',
+        pointerEvents: 'none'
+      });
+      const nx = (c + 0.5) / cols - 0.5;
+      const ny = (r + 0.5) / rows - 0.5;
+      const dist = 52 + Math.random() * 96;
+      const sx = nx * dist * 2.6 + (Math.random() - 0.5) * 36;
+      const sy = ny * dist * 2.4 + 28 + Math.random() * 64;
+      shard.style.setProperty('--sx', `${sx.toFixed(1)}px`);
+      shard.style.setProperty('--sy', `${sy.toFixed(1)}px`);
+      shard.style.setProperty('--rot', `${((Math.random() - 0.5) * 160).toFixed(1)}deg`);
+      shard.style.setProperty('--sc', `${(0.55 + Math.random() * 0.35).toFixed(2)}`);
+      shard.style.setProperty('--delay', `${(r * cols + c) * 14 + Math.random() * 55}ms`);
+      shard.appendChild(clone);
+      layer.appendChild(shard);
+    }
+  }
+  board.appendChild(layer);
+  el.classList.add('file-shredding');
+  return new Promise(resolve => {
+    setTimeout(() => {
+      layer.remove();
+      resolve();
+    }, 980);
+  });
 }
 function playFilePopIn(el) {
   if (!el) return;
-  el.classList.remove('file-pop-in', 'file-pop-out');
+  el.classList.remove('file-pop-in', 'file-pop-out', 'file-shredding');
   void el.offsetWidth;
   el.classList.add('file-pop-in');
   setTimeout(() => el.classList.remove('file-pop-in'), 1400);

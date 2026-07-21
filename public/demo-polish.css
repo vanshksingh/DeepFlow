@@ -1672,31 +1672,57 @@ body[data-theme]:not([data-theme="solarized"]) .inline-import .import-kind {
   60% { opacity: 1; filter: blur(0); }
   100% { transform: scale(1); }
 }
-.frame-file.file-pop-out {
-  animation: file-pop-out .72s cubic-bezier(.4, 0, .6, 1) both;
-  pointer-events: none;
-  z-index: 8;
+/* Fixed delete shred (Vista-style) — not tied to edit-anim settings. */
+.frame-file.file-shredding {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
 }
-@keyframes file-pop-out {
-  0% { opacity: 1; transform: scale(1); filter: none; }
-  35% {
+.file-shred-layer {
+  position: absolute;
+  z-index: 42;
+  overflow: visible;
+  pointer-events: none;
+}
+.file-shred-shard {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 2px;
+  box-shadow: 0 1px 0 color-mix(in srgb, #fff 18%, transparent);
+  transform-origin: center center;
+  will-change: transform, opacity;
+  animation: file-shred-fly .88s cubic-bezier(.18, .72, .22, 1) forwards;
+  animation-delay: var(--delay, 0ms);
+  backface-visibility: hidden;
+}
+.file-shred-shard > .frame-file,
+.file-shred-shard > .frame {
+  margin: 0 !important;
+  transform: none !important;
+  animation: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+}
+@keyframes file-shred-fly {
+  0% {
     opacity: 1;
-    transform: scale(1.03);
-    box-shadow: 0 0 0 3px color-mix(in srgb, #c0392b 28%, transparent),
-      0 12px 28px color-mix(in srgb, #c0392b 18%, transparent);
-    filter: saturate(1.1);
+    transform: translate(0, 0) rotate(0deg) scale(1);
+    filter: brightness(1.05);
+  }
+  18% {
+    opacity: 1;
+    filter: brightness(1.15) saturate(1.1);
   }
   100% {
     opacity: 0;
-    transform: scale(.78) translateY(10px);
-    filter: blur(3px) grayscale(.35);
-    box-shadow: 0 0 0 0 transparent;
+    transform: translate(var(--sx), var(--sy)) rotate(var(--rot)) scale(var(--sc, .82));
+    filter: brightness(1.2) blur(1.2px);
   }
 }
-body.reduce-motion .frame-file.file-pop-out {
-  animation: file-pop-out-reduced .35s ease both;
+body.reduce-motion .file-shred-shard {
+  animation: file-shred-fly-reduced .28s ease forwards;
 }
-@keyframes file-pop-out-reduced {
+@keyframes file-shred-fly-reduced {
   to { opacity: 0; }
 }
 

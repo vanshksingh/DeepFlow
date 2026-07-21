@@ -360,13 +360,6 @@ async function call(name, args = {}) {
   if (name === 'deepflow_clear_highlights') return viewerRequest(viewer, '/api/mcp-command', { type: 'clear-highlights' });
   if (name === 'deepflow_set_mode') return viewerRequest(viewer, '/api/mcp-command', { type: 'set-mode', mode: args.mode });
   if (name === 'deepflow_set_edges') return viewerRequest(viewer, '/api/mcp-command', { type: 'set-edges', edges: args.edges || {} });
-  if (name === 'deepflow_tour' || name === 'deepflow_demo') {
-    return {
-      deprecated: true,
-      removed: true,
-      message: 'deepflow_tour and deepflow_demo were removed. Use deepflow_jump_to, deepflow_open_flow, deepflow_explain_flow, and deepflow_after_edit instead.'
-    };
-  }
   if (name === 'deepflow_open_flow') {
     await viewerRequest(viewer, '/api/track', { root });
     const ref = args.module ? `${safePath(root, args.path)}::${args.module}` : safePathRef(root, args.path);

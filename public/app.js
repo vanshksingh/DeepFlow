@@ -1075,15 +1075,17 @@ function cancelSoftSettle() {
   softSettleToken += 1;
 }
 /**
- * Ease any still-overlapping top-level islands apart (keep `anchorId` fixed).
- * Used after focus flight so nothing stays buried under another folder.
+ * Ease residual overlaps among constellation seats only (keep `anchorId` fixed).
+ * Never shuffles unrelated islands — that read as random snapping on focus.
  */
-function softHealIslandGaps(anchorId, { duration = 520 } = {}) {
+function softHealIslandGaps(anchorId, { duration = 520, packIds = null } = {}) {
   if (!anchorId || !scene) return Promise.resolve();
+  const allow = packIds instanceof Set && packIds.size ? packIds : null;
   const boxes = [];
   for (const el of topLevelIslandElements()) {
     const id = el.dataset.dragId;
     if (!id) continue;
+    if (allow && !allow.has(id)) continue;
     if (pinnedLayout.has(id) && id !== anchorId) continue;
     const shelf = islandShelfBox(el, id);
     boxes.push({
@@ -1177,7 +1179,9 @@ function softSettleNeighbors(islandId, islandEl, {
   duration = 780,
   protectIds = null,
   againstBoxes = null,
-  plannedMoves = null
+  plannedMoves = null,
+  /** When true (focus constellation): only move islands that block a landing seat. */
+  blockersOnly = false
 } = {}) {
   if (!islandEl) return Promise.resolve();
   const token = ++softSettleToken;
@@ -1189,17 +1193,40 @@ function softSettleNeighbors(islandId, islandEl, {
   const protectedIds = new Set(protectIds || []);
   protectedIds.add(islandId);
   const planned = new Map((plannedMoves || []).map(m => [m.id, m]));
+  const shelfOverlap = (a, b, gap) => {
+    const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return ox > -gap && oy > -gap;
+  };
   const movers = [];
   for (const other of topLevelIslandElements()) {
     const otherId = other.dataset.dragId;
     if (!otherId || protectedIds.has(otherId)) continue;
-    // Focused parent stays put — blockers yield. Prior constellation seats
-    // that are NOT in this pull must still move aside so landings stay clear.
+    // Focused parent stays put — blockers yield.
     if (isLockedFocusIsland(otherId)) continue;
     if (pinnedLayout.has(otherId)) continue;
-    // seatLock must not block overlap clear — remapper / settle owns these seats.
     const cur = offsets.get(otherId) || { x: 0, y: 0 };
     const preset = planned.get(otherId);
+    if (blockersOnly) {
+      // Unrelated islands stay put unless they sit on a reserved landing seat
+      // (or were explicitly planned as clearers).
+      if (!preset && againstBoxes?.length) {
+        const place = floatPlacements.get(otherId);
+        const left = parseFloat(other.style.left) || 0;
+        const top = parseFloat(other.style.top) || 0;
+        const w = place?.w || parseFloat(other.style.width) || other.offsetWidth || 220;
+        const h = place?.h || parseFloat(other.style.height) || other.offsetHeight || 54;
+        const box = {
+          x: (place?.x ?? left) + cur.x,
+          y: (place?.y ?? top) + cur.y,
+          w, h
+        };
+        const blocks = againstBoxes.some(wall => shelfOverlap(box, wall, ISLAND_GAP));
+        if (!blocks) continue;
+      } else if (!preset && !againstBoxes?.length) {
+        continue;
+      }
+    }
     movers.push({
       id: otherId,
       el: other,
@@ -1223,8 +1250,11 @@ function softSettleNeighbors(islandId, islandEl, {
   };
   const resolveTargets = () => {
     const anchors = [];
-    const mine = islandSettleRect(islandId, islandEl);
-    anchors.push(mine);
+    // Focus drop settle uses the live focus rect. Constellation blockers-only
+    // settles against reserved landing seats only — not "everything near focus".
+    if (!blockersOnly || !againstBoxes?.length) {
+      anchors.push(islandSettleRect(islandId, islandEl));
+    }
     if (againstBoxes?.length) {
       for (const box of againstBoxes) anchors.push(shelfRect(box));
     }
@@ -2215,14 +2245,21 @@ function computeConstellationMovers() {
   const packSeats = [...world.entries()].map(([id, box]) => ({ id, ...box }));
   const packIdsFinal = new Set(packSeats.map(s => s.id));
 
-  // 2) Plan bystander seats so landing zones are vacant before flight.
-  //    Anything already on a pack seat yields aside (with gap) — never stays buried.
+  // 2) Only bystanders that actually sit on a reserved landing seat yield.
+  //    Far/unrelated islands stay completely still — no cascade nudges.
+  const shelfHits = (a, b, gap) => {
+    const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return ox > -gap && oy > -gap;
+  };
   const bystanderBoxes = [];
   for (const el of topLevelIslandElements()) {
     const id = el.dataset.dragId;
     if (!id || packIdsFinal.has(id)) continue;
     if (pinnedLayout.has(id)) continue;
     const box = islandShelfBox(el, id);
+    const blocksLanding = packSeats.some(seat => shelfHits(box, seat, ISLAND_GAP));
+    if (!blocksLanding) continue;
     bystanderBoxes.push({
       id,
       el: box.el,
@@ -2303,18 +2340,15 @@ function runTraceAlign(token) {
   if (scene?.querySelector?.('.frame.flipping, .frame.size-morph')) stripFlipTransforms();
   clearTimeout(gravityTimer);
   clearSeatLock();
-  const { movers, stickIds, focusTopId, packSeats, bystanderMoves } = computeConstellationMovers();
+  const { movers, stickIds, focusTopId, packSeats, packIds, bystanderMoves } = computeConstellationMovers();
   const focusIsland = focusTopId
     ? scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(focusTopId)}"]`)
     : null;
   const protectIds = new Set([focusTopId, ...(stickIds || []), ...(movers || []).map(m => m.id)].filter(Boolean));
+  const packIdSet = packIds instanceof Set ? packIds : new Set((packSeats || []).map(p => p.id));
+  const clearerIds = new Set((bystanderMoves || []).map(m => m.id));
+  // Landing seats only — not pinned islands as extra walls that shove neighbors.
   const walls = [...(packSeats || [])];
-  // Pinned islands are hard walls too.
-  for (const el of topLevelIslandElements()) {
-    const id = el.dataset.dragId;
-    if (!id || (packSeats || []).some(p => p.id === id)) continue;
-    if (pinnedLayout.has(id)) walls.push(islandShelfBox(el, id));
-  }
 
   const settleClear = (ms) => {
     if (!focusIsland || !focusTopId) return Promise.resolve();
@@ -2322,8 +2356,16 @@ function runTraceAlign(token) {
       duration: ms,
       protectIds,
       againstBoxes: walls.length ? walls : null,
-      plannedMoves: bystanderMoves || null
+      plannedMoves: bystanderMoves || null,
+      blockersOnly: true
     });
+  };
+
+  const bakeClearers = () => {
+    for (const id of clearerIds) {
+      const el = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(id)}"]`);
+      if (el) bakeIslandOffset(id, el);
+    }
   };
 
   const bakeFlight = () => {
@@ -2343,12 +2385,8 @@ function runTraceAlign(token) {
     for (const id of stickIds || []) traceArranged.add(id);
     if (focusTopId) traceArranged.add(focusTopId);
     settleClear(820).then(() => {
-      // Bake any settle translates so idle pack cannot re-stack folders.
-      for (const el of topLevelIslandElements()) {
-        const id = el.dataset.dragId;
-        if (id && !protectIds.has(id)) bakeIslandOffset(id, el);
-      }
-      softHealIslandGaps(focusTopId, { duration: 520 }).then(() => {
+      bakeClearers();
+      softHealIslandGaps(focusTopId, { duration: 420, packIds: packIdSet }).then(() => {
         scheduleGravityDrift(400);
       });
     });
@@ -2420,12 +2458,9 @@ function runTraceAlign(token) {
     scene.classList.remove('trace-aligning');
     traceAlignRaf = 0;
     blockersDone.then(() => {
-      for (const el of topLevelIslandElements()) {
-        const id = el.dataset.dragId;
-        if (id && !protectIds.has(id)) bakeIslandOffset(id, el);
-      }
-      // Final gap heal — anything still stacked eases apart (focus stays).
-      softHealIslandGaps(focusTopId, { duration: 520 }).then(() => {
+      bakeClearers();
+      // Heal residual overlaps among traced seats only — never unrelated islands.
+      softHealIslandGaps(focusTopId, { duration: 420, packIds: packIdSet }).then(() => {
         scheduleDraw();
         renderMinimap();
         scheduleGravityDrift(400);
@@ -3118,12 +3153,9 @@ function buildFloatLayout(root) {
     // Do not relaxTopLevel during expand — clustering pulls neighbors back into the grow.
   } else if (!alignMotionPending) {
     const locked = lockedFocusIslandId();
-    // Hard anchors only — never freeze every constellation seat. That left
-    // overlapping focus-arranged folders permanently stacked.
     const topAnchors = new Set();
     if (locked) topAnchors.add(locked);
     for (const id of pinnedLayout) topAnchors.add(id);
-    // seatLock only gates clustering — never freeze all islands as anchors.
     // Idle reflow: separate in visual space, then write shelf by subtracting offsets.
     for (const entry of packed.items) {
       const off = offsets.get(entry.id) || { x: 0, y: 0 };
@@ -3132,9 +3164,18 @@ function buildFloatLayout(root) {
       entry._ox = off.x;
       entry._oy = off.y;
     }
-    separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 48, anchors: topAnchors.size ? topAnchors : null, pad: 0 });
-    // Post-minimize seatLock: heal overlaps only — never cluster toward center.
-    if (!seatLock.size) relaxTopLevel(packed.items, ISLAND_GAP);
+    if (traceArranged.size) {
+      // After focus pull: freeze constellation seats. Only islands that sit on
+      // a reserved seat yield — never reshuffle the rest of the map.
+      for (const id of traceArranged) topAnchors.add(id);
+      const walls = packed.items.filter(item => topAnchors.has(item.id));
+      const free = packed.items.filter(item => !topAnchors.has(item.id));
+      yieldBoxesFromWalls(free, walls, { gap: ISLAND_GAP, passes: 36, pad: 0 });
+    } else {
+      separateBoxes(packed.items, { gap: ISLAND_GAP, passes: 48, anchors: topAnchors.size ? topAnchors : null, pad: 0 });
+      // Post-minimize seatLock: heal overlaps only — never cluster toward center.
+      if (!seatLock.size) relaxTopLevel(packed.items, ISLAND_GAP);
+    }
     for (const entry of packed.items) {
       entry.x -= entry._ox || 0;
       entry.y -= entry._oy || 0;
@@ -3167,6 +3208,9 @@ function relaxTopLevel(items, pad) {
   for (let pass = 0; pass < passes; pass++) {
     for (const edge of edgeTypes()) {
       if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
+      // With a committed focus, only pull along the live trace — never tug
+      // unrelated graph neighbors (that snapped non-trace islands on focus).
+      if (hasCommittedTraceFocus() && traceEdges.size && !traceEdges.has(edge.id)) continue;
       const aFile = fileOf(node(edge.from));
       const bFile = fileOf(node(edge.to));
       if (!aFile || !bFile) continue;

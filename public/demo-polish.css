@@ -2873,24 +2873,36 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
 }
 .flow-code-wrap {
   position: relative;
+  z-index: 1;
   margin: 0;
+  max-height: min(320px, 38vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  border: 1px solid color-mix(in srgb, var(--line) 40%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper, var(--panel)) 88%, transparent);
+  -webkit-overflow-scrolling: touch;
+}
+.flow-card.here .flow-code-wrap {
+  max-height: min(480px, 54vh);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--green) 55%, transparent);
 }
 .flow-card pre,
 .flow-card .flow-code {
   margin: 0;
-  max-height: min(240px, 30vh);
-  overflow: auto;
-  overscroll-behavior: contain;
+  max-height: none;
+  overflow: visible;
   padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--line) 40%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--paper, var(--panel)) 88%, transparent);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font: 500 11.5px/1.5 IBM Plex Mono, ui-monospace, monospace;
   cursor: text;
 }
 .flow-card.here .flow-code {
-  max-height: min(380px, 46vh);
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--green) 55%, transparent);
+  max-height: none;
+  box-shadow: none;
 }
 .flow-module-rail {
   display: flex;
@@ -2931,38 +2943,27 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
   white-space: pre-wrap;
 }
 .flow-line.hit {
-  background: color-mix(in srgb, var(--green) 10%, transparent);
-  box-shadow: inset 2px 0 var(--green);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--green) 55%, transparent);
+}
+.flow-line.responsible,
+.flow-line.hit-edge {
+  background: color-mix(in srgb, var(--flow-tint, var(--green)) 16%, transparent);
+  box-shadow: inset 3px 0 var(--flow-tint, var(--green));
+}
+.flow-line.hit-out.responsible {
+  background: color-mix(in srgb, var(--flow-origin, var(--blue)) 18%, transparent);
+  box-shadow: inset 3px 0 var(--flow-origin, var(--blue));
+}
+.flow-line.hit-in.responsible {
+  background: color-mix(in srgb, var(--flow-dest, var(--amber)) 18%, transparent);
+  box-shadow: inset 3px 0 var(--flow-dest, var(--amber));
 }
 .flow-empty {
   margin: 28px 4px;
   color: var(--muted);
   font-size: 12px;
   text-align: left;
-}
-.flow-connect {
-  margin-top: 10px;
-  border: 0;
-  border-top: 1px dashed color-mix(in srgb, var(--line) 65%, transparent);
-  border-radius: 0;
-  overflow: hidden;
-  background: transparent;
-}
-.flow-connect header {
-  padding: 6px 0 4px;
-  font: 700 9px/1 "IBM Plex Mono", ui-monospace, monospace;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  background: transparent;
-}
-.flow-connect .flow-code {
-  margin: 0;
-  max-height: 140px;
-  overflow: auto;
-  padding: 4px 0 8px;
-  border: 0;
-  background: transparent;
 }
 
 @media (max-width: 900px) {
@@ -3757,7 +3758,7 @@ body.reduce-motion .edit-anim-preview::after {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  /* Above columns so gutter nodes aren't buried under card chrome. */
+  /* Above columns so gutter nodes stay visible over card chrome. */
   z-index: 5;
   /* Clip docks that would otherwise bleed onto .flow-head / column headers. */
   overflow: hidden;
@@ -3767,6 +3768,8 @@ body.reduce-motion .edit-anim-preview::after {
   z-index: 2;
   flex: 1;
   min-height: 0;
+  /* Code panes still receive wheel — wires are pointer-events: none. */
+  pointer-events: auto;
 }
 .flow-wire {
   fill: none;
@@ -3822,31 +3825,3 @@ body.reduce-motion .edit-anim-preview::after {
 .tok-cm { color: var(--muted); }
 .tok-num { color: var(--blue); }
 .tok-fn { color: color-mix(in srgb, var(--teal) 70%, var(--ink)); }
-.flow-line.hit-edge {
-  background: color-mix(in srgb, var(--green) 12%, transparent);
-  box-shadow: inset 3px 0 var(--green);
-}
-.flow-connect {
-  margin-top: 10px;
-  border: 0;
-  border-top: 1px dashed color-mix(in srgb, var(--line) 65%, transparent);
-  border-radius: 0;
-  overflow: hidden;
-  background: transparent;
-}
-.flow-connect header {
-  padding: 6px 0 4px;
-  font: 700 9px/1 "IBM Plex Mono", ui-monospace, monospace;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  background: transparent;
-}
-.flow-connect .flow-code {
-  margin: 0;
-  max-height: 140px;
-  overflow: auto;
-  padding: 4px 0 8px;
-  border: 0;
-  background: transparent;
-}

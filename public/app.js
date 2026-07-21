@@ -4051,7 +4051,7 @@ function applyCanvas() {
   // Pan/zoom changes the viewfinder — wake park gravity for long-distance strays.
   scheduleGravityDrift(90);
 }
-function canvasFocusTarget(element) {
+function canvasFocusTarget(element, { padX = 220, padY = 180, maxScale = 1.18, fit = 1 } = {}) {
   if (!element) return null;
   const worldRect = world.getBoundingClientRect();
   const rect = element.getBoundingClientRect();
@@ -4059,16 +4059,20 @@ function canvasFocusTarget(element) {
   const top = (rect.top - worldRect.top) / canvas.scale;
   const right = (rect.right - worldRect.left) / canvas.scale;
   const bottom = (rect.bottom - worldRect.top) / canvas.scale;
-  const scale = Math.min(1.18, Math.max(.5, Math.min((board.clientWidth - 220) / Math.max(1, right - left), (board.clientHeight - 180) / Math.max(1, bottom - top))));
+  const raw = Math.min(
+    (board.clientWidth - padX) / Math.max(1, right - left),
+    (board.clientHeight - padY) / Math.max(1, bottom - top)
+  );
+  const scale = Math.min(maxScale, Math.max(.5, raw * fit));
   return {
     x: board.clientWidth / 2 - (left + right) / 2 * scale,
     y: board.clientHeight / 2 - (top + bottom) / 2 * scale,
     scale
   };
 }
-function smoothFocusSelection({ duration = 1900 } = {}) {
+function smoothFocusSelection({ duration = 1900, ...focusOpts } = {}) {
   const element = elementForSelection();
-  const target = canvasFocusTarget(element);
+  const target = canvasFocusTarget(element, focusOpts);
   if (!target) return fitMap();
   if (document.body.classList.contains('reduce-motion')) {
     canvas.x = target.x; canvas.y = target.y; canvas.scale = target.scale;
@@ -4120,7 +4124,8 @@ function playAgentEditReveal(path, { theater = false } = {}) {
   render();
   updateInspector();
   requestAnimationFrame(() => {
-    smoothFocusSelection({ duration: 2000 });
+    // Stay a bit wider than a normal focus so edit reveals don't feel cramped.
+    smoothFocusSelection({ duration: 2000, padX: 300, padY: 240, maxScale: 1.02, fit: 0.84 });
     applyEditAnimBurst(file.id);
     const burstKind = editAnimStyle === 'hearts' ? 'hearts' : editAnimStyle === 'spark' ? 'sparks' : 'sparks';
     if (editAnimStyle !== 'lines' && editAnimStyle !== 'hearts' && editAnimStyle !== 'fire') {
@@ -4567,60 +4572,119 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
 }
 function highlightLine(text, language = '') {
   let html = escape(text || ' ');
+  const slots = [];
+  // Private-use markers — no digits, so later number highlighting can't corrupt them.
+  const protect = snippet => {
+    const token = String.fromCharCode(0xE000 + slots.length);
+    slots.push(snippet);
+    return token;
+  };
   const py = /python/i.test(language);
-  const comment = py
-    ? html.replace(/(#.*)$/g, '<span class="tok-cm">$1</span>')
-    : html.replace(/(\/\/.*)$/g, '<span class="tok-cm">$1</span>');
-  html = comment
-    .replace(/(&quot;.*?&quot;|&#39;.*?&#39;|`.*?`)/g, '<span class="tok-str">$1</span>')
-    .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-num">$1</span>');
+  html = py
+    ? html.replace(/(#.*)$/g, m => protect(`<span class="tok-cm">${m}</span>`))
+    : html.replace(/(\/\/.*)$/g, m => protect(`<span class="tok-cm">${m}</span>`));
+  html = html
+    .replace(/(".*?"|'.*?'|`.*?`)/g, m => protect(`<span class="tok-str">${m}</span>`))
+    .replace(/\b(\d+(?:\.\d+)?)\b/g, m => protect(`<span class="tok-num">${m}</span>`));
   const keywords = py
     ? /\b(def|class|return|import|from|as|if|elif|else|for|while|with|try|except|yield|async|await|True|False|None|self|pass|raise|and|or|not|in|is)\b/g
     : /\b(function|const|let|var|return|import|from|export|default|class|extends|if|else|for|while|try|catch|async|await|new|typeof|interface|type|enum|public|private|protected|static|void|null|undefined|true|false)\b/g;
+  // Keywords/functions run on plain text only — never on stashed markup (or `class=` attrs get eaten).
   html = html.replace(keywords, '<span class="tok-kw">$1</span>');
   html = html.replace(/\b([A-Za-z_][\w]*)\s*(?=\()/g, '<span class="tok-fn">$1</span>');
+  html = html.replace(/[\uE000-\uF8FF]/g, ch => slots[ch.charCodeAt(0) - 0xE000] || '');
   return html;
 }
-function flowCodeLinesHtml(file, start, end, hitStart, hitEnd) {
+/** Resolve the responsible source line for one side of an edge. */
+function flowEdgeHitLine(item, file, edge, role) {
+  if (!edge || !file) return null;
+  const total = (file.meta?.source || '').split('\n').length || 1;
+  const clampLine = line => Math.max(1, Math.min(total, line));
+  const lineInFile = line => line >= 1 && line <= total;
+  if (role === 'from' || role === 'out') {
+    // Pull / call / import site lives on the from side.
+    if (edge.line && lineInFile(edge.line)) {
+      return { line: clampLine(edge.line), kind: 'out', label: `${edge.type} · L${edge.line}` };
+    }
+    return null;
+  }
+  if (role === 'to' || role === 'in') {
+    // Definition / receive site on the to side (module start, else file window).
+    const dest = node(edge.to);
+    const line = dest?.loc?.start
+      || (item?.kind === 'module' ? item.loc?.start : null)
+      || (item?.id === edge.to && item?.loc?.start);
+    if (line && lineInFile(line)) {
+      return { line: clampLine(line), kind: 'in', label: `${edge.type} · def L${line}` };
+    }
+    return null;
+  }
+  return null;
+}
+/** Collect responsible lines inside the focus card for all neighbor edges. */
+function flowFocusHitMap(focus, file, upstream = [], downstream = []) {
+  const hits = new Map();
+  const total = (file?.meta?.source || '').split('\n').length || 1;
+  const accept = (line, kind, edge) => {
+    if (!line || line < 1 || line > total) return;
+    const prev = hits.get(line);
+    if (!prev || (prev.kind === 'in' && kind === 'out')) hits.set(line, { kind, edge });
+  };
+  for (const { edge } of downstream) {
+    accept(edge.line, 'out', edge);
+  }
+  for (const { edge } of upstream) {
+    const dest = node(edge.to);
+    const line = focus.kind === 'module'
+      ? focus.loc?.start
+      : (dest?.loc?.start && fileOf(dest)?.id === file?.id ? dest.loc.start : focus.loc?.start);
+    accept(line, 'in', edge);
+  }
+  return hits;
+}
+function flowCodeLinesHtml(file, start, end, hitMap = null) {
   const lines = (file?.meta?.source || '').split('\n');
   if (!lines.length || start > end) {
     return '<span class="flow-line"><i>-</i><code>No source</code></span>';
   }
   const from = Math.max(1, start);
   const to = Math.min(lines.length, end);
+  const hits = hitMap instanceof Map ? hitMap : null;
+  const single = hits ? null : hitMap;
   return lines.slice(from - 1, to).map((text, index) => {
     const line = from + index;
-    const hit = hitStart != null && line >= hitStart && line <= (hitEnd ?? hitStart);
-    const edgeHit = hit && hitStart === hitEnd && line === hitStart;
-    return `<span class="flow-line${hit ? ' hit' : ''}${edgeHit ? ' hit-edge' : ''}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
+    const mark = hits?.get(line) || (single && line >= single.hitStart && line <= (single.hitEnd ?? single.hitStart)
+      ? { kind: single.kind || 'out', edgeHit: single.hitStart === single.hitEnd }
+      : null);
+    const responsible = !!(mark && (hits || mark.edgeHit || single?.hitStart === single?.hitEnd));
+    const hit = !!mark;
+    const kind = mark?.kind || '';
+    const classes = [
+      'flow-line',
+      hit ? 'hit' : '',
+      responsible ? 'hit-edge responsible' : '',
+      kind === 'out' ? 'hit-out' : '',
+      kind === 'in' ? 'hit-in' : ''
+    ].filter(Boolean).join(' ');
+    return `<span class="${classes}" data-line="${line}" data-hit-kind="${kind || ''}"><i>${line}</i><code>${highlightLine(text, file?.language)}</code></span>`;
   }).join('');
 }
-/** Line window for a flow card — full relevant source; panel scroll handles overflow. */
-function flowCodeRanges(item, file, edge) {
+/** Line window for a flow card — full file source; the pane scrolls to the hit. */
+function flowCodeRanges(item, file, edge, role, focusHits = null) {
   const lines = (file?.meta?.source || '').split('\n');
-  const total = lines.length;
-  let hitStart = null;
-  let hitEnd = null;
-  let start = 1;
-  let end = Math.min(total, 120);
-  if (item.kind === 'module' && item.loc) {
-    start = item.loc.start;
-    end = Math.min(total, Math.max(start, item.loc.end || start));
+  const total = lines.length || 1;
+  const start = 1;
+  const end = total;
+  const hit = role === 'here'
+    ? null
+    : flowEdgeHitLine(item, file, edge, role);
+  let hitMap = null;
+  if (role === 'here' && focusHits?.size) {
+    hitMap = focusHits;
+  } else if (hit?.line) {
+    hitMap = new Map([[hit.line, { kind: hit.kind, edge }]]);
   }
-  if (edge?.line) {
-    const line = Math.max(1, Math.min(total, edge.line));
-    hitStart = line;
-    hitEnd = line;
-    if (item.kind === 'module' && item.loc) {
-      start = item.loc.start;
-      end = Math.min(total, Math.max(start, item.loc.end || start));
-    } else {
-      start = Math.max(1, line - 40);
-      end = Math.min(total, line + 80);
-    }
-  }
-  if (!total) return { start: 1, end: 1, hitStart, hitEnd };
-  return { start, end, hitStart, hitEnd };
+  return { start, end, hitMap, hit };
 }
 function flowModuleRailHtml(file) {
   if (!file || file.kind !== 'file') return '';
@@ -4630,22 +4694,25 @@ function flowModuleRailHtml(file) {
     ${mods.map(mod => `<button type="button" class="flow-mod-chip" data-flow-mod="${mod.id}" title="Open ${escape(mod.label)}() flow">${escape(mod.label)}()</button>`).join('')}
   </div>`;
 }
-function codeBlockHtml(item, { edge, role } = {}) {
+function codeBlockHtml(item, { edge, role, focusHits = null } = {}) {
   const file = fileOf(item) || (item.kind === 'file' ? item : null);
-  const ranges = flowCodeRanges(item, file, edge);
-  const code = flowCodeLinesHtml(file, ranges.start, ranges.end, ranges.hitStart, ranges.hitEnd);
+  const ranges = flowCodeRanges(item, file, edge, role, focusHits);
+  const code = flowCodeLinesHtml(file, ranges.start, ranges.end, ranges.hitMap);
   const glyph = file ? fileGlyph(file) : { g: '·', c: 'var(--muted)' };
   const title = item.kind === 'module' ? `${item.label}()` : item.label;
+  const hit = ranges.hit;
   const meta = edge
-    ? `${edge.type}${edge.line ? ` · L${edge.line}` : ''}`
-    : (item.kind === 'module' ? `L${ranges.start}-${ranges.end}` : file?.path || '');
+    ? `${edge.type}${hit ? ` · L${hit.line}` : edge.line ? ` · L${edge.line}` : ''}`
+    : (item.kind === 'module' && item.loc?.start
+      ? `L${item.loc.start}-${item.loc.end || item.loc.start}`
+      : file?.path || '');
   const tint = itemTint(item) || glyph.c || 'var(--green)';
   const originTint = edge ? (originTintForEdge(edge) || tint) : tint;
   const destTint = edge ? (destinationTintForEdge(edge) || tint) : tint;
   const edgeTone = role === 'from' ? originTint : role === 'to' ? destTint : tint;
   const sideTag = role === 'from' ? 'OUT' : role === 'to' ? 'IN' : 'HERE';
   const moduleRail = role === 'here' && item.kind === 'file' ? flowModuleRailHtml(item) : '';
-  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}" data-flow-role="${role || ''}" data-flow-edge="${edge?.id || ''}" style="--flow-tint:${escape(edgeTone)};--flow-origin:${escape(originTint)};--flow-dest:${escape(destTint)}">
+  return `<article class="flow-card ${role || ''}" data-flow-jump="${item.id}" data-flow-role="${role || ''}" data-flow-edge="${edge?.id || ''}" data-flow-hit="${hit?.line || ''}" style="--flow-tint:${escape(edgeTone)};--flow-origin:${escape(originTint)};--flow-dest:${escape(destTint)}">
     <div class="flow-card-head">
       <span class="file-glyph" style="--glyph:${glyph.c}">${escape(glyph.g)}</span>
       <b>${escape(title)}</b>
@@ -4658,13 +4725,41 @@ function codeBlockHtml(item, { edge, role } = {}) {
     </div>
   </article>`;
 }
+function scrollFlowCodeHit(port, hit) {
+  if (!port || !hit) return;
+  // Scroll only the code pane — never the column stack / overlay chrome.
+  const portRect = port.getBoundingClientRect();
+  const hitRect = hit.getBoundingClientRect();
+  const delta = (hitRect.top + hitRect.height / 2) - (portRect.top + portRect.height / 2);
+  const max = Math.max(0, port.scrollHeight - port.clientHeight);
+  port.scrollTop = Math.min(max, Math.max(0, port.scrollTop + delta));
+}
 function bindFlowCodeBlocks(root, onResize) {
-  root?.querySelectorAll('.flow-code').forEach(pre => {
-    pre.addEventListener('wheel', event => event.stopPropagation(), { passive: true });
-    pre.addEventListener('click', event => event.stopPropagation());
-    pre.addEventListener('scroll', () => onResize?.(), { passive: true });
-    const hit = pre.querySelector('.flow-line.hit-edge, .flow-line.hit');
-    if (hit) requestAnimationFrame(() => hit.scrollIntoView({ block: 'center', behavior: 'auto' }));
+  root?.querySelectorAll('.flow-code-wrap').forEach(wrap => {
+    const pre = wrap.querySelector('.flow-code') || wrap;
+    wrap.addEventListener('wheel', event => {
+      const canScroll = wrap.scrollHeight > wrap.clientHeight + 1;
+      if (!canScroll) return; // let the column stack scroll
+      const goingUp = event.deltaY < 0;
+      const goingDown = event.deltaY > 0;
+      const atTop = wrap.scrollTop <= 0;
+      const atBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 1;
+      if ((goingUp && atTop) || (goingDown && atBottom)) return;
+      // Keep wheel inside the code pane while it still has room to move.
+      event.stopPropagation();
+    }, { passive: true });
+    wrap.addEventListener('click', event => event.stopPropagation());
+    wrap.addEventListener('scroll', () => onResize?.(), { passive: true });
+    const hit = pre.querySelector('.flow-line.hit-edge, .flow-line.responsible, .flow-line.hit');
+    if (hit) {
+      requestAnimationFrame(() => {
+        scrollFlowCodeHit(wrap, hit);
+        requestAnimationFrame(() => {
+          scrollFlowCodeHit(wrap, hit);
+          onResize?.();
+        });
+      });
+    }
   });
   root?.querySelectorAll('[data-flow-mod]').forEach(btn => {
     btn.addEventListener('click', event => {
@@ -4718,24 +4813,46 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
   const focusTint = itemTint(focusItem) || 'var(--green)';
   const parts = ['<defs></defs>'];
   let gradN = 0;
-  const clampCardY = (card, preferred) => {
-    const rect = card.getBoundingClientRect();
-    // Stay in the upper chrome band so nodes never drop under the code body.
-    const top = rect.top - bodyRect.top + 22;
-    const bot = rect.top - bodyRect.top + Math.min(72, Math.max(40, rect.height * 0.22));
-    return Math.min(Math.max(preferred, top), bot);
-  };
-  const cardDockY = card => {
+  /** Dock Y toward the responsible code line; clamp to the visible code port. */
+  const lineDockY = (card, line, fallbackY) => {
     const rect = card.getBoundingClientRect();
     const head = card.querySelector('.flow-card-head');
-    const headRect = head?.getBoundingClientRect();
-    // Prefer the title row — hit lines inside scrolled <pre> can sit below the card.
-    const midY = headRect
-      ? headRect.top - bodyRect.top + headRect.height * 0.5
-      : rect.top - bodyRect.top + 36;
-    return clampCardY(card, midY);
+    const headBottom = head ? head.getBoundingClientRect().bottom : rect.top + 28;
+    const minCardY = headBottom - bodyRect.top + 4;
+    const maxCardY = rect.bottom - bodyRect.top - 8;
+    const visibleIn = (el, port) => {
+      if (!el || !port) return false;
+      const er = el.getBoundingClientRect();
+      const pr = port.getBoundingClientRect();
+      return er.bottom > pr.top + 4 && er.top < pr.bottom - 4;
+    };
+    const pick = () => {
+      const wrap = card.querySelector('.flow-code-wrap');
+      const code = wrap?.querySelector('.flow-code') || wrap;
+      const inCode = line
+        ? code?.querySelector(`.flow-line[data-line="${line}"]`)
+        : code?.querySelector('.flow-line.responsible, .flow-line.hit-edge, .flow-line.hit');
+      if (inCode && visibleIn(inCode, wrap || code)) return inCode;
+      // Scrolled out of the pre — still aim at the line's general direction, clamped to the port.
+      if (inCode) return inCode;
+      return code?.querySelector('.flow-line.responsible, .flow-line.hit-edge, .flow-line.hit') || null;
+    };
+    const hit = pick();
+    if (!hit) {
+      return Math.min(Math.max(fallbackY ?? (minCardY + 18), minCardY), maxCardY);
+    }
+    const hitRect = hit.getBoundingClientRect();
+    let y = hitRect.top - bodyRect.top + hitRect.height * 0.5;
+    const port = hit.closest('.flow-code-wrap, .flow-code') || hit.parentElement;
+    if (port) {
+      const portRect = port.getBoundingClientRect();
+      const top = Math.max(minCardY, portRect.top - bodyRect.top + 6);
+      const bot = Math.min(maxCardY, portRect.bottom - bodyRect.top - 6);
+      if (bot >= top) y = Math.min(Math.max(y, top), bot);
+    }
+    return Math.min(Math.max(y, minCardY), maxCardY);
   };
-  const fy = cardDockY(focusCard);
+  const focusFallback = lineDockY(focusCard, null, cardRect.top - bodyRect.top + 48);
   // Keep docks inside the visible stack so scrolled cards don't paint nodes on the top chrome.
   const clampVisibleY = (y, stackRect) => {
     const pad = 10;
@@ -4753,6 +4870,10 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
     const rect = card.getBoundingClientRect();
     return rect.bottom > stackRect.top + 12 && rect.top < stackRect.bottom - 12;
   };
+  const edgeLineFor = (item, edge, role) => {
+    const file = fileOf(item) || (item?.kind === 'file' ? item : null);
+    return flowEdgeHitLine(item, file, edge, role)?.line || null;
+  };
   const stiffLink = (card, side, entry, railIndex = 0, railCount = 1) => {
     if (!card || !entry) return;
     const stack = card.closest('.flow-stack');
@@ -4763,11 +4884,13 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
     if (!cardVisibleInStack(focusCard, focusStackRect)) return;
     const rect = card.getBoundingClientRect();
     const edge = entry.edge;
-    const familyLift = CONTEXT_TYPES.has(edge?.type) ? 16 : -12;
-    const otherY = clampVisibleY(cardDockY(card) + familyLift, stackRect);
-    // Fan focus docks slightly so many rails don't stack on one point.
+    const other = entry.other;
+    const neighborLine = edgeLineFor(other, edge, side === 'from' ? 'from' : 'to');
+    const focusLine = edgeLineFor(focusItem, edge, side === 'from' ? 'to' : 'from');
+    // Fan docks slightly so many rails don't stack on one point.
     const spread = (railIndex - (railCount - 1) / 2) * Math.min(10, 56 / Math.max(railCount, 1));
-    const focusY = clampVisibleY(clampCardY(focusCard, fy + spread + familyLift * 0.45), focusStackRect);
+    const otherY = clampVisibleY(lineDockY(card, neighborLine) + spread * 0.15, stackRect);
+    const focusY = clampVisibleY(lineDockY(focusCard, focusLine, focusFallback) + spread, focusStackRect);
     if (otherY == null || focusY == null) return;
     let x1, y1, x2, y2;
     if (side === 'from') {
@@ -4777,7 +4900,7 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
       x2 = fxIn;
       y2 = focusY;
     } else {
-      // Focus OUT → downstream card IN  (was wrongly using dest Y at both ends)
+      // Focus OUT → downstream card IN
       x1 = fxOut;
       y1 = focusY;
       x2 = rect.left - bodyRect.left - 7;
@@ -4786,7 +4909,6 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
     const dx = x2 - x1;
     const c1x = x1 + dx * 0.28;
     const c2x = x1 + dx * 0.72;
-    const other = entry.other;
     const kind = escape(edge?.type || 'calls');
     const originTint = side === 'from'
       ? (originTintForEdge(edge) || itemTint(other) || focusTint)
@@ -4820,10 +4942,10 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
   const moreRight = (downstream?.length || 0) >= 16
     || (downStack && (downStack.scrollTop > 8 || downStack.scrollHeight > downStack.clientHeight + 24));
   const focusStackRect = focusCard.closest('.flow-stack')?.getBoundingClientRect();
-  const exitFocusY = clampVisibleY(fy, focusStackRect);
+  const exitFocusY = clampVisibleY(focusFallback, focusStackRect);
   if (moreLeft && exitFocusY != null) {
     for (let i = 0; i < 3; i++) {
-      const y = clampVisibleY(fy - 36 + i * 36, focusStackRect) ?? exitFocusY;
+      const y = clampVisibleY(focusFallback - 36 + i * 36, focusStackRect) ?? exitFocusY;
       const x0 = -28;
       const c1x = x0 + (fxIn - x0) * 0.28;
       const c2x = x0 + (fxIn - x0) * 0.72;
@@ -4834,7 +4956,7 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
   if (moreRight && exitFocusY != null) {
     const xEnd = bodyRect.width + 28;
     for (let i = 0; i < 3; i++) {
-      const y = clampVisibleY(fy - 36 + i * 36, focusStackRect) ?? exitFocusY;
+      const y = clampVisibleY(focusFallback - 36 + i * 36, focusStackRect) ?? exitFocusY;
       const x1 = fxOut;
       const c1x = x1 + (xEnd - x1) * 0.28;
       const c2x = x1 + (xEnd - x1) * 0.72;
@@ -4890,10 +5012,25 @@ function openFlowOverlay(item, { narrative, fromNav = false } = {}) {
     narrativeEl.hidden = !story;
     narrativeEl.textContent = story;
   }
-  $('#flow-upstream').innerHTML = upstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'from' })).join('')
+  const renderCard = (entry, role) => {
+    try {
+      return codeBlockHtml(entry.other, { edge: entry.edge, role });
+    } catch (error) {
+      console.error('flow card render failed', role, entry?.other?.id, error);
+      const label = entry?.other?.label || 'node';
+      return `<article class="flow-card ${role}"><div class="flow-card-head"><b>${escape(label)}</b></div><p class="flow-empty">Couldn’t render source for this node.</p></article>`;
+    }
+  };
+  $('#flow-upstream').innerHTML = upstream.map(entry => renderCard(entry, 'from')).join('')
     || '<p class="flow-empty">Nothing feeds into this node with the current edge filters.</p>';
-  $('#flow-focus').innerHTML = codeBlockHtml(focus, { role: 'here' });
-  $('#flow-downstream').innerHTML = downstream.map(({ edge, other }) => codeBlockHtml(other, { edge, role: 'to' })).join('')
+  const focusHits = flowFocusHitMap(focus, file, upstream, downstream);
+  try {
+    $('#flow-focus').innerHTML = codeBlockHtml(focus, { role: 'here', focusHits });
+  } catch (error) {
+    console.error('flow focus render failed', error);
+    $('#flow-focus').innerHTML = '<p class="flow-empty">Couldn’t render focus source.</p>';
+  }
+  $('#flow-downstream').innerHTML = downstream.map(entry => renderCard(entry, 'to')).join('')
     || '<p class="flow-empty">Nothing consumes this node with the current edge filters.</p>';
   const redrawSoon = () => requestAnimationFrame(() => drawFlowOverlayWires(upstream, downstream, focus));
   bindFlowCodeBlocks(dialog, redrawSoon);

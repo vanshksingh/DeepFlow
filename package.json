@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Local architecture signal map with agent MCP bridge (JS/TS + Python).",
+  "license": "MIT",
   "scripts": {
     "dev": "node server.js",
     "mcp": "node mcp-server.js",

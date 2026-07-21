@@ -4332,7 +4332,6 @@ function mcpSnippet() {
 }
 function showOpenDialog() {
   const dialog = $('#open-dialog');
-  $('#mcp-snippet').textContent = mcpSnippet();
   if (dialog?.showModal) dialog.showModal();
   else openWorkspace();
 }
@@ -4441,8 +4440,7 @@ function initSettings() {
   // Seed the lines preview with animated bars
   seedLinesPreview();
   // Wire copy agent instructions button
-  const copyBtn = $('#copy-agent-instructions');
-  if (copyBtn) {
+  document.querySelectorAll('#copy-agent-instructions, #copy-agent-instructions-open').forEach(copyBtn => {
     copyBtn.addEventListener('click', () => {
       fetch('/agent-setup.txt')
         .then(r => r.text())
@@ -4468,7 +4466,7 @@ function initSettings() {
         })
         .catch(() => console.warn('DeepFlow: could not load /agent-setup.txt'));
     });
-  }
+  });
 }
 function seedPreviewParticles() {
   const configs = {
@@ -5074,7 +5072,7 @@ initSettings();
 initSearch();
 initFlowOverlay();
 initWelcomeSplash();
-$('#history-back').addEventListener('click', () => moveHistory(true)); $('#history-forward').addEventListener('click', () => moveHistory(false)); $('#reset-view').addEventListener('click', resetPresentation); $('#open-workspace').addEventListener('click', showOpenDialog); $('#choose-folder').addEventListener('click', openWorkspace); $('#copy-mcp').addEventListener('click', async () => { await navigator.clipboard?.writeText($('#mcp-snippet').textContent); $('#copy-mcp').textContent = 'Copied'; setTimeout(() => $('#copy-mcp').textContent = 'Copy MCP setup', 1200); }); $('#workspace-files').addEventListener('change', event => { if (event.target.files.length) snapshotFiles([...event.target.files]); event.target.value = ''; }); $('#inspector-toggle').addEventListener('click', () => app.classList.toggle('inspector-closed'));
+$('#history-back').addEventListener('click', () => moveHistory(true)); $('#history-forward').addEventListener('click', () => moveHistory(false)); $('#reset-view').addEventListener('click', resetPresentation); $('#open-workspace').addEventListener('click', showOpenDialog); $('#choose-folder').addEventListener('click', openWorkspace); $('#workspace-files').addEventListener('change', event => { if (event.target.files.length) snapshotFiles([...event.target.files]); event.target.value = ''; }); $('#inspector-toggle').addEventListener('click', () => app.classList.toggle('inspector-closed'));
 $('#focus-selection')?.addEventListener('click', focusSelection);
 window.addEventListener('hashchange', () => applyDeepLink());
 document.querySelectorAll('[data-toolbar-toggle]').forEach(button => button.addEventListener('click', () => {

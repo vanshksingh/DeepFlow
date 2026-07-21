@@ -86,14 +86,26 @@
   <dialog id="open-dialog" class="open-dialog">
     <form method="dialog">
       <header><div><b>Open a repository</b><span>Load locally, then let your agent drive this map over MCP.</span></div><button value="cancel" aria-label="Close">×</button></header>
-      <section>
-        <button id="choose-folder" value="choose" type="button">Choose local folder</button>
-        <p>Browser open is a static snapshot. For live agent demos, use MCP <code>deepflow_open_workspace</code>.</p>
-      </section>
-      <section>
-        <b>Paste this into your agent MCP config</b>
-        <pre id="mcp-snippet"></pre>
-        <button id="copy-mcp" value="copy" type="button">Copy MCP setup</button>
+      <section style="display: flex; gap: 16px; padding: 20px 0 8px 0; align-items: stretch; justify-content: center;">
+        
+        <!-- Card 1: Local / Static -->
+        <div style="flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 24px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; transition: all 0.2s; cursor: pointer; justify-content: space-between;" onmouseover="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 24px rgba(0,0,0,0.1)';" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';" onclick="document.getElementById('choose-folder').click()">
+          <div>
+            <b style="display: block; font-size: 15px; margin-bottom: 8px; color: var(--ink);">Static Snapshot</b>
+            <p style="font-size: 13px; color: var(--muted); margin: 0; line-height: 1.4;">Browse your local codebase manually without an agent.</p>
+          </div>
+          <button id="choose-folder" value="choose" type="button" style="margin-top: 24px; width: 100%; padding: 10px; background: var(--paper); color: var(--ink); border: 2px solid var(--line); border-radius: 8px; font-weight: 700; cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);" onmouseover="this.style.background='var(--line)'; this.style.borderColor='var(--muted)'; this.style.transform='scale(1.03)';" onmouseout="this.style.background='var(--paper)'; this.style.borderColor='var(--line)'; this.style.transform='scale(1)';">Choose folder</button>
+        </div>
+
+        <!-- Card 2: MCP / Live -->
+        <div style="flex: 1; display: flex; flex-direction: column; align-items: center; text-align: center; padding: 24px 16px; background: rgba(8, 124, 102, 0.15); border: 1px solid var(--green); border-radius: 12px; transition: all 0.2s; cursor: pointer; justify-content: space-between;" onmouseover="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 24px rgba(8, 124, 102, 0.25)';" onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='none';" onclick="document.getElementById('copy-agent-instructions-open').click()">
+          <div>
+            <b style="display: block; font-size: 15px; margin-bottom: 8px; color: var(--green);">Agent-Driven</b>
+            <p style="font-size: 13px; color: var(--muted); margin: 0; line-height: 1.4;">Live map that animates and reacts as your AI edits.</p>
+          </div>
+          <button type="button" id="copy-agent-instructions-open" style="margin-top: 24px; width: 100%; padding: 10px; background: var(--green); color: var(--panel); border: 2px solid var(--green); border-radius: 8px; font-weight: 700; cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: 0 4px 12px rgba(8, 124, 102, 0.2);" onmouseover="this.style.filter='brightness(1.15)'; this.style.transform='scale(1.03)'; this.style.boxShadow='0 6px 16px rgba(8, 124, 102, 0.4)';" onmouseout="this.style.filter='none'; this.style.transform='scale(1)'; this.style.boxShadow='0 4px 12px rgba(8, 124, 102, 0.2)';">Copy Agent Setup</button>
+        </div>
+
       </section>
     </form>
   </dialog>

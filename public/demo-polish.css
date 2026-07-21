@@ -2582,7 +2582,7 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
   border-radius: 10px;
   position: relative;
   z-index: 10;
-  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
   backdrop-filter: blur(14px) saturate(1.08);
   -webkit-backdrop-filter: blur(14px) saturate(1.08);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--line) 40%, transparent);
@@ -3759,7 +3759,8 @@ body.reduce-motion .edit-anim-preview::after {
   pointer-events: none;
   /* Above columns so gutter nodes aren't buried under card chrome. */
   z-index: 5;
-  overflow: visible;
+  /* Clip docks that would otherwise bleed onto .flow-head / column headers. */
+  overflow: hidden;
 }
 .flow-body .flow-columns {
   position: relative;

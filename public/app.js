@@ -4736,15 +4736,39 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
     return clampCardY(card, midY);
   };
   const fy = cardDockY(focusCard);
+  // Keep docks inside the visible stack so scrolled cards don't paint nodes on the top chrome.
+  const clampVisibleY = (y, stackRect) => {
+    const pad = 10;
+    let minY = pad;
+    let maxY = bodyRect.height - pad;
+    if (stackRect) {
+      minY = Math.max(minY, stackRect.top - bodyRect.top + pad);
+      maxY = Math.min(maxY, stackRect.bottom - bodyRect.top - pad);
+    }
+    if (maxY < minY) return null;
+    return Math.min(Math.max(y, minY), maxY);
+  };
+  const cardVisibleInStack = (card, stackRect) => {
+    if (!stackRect) return true;
+    const rect = card.getBoundingClientRect();
+    return rect.bottom > stackRect.top + 12 && rect.top < stackRect.bottom - 12;
+  };
   const stiffLink = (card, side, entry, railIndex = 0, railCount = 1) => {
     if (!card || !entry) return;
+    const stack = card.closest('.flow-stack');
+    const stackRect = stack?.getBoundingClientRect();
+    if (!cardVisibleInStack(card, stackRect)) return;
+    const focusStack = focusCard.closest('.flow-stack');
+    const focusStackRect = focusStack?.getBoundingClientRect();
+    if (!cardVisibleInStack(focusCard, focusStackRect)) return;
     const rect = card.getBoundingClientRect();
     const edge = entry.edge;
     const familyLift = CONTEXT_TYPES.has(edge?.type) ? 16 : -12;
-    const otherY = cardDockY(card) + familyLift;
+    const otherY = clampVisibleY(cardDockY(card) + familyLift, stackRect);
     // Fan focus docks slightly so many rails don't stack on one point.
     const spread = (railIndex - (railCount - 1) / 2) * Math.min(10, 56 / Math.max(railCount, 1));
-    const focusY = clampCardY(focusCard, fy + spread + familyLift * 0.45);
+    const focusY = clampVisibleY(clampCardY(focusCard, fy + spread + familyLift * 0.45), focusStackRect);
+    if (otherY == null || focusY == null) return;
     let x1, y1, x2, y2;
     if (side === 'from') {
       // Upstream card OUT → focus IN
@@ -4795,25 +4819,27 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
     || (upStack && (upStack.scrollTop > 8 || upStack.scrollHeight > upStack.clientHeight + 24));
   const moreRight = (downstream?.length || 0) >= 16
     || (downStack && (downStack.scrollTop > 8 || downStack.scrollHeight > downStack.clientHeight + 24));
-  if (moreLeft) {
+  const focusStackRect = focusCard.closest('.flow-stack')?.getBoundingClientRect();
+  const exitFocusY = clampVisibleY(fy, focusStackRect);
+  if (moreLeft && exitFocusY != null) {
     for (let i = 0; i < 3; i++) {
-      const y = fy - 36 + i * 36;
+      const y = clampVisibleY(fy - 36 + i * 36, focusStackRect) ?? exitFocusY;
       const x0 = -28;
       const c1x = x0 + (fxIn - x0) * 0.28;
       const c2x = x0 + (fxIn - x0) * 0.72;
-      parts.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-left" stroke="${focusTint}" d="M${x0},${y} C${c1x},${y} ${c2x},${fy} ${fxIn},${fy}" />`);
-      parts.push(`<circle class="flow-node in exit" cx="${fxIn}" cy="${fy}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
+      parts.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-left" stroke="${focusTint}" d="M${x0},${y} C${c1x},${y} ${c2x},${exitFocusY} ${fxIn},${exitFocusY}" />`);
+      parts.push(`<circle class="flow-node in exit" cx="${fxIn}" cy="${exitFocusY}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
     }
   }
-  if (moreRight) {
+  if (moreRight && exitFocusY != null) {
     const xEnd = bodyRect.width + 28;
     for (let i = 0; i < 3; i++) {
-      const y = fy - 36 + i * 36;
+      const y = clampVisibleY(fy - 36 + i * 36, focusStackRect) ?? exitFocusY;
       const x1 = fxOut;
       const c1x = x1 + (xEnd - x1) * 0.28;
       const c2x = x1 + (xEnd - x1) * 0.72;
-      parts.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-right" stroke="${focusTint}" d="M${x1},${fy} C${c1x},${fy} ${c2x},${y} ${xEnd},${y}" />`);
-      parts.push(`<circle class="flow-node out exit" cx="${x1}" cy="${fy}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
+      parts.push(`<path class="flow-wire flow-wire-live flow-wire-exit exit-right" stroke="${focusTint}" d="M${x1},${exitFocusY} C${c1x},${exitFocusY} ${c2x},${y} ${xEnd},${y}" />`);
+      parts.push(`<circle class="flow-node out exit" cx="${x1}" cy="${exitFocusY}" r="3.5" stroke="${focusTint}" fill="${focusTint}" fill-opacity="0.2" />`);
     }
   }
   svg.setAttribute('viewBox', `0 0 ${Math.max(1, bodyRect.width)} ${Math.max(1, bodyRect.height)}`);
@@ -6121,7 +6147,17 @@ async function playTour(steps = []) {
     hideEditTheater();
   }
 }
+function commandKeepsFlowOverlay(command = {}) {
+  if (command.type === 'open-flow' || command.type === 'close-flow') return true;
+  // Tour/demo steps that open the three-plane view should not flash-dismiss first.
+  if (command.type === 'tour-step' && command.command?.type === 'open-flow') return true;
+  return false;
+}
 function handleViewerCommand(command = {}) {
+  // MCP / tour commands drive the map — dismiss the three-plane overlay so the
+  // canvas (jumps, highlights, orphans, theater) is visible unless this command
+  // is explicitly about the flow overlay itself.
+  if (!commandKeepsFlowOverlay(command)) closeFlowOverlay();
   if (command.type === 'open-flow') {
     const file = fileByPath(command.path);
     if (!file) return;

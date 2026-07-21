@@ -1922,8 +1922,9 @@ function computeConstellationMovers() {
   const MAX_HOP = 3;
   const MAX_HOP2 = 10;
   const MAX_HOP3 = 8;
-  const ROW_GAP = ISLAND_GAP + 16;
-  const RING = { 1: 96, 2: 140, 3: 200 };
+  const ROW_GAP = ISLAND_GAP + 12;
+  // Edge-to-edge air between a node and its trace partner — tight enough to read.
+  const LINK_GAP = ISLAND_GAP;
 
   // Candidate islands: focus + anything on the committed trace.
   const candidates = [];
@@ -1990,50 +1991,93 @@ function computeConstellationMovers() {
 
   const focusBox = byId.get(focusTop.id);
   const focusCx = focusBox.x + focusBox.w / 2;
-  const focusCy = focusBox.y + focusBox.h / 2;
   const emitsIntoFocus = new Set();
   const receivesFromFocus = new Set();
+  // Primary parent for deep hops = closer neighbor with the most directed weight.
+  const primaryParent = new Map();
   for (const link of directed) {
     if (!packIds.has(link.from) || !packIds.has(link.to)) continue;
     if (link.to === focusTop.id) emitsIntoFocus.add(link.from);
     if (link.from === focusTop.id) receivesFromFocus.add(link.to);
   }
+  for (const box of [...hop2, ...hop3]) {
+    const hop = hopDist.get(box.id) || 2;
+    const closer = (undirected.get(box.id) || [])
+      .filter(nid => packIds.has(nid) && (hopDist.get(nid) ?? 99) < hop)
+      .sort((a, b) => (hopDist.get(a) ?? 9) - (hopDist.get(b) ?? 9) || a.localeCompare(b));
+    primaryParent.set(box.id, closer[0] || focusTop.id);
+  }
 
   const world = new Map();
   world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
+  const preferred = new Map();
+  preferred.set(focusTop.id, { x: focusBox.x, y: focusBox.y });
+
+  /** Seat `box` beside `anchor` on `side` (-1 left / +1 right), Y near anchor. */
+  const seatBeside = (anchor, box, side, yHint = null) => {
+    const gap = LINK_GAP;
+    const idealX = side < 0 ? anchor.x - gap - box.w : anchor.x + anchor.w + gap;
+    const anchorCy = yHint != null ? yHint : anchor.y + anchor.h / 2;
+    const idealY = anchorCy - box.h / 2;
+    // If already on the right side with a readable gap, keep the seat nearly put —
+    // only tighten/loosen the wire and ease Y toward the connector.
+    const curCx = box.x + box.w / 2;
+    const aCx = anchor.x + anchor.w / 2;
+    const onSide = side < 0 ? curCx <= aCx + 8 : curCx >= aCx - 8;
+    const curGap = side < 0 ? anchor.x - (box.x + box.w) : box.x - (anchor.x + anchor.w);
+    if (onSide && curGap >= LINK_GAP * 0.75 && curGap <= LINK_GAP * 2.8) {
+      const targetGap = LINK_GAP;
+      const x = side < 0 ? anchor.x - targetGap - box.w : anchor.x + anchor.w + targetGap;
+      const y = box.y + (idealY - box.y) * 0.62;
+      return { x, y, w: box.w, h: box.h };
+    }
+    return { x: idealX, y: idealY, w: box.w, h: box.h };
+  };
+
+  /** Stack members beside anchor; preserve relative Y order; keep near connector. */
+  const stackBeside = (members, anchor, side) => {
+    if (!members.length) return;
+    members.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
+    const seats = members.map(box => seatBeside(anchor, box, side));
+    if (members.length === 1) {
+      world.set(members[0].id, seats[0]);
+      preferred.set(members[0].id, { x: seats[0].x, y: seats[0].y });
+      return;
+    }
+    // Vertical pack around the connector, but bias each seat toward its own ideal Y.
+    const totalH = seats.reduce((s, b) => s + b.h, 0) + Math.max(0, seats.length - 1) * ROW_GAP;
+    let y = (anchor.y + anchor.h / 2) - totalH / 2;
+    for (let i = 0; i < members.length; i++) {
+      const box = members[i];
+      const ideal = seats[i];
+      const x = ideal.x;
+      // Blend stacked slot with per-island connector alignment.
+      const blendedY = y * 0.55 + ideal.y * 0.45;
+      const seat = { x, y: blendedY, w: box.w, h: box.h };
+      world.set(box.id, seat);
+      preferred.set(box.id, { x: seat.x, y: ideal.y });
+      y = blendedY + box.h + ROW_GAP;
+    }
+  };
 
   const leftCol = [];
   const rightCol = [];
   for (const box of hop1) {
     const isEmitter = emitsIntoFocus.has(box.id);
     const isReceiver = receivesFromFocus.has(box.id);
+    // Flow direction wins; otherwise keep the island's natural side of focus.
     let side = box.x + box.w / 2 <= focusCx ? -1 : 1;
     if (isEmitter && !isReceiver) side = -1;
     else if (isReceiver && !isEmitter) side = 1;
     (side < 0 ? leftCol : rightCol).push(box);
   }
-  const stackCol = (col, side) => {
-    col.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
-    const ring = RING[1];
-    const totalH = col.reduce((s, b) => s + b.h, 0) + Math.max(0, col.length - 1) * ROW_GAP;
-    let y = focusCy - totalH / 2;
-    for (const box of col) {
-      const x = side < 0 ? focusBox.x - ring - box.w : focusBox.x + focusBox.w + ring;
-      world.set(box.id, { x, y, w: box.w, h: box.h });
-      y += box.h + ROW_GAP;
-    }
-  };
-  stackCol(leftCol, -1);
-  stackCol(rightCol, 1);
+  stackBeside(leftCol, focusBox, -1);
+  stackBeside(rightCol, focusBox, 1);
 
-  const placeDeep = (list, hop) => {
-    const ring = RING[hop];
+  const placeDeep = (list) => {
     const groups = new Map();
     for (const box of list) {
-      const closer = (undirected.get(box.id) || [])
-        .filter(nid => packIds.has(nid) && (hopDist.get(nid) ?? 99) < hop)
-        .sort((a, b) => (hopDist.get(a) ?? 9) - (hopDist.get(b) ?? 9) || a.localeCompare(b));
-      const key = closer[0] || focusTop.id;
+      const key = primaryParent.get(box.id) || focusTop.id;
       const g = groups.get(key) || [];
       g.push(box);
       groups.set(key, g);
@@ -2041,24 +2085,35 @@ function computeConstellationMovers() {
     for (const [anchorId, members] of groups) {
       const anchor = world.get(anchorId) || byId.get(anchorId) || focusBox;
       const ax = anchor.x + anchor.w / 2;
-      const ay = anchor.y + anchor.h / 2;
-      const away = Math.sign(ax - focusCx) || 1;
-      members.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
-      const totalH = members.reduce((s, b) => s + b.h, 0) + Math.max(0, members.length - 1) * ROW_GAP;
-      let y = ay - totalH / 2;
-      for (const box of members) {
-        const x = away < 0 ? ax - ring - box.w / 2 : ax + ring - box.w / 2;
-        world.set(box.id, { x, y, w: box.w, h: box.h });
-        y += box.h + ROW_GAP;
-      }
+      // Sit on the outward side of the parent (away from focus) so the chain reads.
+      let side = ax <= focusCx ? -1 : 1;
+      // If directed edge from parent→child, child sits on the receive (right) of parent
+      // when parent emits; from child→parent, child sits on the emit (left).
+      const outs = members.filter(m => directed.some(l => l.from === anchorId && l.to === m.id));
+      const ins = members.filter(m => directed.some(l => l.from === m.id && l.to === anchorId));
+      if (outs.length && !ins.length) side = 1;
+      else if (ins.length && !outs.length) side = -1;
+      stackBeside(members, anchor, side);
     }
   };
-  placeDeep(hop2, 2);
-  placeDeep(hop3, 3);
+  placeDeep(hop2);
+  placeDeep(hop3);
 
   // 1) Clear overlaps among pulled islands (focus stays put).
   const movable = [...world.entries()].map(([id, box]) => ({ id, ...box }));
-  separateBoxes(movable, { gap: ISLAND_GAP, passes: 64, anchors: new Set([focusTop.id]), pad: 0 });
+  separateBoxes(movable, { gap: ISLAND_GAP, passes: 48, anchors: new Set([focusTop.id]), pad: 0 });
+  // Tether back toward connection seats so separation doesn't fling partners away
+  // from the node they actually link to.
+  for (let tug = 0; tug < 3; tug++) {
+    for (const box of movable) {
+      if (box.id === focusTop.id) continue;
+      const pref = preferred.get(box.id);
+      if (!pref) continue;
+      box.x += (pref.x - box.x) * 0.55;
+      box.y += (pref.y - box.y) * 0.4;
+    }
+    separateBoxes(movable, { gap: ISLAND_GAP, passes: 18, anchors: new Set([focusTop.id]), pad: 0 });
+  }
   for (const box of movable) {
     if (box.id === focusTop.id) {
       world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });

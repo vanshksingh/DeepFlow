@@ -2063,6 +2063,16 @@ body.trace-dialects .wire.dialect-live {
   color: var(--ink);
   transition: opacity .18s ease, box-shadow .2s ease, border-color .2s ease, transform .2s ease;
   will-change: left, top;
+  min-width: 0;
+}
+/* Bar must never flex-shrink — otherwise height morphs crush the title. */
+.frame.float > .frame-bar {
+  flex-shrink: 0;
+  flex-grow: 0;
+}
+.frame.float > .frame-canvas.float-canvas {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .frame.float:hover,
@@ -2139,7 +2149,8 @@ body.trace-dialects .wire.dialect-live {
 .frame-file.orphan { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); border-left-color: var(--amber); }
 .frame-file.entrypoint { border-left-color: var(--green); }
 
-/* Modules: solid chips inside files. */
+/* Modules: solid chips inside files. Labels clamp in .frame-title — keep overflow
+ * visible here so trace edge-ports can sit just outside the border. */
 .frame-fn {
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--node) 26%, var(--line));
@@ -2147,6 +2158,8 @@ body.trace-dialects .wire.dialect-live {
   box-shadow: 0 2px 8px color-mix(in srgb, var(--ink) 5%, transparent);
   backdrop-filter: none;
   cursor: pointer;
+  min-width: 0;
+  max-width: 100%;
 }
 .frame-fn:hover,
 .frame-fn.hot,
@@ -2158,24 +2171,34 @@ body.trace-dialects .wire.dialect-live {
 .frame-bar {
   position: relative;
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
-  min-height: 52px;
-  padding: 10px 14px 10px 14px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  min-height: 60px;
+  padding: 12px 16px 12px 16px;
+  box-sizing: border-box;
+  /* Ports hang off the bar; labels clamp inside .frame-title instead. */
+  overflow: visible;
 }
 .frame-bar-file,
 .frame-bar-module {
-  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
   align-items: start;
-  padding: 10px 14px 10px 14px;
+  padding: 12px 14px 12px 16px;
   column-gap: 10px;
-  min-height: 56px;
+  min-height: 64px;
 }
 .frame-bar-module {
   grid-template-columns: minmax(0, 1fr) auto auto;
   padding-left: 14px;
-  padding-right: 14px;
+  padding-right: 12px;
+}
+.frame-bar-no-toggle {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-left: 16px;
 }
 .frame.expanded > .frame-bar {
   border-bottom: 1px solid color-mix(in srgb, var(--node) 16%, var(--line));
@@ -2192,13 +2215,18 @@ body.trace-dialects .wire.dialect-live {
   min-width: 0;
 }
 .frame-toggle {
-  width: 20px;
-  height: 20px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--muted);
-  margin-top: 1px;
+  margin-top: 0;
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
 }
 .frame-toggle:hover { background: color-mix(in srgb, var(--node) 14%, transparent); color: var(--ink); }
 .frame-title {
@@ -2208,11 +2236,17 @@ body.trace-dialects .wire.dialect-live {
     "meta count"
     "name name";
   column-gap: 8px;
-  row-gap: 3px;
+  row-gap: 4px;
   align-items: baseline;
+  justify-self: stretch;
+  align-self: stretch;
   min-width: 0;
   width: 100%;
+  max-width: 100%;
   overflow: hidden;
+  /* Left padding so names breathe off the toggle / chip edge. */
+  padding: 2px 4px 2px 10px;
+  box-sizing: border-box;
 }
 .frame-title .frame-kind,
 .frame-title .fn-kind,
@@ -2227,22 +2261,28 @@ body.trace-dialects .wire.dialect-live {
 }
 .frame-title b {
   grid-area: name;
-  font: 700 12px/1.35 Sora, sans-serif;
+  font: 700 12px/1.45 Sora, sans-serif;
   color: var(--ink);
   min-width: 0;
   max-width: 100%;
-  /* Two readable lines inside the frame — fade only the last clipped edge. */
+  width: 100%;
+  padding: 1px 0 1px 2px;
+  margin: 0;
+  box-sizing: border-box;
+  /* Two lines max — clamp from the box model, not hopeful overflow. */
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
   white-space: normal;
   overflow: hidden;
+  /* anywhere: -webkit-box historically ignores break-word and lets long tokens spill. */
   overflow-wrap: anywhere;
   word-break: break-word;
   text-overflow: ellipsis;
-  -webkit-mask-image: none;
-  mask-image: none;
+  /* Soft fade at the trailing edge instead of hard poke past the border. */
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 14px), transparent 100%);
 }
 .frame-title span,
 .frame-title .frame-count {
@@ -2285,6 +2325,7 @@ body.trace-dialects .wire.dialect-live {
   column-gap: 8px;
   row-gap: 3px;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
 }
@@ -2305,14 +2346,16 @@ body.trace-dialects .wire.dialect-live {
 .frame-file .frame-title .file-glyph { grid-area: glyph; }
 .frame-file .frame-title .frame-count { grid-area: count; }
 .frame-fn .frame-title {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
-    "meta meta"
-    "name name";
+    "meta"
+    "name";
+  padding-left: 10px;
 }
 .fn-flow-hint {
   margin: 1px 0 0;
   flex: 0 0 auto;
+  flex-shrink: 0;
   align-self: start;
   padding: 4px 9px;
   border-radius: 999px;
@@ -2324,6 +2367,7 @@ body.trace-dialects .wire.dialect-live {
   text-transform: uppercase;
   opacity: .88;
   cursor: pointer;
+  white-space: nowrap;
 }
 .frame-file:hover .fn-flow-hint,
 .frame-fn:hover .fn-flow-hint,
@@ -2998,16 +3042,27 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
     width .7s cubic-bezier(.22, 1, .36, 1),
     height .7s cubic-bezier(.22, 1, .36, 1) !important;
 }
-.frame.float.collapsing,
+.frame.float.collapsing {
+  /* Title stays readable — only the nested canvas is clipped away. */
+  overflow: visible !important;
+}
+/* Root cause of title clip: .frame.float is flex column. Shrinking the frame
+ * while the canvas still has height flex-shrinks the bar and crushes the title.
+ * Lock the bar; let only the canvas collapse. */
+.frame.float.collapsing > .frame-bar {
+  flex-shrink: 0 !important;
+  flex-grow: 0 !important;
+}
 .frame.float.collapsing > .frame-canvas.float-canvas {
   overflow: hidden !important;
   pointer-events: none;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .frame.float.size-morph,
 .frame.float.size-morph > .frame-canvas.float-canvas {
   overflow: visible !important;
 }
-.frame.float.collapsing.size-morph,
 .frame.float.collapsing.size-morph > .frame-canvas.float-canvas {
   overflow: hidden !important;
 }
@@ -3468,7 +3523,7 @@ body.reduce-motion .frame-file.edit-anim-burst {
   will-change: translate;
 }
 .frame.trace-align-focus {
-  z-index: 40 !important;
+  z-index: 70 !important;
 }
 #scene.trace-aligning .frame.float:not(.trace-flying):not(.trace-align-focus) {
   transition: opacity .2s ease;
@@ -3495,50 +3550,6 @@ body.reduce-motion .frame-file.edit-anim-burst {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
-}
-.placement-mode-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.placement-mode-grid button {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  text-align: left;
-  cursor: pointer;
-}
-.placement-mode-grid button.active {
-  border-color: color-mix(in srgb, var(--green) 55%, var(--line));
-  background: color-mix(in srgb, var(--green) 10%, var(--panel));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 22%, transparent);
-}
-.placement-mode-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.placement-mode-meta b {
-  font: 700 12px/1.2 Sora, sans-serif;
-  color: var(--ink);
-}
-.placement-mode-meta em {
-  font: 500 10px/1.2 Sora, sans-serif;
-  color: var(--muted);
-  font-style: normal;
-}
-/* Grid guide while dragging nested chips in grid mode. */
-body[data-nest-placement="grid"] .frame-canvas.nest-canvas-active {
-  background-image:
-    linear-gradient(to right, color-mix(in srgb, var(--line) 55%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--line) 55%, transparent) 1px, transparent 1px);
-  background-size: 24px 24px;
-  background-position: 20px 20px;
 }
 .edit-anim-grid {
   display: grid;

@@ -180,6 +180,22 @@ const tools = [
     inputSchema: { type: 'object', properties: { root: rootProp, path: { type: 'string' } }, required: ['root', 'path'], additionalProperties: false }
   },
   {
+    name: 'deepflow_pr_diff',
+    description: 'Return a unified Git diff for a branch/PR range (base...head). Defaults base to main/master and head to HEAD. Optional paths filter.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        root: rootProp,
+        base: { type: 'string', description: 'Base ref (default: main, then master).' },
+        head: { type: 'string', description: 'Head ref (default: HEAD).' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Optional path filters.' },
+        maxChars: { type: 'number', description: 'Truncate diff after this many characters (default 24000).' }
+      },
+      required: ['root'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'deepflow_setup_help',
     description: 'Return copy-paste setup instructions for installing DeepFlow, starting the viewer, and wiring this MCP server into an agent IDE.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
@@ -412,6 +428,50 @@ async function call(name, args = {}) {
       return { root, path, diff: stdout || 'No uncommitted Git diff for this file.' };
     } catch (error) {
       return { root, path, diff: error.stdout || 'No Git diff is available for this file.' };
+    }
+  }
+  if (name === 'deepflow_pr_diff') {
+    const head = String(args.head || 'HEAD');
+    let base = args.base ? String(args.base) : '';
+    if (!base) {
+      for (const candidate of ['main', 'master']) {
+        try {
+          await run('git', ['-C', root, 'rev-parse', '--verify', candidate], { timeout: 3000 });
+          base = candidate;
+          break;
+        } catch {}
+      }
+      if (!base) base = 'HEAD~1';
+    }
+    const pathArgs = [];
+    if (Array.isArray(args.paths) && args.paths.length) {
+      pathArgs.push('--');
+      for (const p of args.paths) pathArgs.push(safePath(root, p));
+    }
+    const maxChars = Math.max(4000, Math.min(120000, Number(args.maxChars) || 24000));
+    try {
+      const { stdout } = await run(
+        'git',
+        ['-C', root, 'diff', '--no-ext-diff', '--unified=3', `${base}...${head}`, ...pathArgs],
+        { timeout: 12000 }
+      );
+      const raw = stdout || '';
+      const truncated = raw.length > maxChars;
+      return {
+        root,
+        base,
+        head,
+        truncated,
+        diff: truncated ? `${raw.slice(0, maxChars)}\n\n… truncated (${raw.length} chars total)` : (raw || 'No diff for this range.')
+      };
+    } catch (error) {
+      return {
+        root,
+        base,
+        head,
+        truncated: false,
+        diff: error.stdout || error.message || 'No Git PR/branch diff is available for this range.'
+      };
     }
   }
   throw new Error(`Unknown tool: ${name}`);

@@ -6215,11 +6215,19 @@ function handleViewerCommand(command = {}) {
     const file = fileByPath(command.path);
     const el = file ? scene.querySelector(`[data-id="${CSS.escape(file.id)}"]`) : null;
     if (el) {
-      el.classList.remove('file-pop-in');
+      el.classList.remove('file-pop-in', 'file-pop-out');
       void el.offsetWidth;
       el.classList.add('file-pop-in');
       setTimeout(() => el.classList.remove('file-pop-in'), 1400);
     }
+    return;
+  }
+  if (command.type === 'pop-out' || command.type === 'delete') {
+    const file = fileByPath(command.path);
+    const el = file
+      ? scene.querySelector(`.frame-file[data-id="${CSS.escape(file.id)}"]`)
+      : null;
+    if (el) playFilePopOut(el);
     return;
   }
   if (command.type === 'focus-folder') {
@@ -6403,35 +6411,83 @@ function initSearch() {
     }
   });
 }
+function playFilePopOut(el) {
+  if (!el) return Promise.resolve();
+  if (document.body.classList.contains('reduce-motion')) {
+    el.classList.add('file-pop-out');
+    return new Promise(resolve => setTimeout(resolve, 320));
+  }
+  el.classList.remove('file-pop-in', 'file-pop-out');
+  void el.offsetWidth;
+  el.classList.add('file-pop-out');
+  spawnParticleBurst(el, 'sparks');
+  return new Promise(resolve => setTimeout(resolve, 760));
+}
+function playFilePopIn(el) {
+  if (!el) return;
+  el.classList.remove('file-pop-in', 'file-pop-out');
+  void el.offsetWidth;
+  el.classList.add('file-pop-in');
+  setTimeout(() => el.classList.remove('file-pop-in'), 1400);
+}
 function applyGraph(next, { preserve = false } = {}) {
-  const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
-  if (!preserve) { offsets.clear(); localOffsets.clear(); nestedSeats.clear(); userArranged.clear(); layoutModes.clear(); pinnedLayout.clear(); traceArranged.clear(); seatLock = new Set(); collapseMotion = false; basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
-  scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id;
-  selectedId = preserve && node(previousSelected) ? previousSelected : rootFolder().id;
-  layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
-  if (!preserve) ensureDefaultOutlineExpanded();
-  if (preserve) requestAnimationFrame(() => revealRecentChanges());
-  $('#repo-name').textContent = graph.roots.map(root => root.label).join(' + ');
-  updateRepoStats();
-  rebuildTrace(); render(); updateInspector(); updateHistory(); renderActivityFeed(); syncToolbar();
-  if (!preserve) {
-    requestAnimationFrame(() => {
-      fitMap();
-      const linked = applyDeepLink();
-      if (!linked) writeDeepLink();
-      // After layout + optional deep-link focus, start rubber-band even if
-      // partners begin outside the viewfinder.
+  const prevFiles = preserve && graph
+    ? graph.nodes.filter(n => n.kind === 'file').map(n => ({ id: n.id, path: n.path }))
+    : [];
+  const nextFilePaths = new Set((next?.nodes || []).filter(n => n.kind === 'file').map(n => n.path));
+  const deleted = prevFiles.filter(file => file.path && !nextFilePaths.has(file.path));
+  const prevPaths = new Set(prevFiles.map(file => file.path).filter(Boolean));
+
+  const finish = () => {
+    const previousSelected = selectedId, previousScope = scopeId, previousAnchor = layoutAnchorFileId; graph = next;
+    if (!preserve) { offsets.clear(); localOffsets.clear(); nestedSeats.clear(); userArranged.clear(); layoutModes.clear(); pinnedLayout.clear(); traceArranged.clear(); seatLock = new Set(); collapseMotion = false; basePlacements.clear(); layoutMemory.clear(); basePlacementKey = ''; exitFlow(); expandedFiles.clear(); expandedFolders.clear(); expandedModules.clear(); sourceFiles.clear(); pinned.clear(); recentPaths.clear(); activityItems.clear(); archivedActivity.length = 0; undoStack.length = 0; redoStack.length = 0; }
+    scopeId = preserve && node(previousScope)?.kind === 'folder' ? previousScope : rootFolder().id;
+    selectedId = preserve && node(previousSelected) ? previousSelected : rootFolder().id;
+    layoutAnchorFileId = preserve && node(previousAnchor)?.kind === 'file' ? previousAnchor : fileOf(node(selectedId))?.id || entryFile(folder())?.id;
+    if (!preserve) ensureDefaultOutlineExpanded();
+    if (preserve) requestAnimationFrame(() => revealRecentChanges());
+    $('#repo-name').textContent = graph.roots.map(root => root.label).join(' + ');
+    updateRepoStats();
+    rebuildTrace(); render(); updateInspector(); updateHistory(); renderActivityFeed(); syncToolbar();
+    if (preserve && prevPaths.size) {
       requestAnimationFrame(() => {
-        rebuildTrace();
-        if (traceEdges.size > 0) {
-          scheduleTraceAlign(linked ? 640 : 320);
-          scheduleGravityDrift(720);
-        } else {
-          scheduleGravityDrift(300);
+        for (const file of (graph.nodes || []).filter(n => n.kind === 'file')) {
+          if (!file.path || prevPaths.has(file.path)) continue;
+          const el = scene.querySelector(`.frame-file[data-id="${CSS.escape(file.id)}"]`);
+          if (el) playFilePopIn(el);
         }
       });
-    });
+    }
+    if (!preserve) {
+      requestAnimationFrame(() => {
+        fitMap();
+        const linked = applyDeepLink();
+        if (!linked) writeDeepLink();
+        // After layout + optional deep-link focus, start rubber-band even if
+        // partners begin outside the viewfinder.
+        requestAnimationFrame(() => {
+          rebuildTrace();
+          if (traceEdges.size > 0) {
+            scheduleTraceAlign(linked ? 640 : 320);
+            scheduleGravityDrift(720);
+          } else {
+            scheduleGravityDrift(300);
+          }
+        });
+      });
+    }
+  };
+
+  if (preserve && deleted.length) {
+    const outs = deleted
+      .map(file => scene.querySelector(`.frame-file[data-id="${CSS.escape(file.id)}"]`))
+      .filter(Boolean);
+    if (outs.length) {
+      Promise.all(outs.map(playFilePopOut)).then(finish);
+      return;
+    }
   }
+  finish();
 }
 async function loadGraph({ preserve = false } = {}) { const response = await fetch('/api/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }); if (!response.ok) throw new Error(await response.text()); sourceMode = 'live'; if ($('#tracking-status')) $('#tracking-status').textContent = 'live local map'; applyGraph(await response.json(), { preserve }); }
 initSettings();

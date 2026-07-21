@@ -86,6 +86,8 @@ let pendingAlignAfterMorph = 0;
 let flowTrail = [];
 let flowTrailIndex = -1;
 let flowNavCache = { upstream: [], downstream: [] };
+/** True when the 3-page flow was opened by MCP — auto-dismiss on background edits. */
+let flowOpenedByMcp = false;
 
 const FLOW_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits', 'imports', 'references', 'reexports']);
 const WALK_TYPES = new Set(['calls', 'dataflow', 'events', 'inherits']);
@@ -4110,6 +4112,7 @@ function playAgentEditReveal(path, { theater = false } = {}) {
   const normalized = String(path).replaceAll('\\', '/');
   const file = fileByPath(normalized);
   if (!file) return;
+  dismissMcpFlowForCanvasWork();
   if (agentRevealPath && agentRevealPath !== normalized) dismissAgentEditReveal();
   clearTimeout(agentRevealTimer);
   agentRevealPath = normalized;
@@ -4968,7 +4971,7 @@ function drawFlowOverlayWires(upstream, downstream, focusItem = null) {
   svg.innerHTML = parts.join('');
 }
 
-function openFlowOverlay(item, { narrative, fromNav = false } = {}) {
+function openFlowOverlay(item, { narrative, fromNav = false, fromMcp = false } = {}) {
   if (!item || !graph) return;
   // Keep files as FILE FLOW (don't silently swap to first module).
   const focus = item;
@@ -4977,6 +4980,8 @@ function openFlowOverlay(item, { narrative, fromNav = false } = {}) {
   flowNavCache = { upstream, downstream };
   const dialog = $('#flow-overlay');
   if (!dialog) return;
+  // Fresh opens set ownership; in-overlay nav keeps MCP vs user origin.
+  if (!fromNav) flowOpenedByMcp = !!fromMcp;
   cancelTraceAlign();
   cancelSoftSettle();
   stripFlipTransforms();
@@ -5153,7 +5158,13 @@ function closeFlowOverlay() {
   flowTrail = [];
   flowTrailIndex = -1;
   flowNavCache = { upstream: [], downstream: [] };
+  flowOpenedByMcp = false;
   updateFlowNavButtons();
+}
+/** Hide MCP-opened 3-page flow so canvas edits / reveals can take focus. */
+function dismissMcpFlowForCanvasWork() {
+  if (!flowOpenedByMcp) return;
+  closeFlowOverlay();
 }
 function waitMs(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -6156,7 +6167,7 @@ function handleViewerCommand(command = {}) {
     remember();
     expandAncestors(file);
     expandedFiles.add(file.id);
-    openFlowOverlay(target, { narrative: command.narrative });
+    openFlowOverlay(target, { narrative: command.narrative, fromMcp: true });
     writeDeepLink();
     return;
   }
@@ -6577,6 +6588,8 @@ canvasControls(); updateHistory();
 const changes = new EventSource('/api/changes');
 changes.addEventListener('workspace-change', event => {
   try { markRecent(JSON.parse(event.data || '{}').paths || []); } catch {}
+  // MCP-opened 3-page flow yields to background edits / map refresh.
+  dismissMcpFlowForCanvasWork();
   if (sourceMode === 'live') loadGraph({ preserve: true }).catch(console.error);
 });
 changes.addEventListener('viewer-command', event => {

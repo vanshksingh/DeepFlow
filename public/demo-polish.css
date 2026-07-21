@@ -2161,7 +2161,7 @@ body.trace-dialects .wire.dialect-live {
   grid-template-columns: 20px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
-  min-height: 44px;
+  min-height: 52px;
   padding: 10px 14px 10px 14px;
 }
 .frame-bar-file,
@@ -2170,6 +2170,7 @@ body.trace-dialects .wire.dialect-live {
   align-items: start;
   padding: 10px 14px 10px 14px;
   column-gap: 10px;
+  min-height: 56px;
 }
 .frame-bar-module {
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -2201,24 +2202,47 @@ body.trace-dialects .wire.dialect-live {
 }
 .frame-toggle:hover { background: color-mix(in srgb, var(--node) 14%, transparent); color: var(--ink); }
 .frame-title {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "meta count"
+    "name name";
+  column-gap: 8px;
+  row-gap: 3px;
   align-items: baseline;
-  gap: 4px 8px;
   min-width: 0;
   width: 100%;
+  overflow: hidden;
+}
+.frame-title .frame-kind,
+.frame-title .fn-kind,
+.frame-title .file-glyph {
+  grid-area: meta;
+  justify-self: start;
+}
+.frame-title .frame-count {
+  grid-area: count;
+  justify-self: end;
+  margin: 0;
 }
 .frame-title b {
+  grid-area: name;
   font: 700 12px/1.35 Sora, sans-serif;
   color: var(--ink);
-  overflow: visible;
-  text-overflow: unset;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  flex: 1 1 auto;
   min-width: 0;
   max-width: 100%;
+  /* Two readable lines inside the frame — fade only the last clipped edge. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-overflow: ellipsis;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 .frame-title span,
 .frame-title .frame-count {
@@ -2231,7 +2255,6 @@ body.trace-dialects .wire.dialect-live {
   align-items: center;
   justify-content: center;
   min-width: 1.6em;
-  margin: 1px 2px 1px 6px;
   padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
@@ -2254,12 +2277,38 @@ body.trace-dialects .wire.dialect-live {
 }
 .frame-file .frame-title,
 .frame-fn .frame-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "meta meta"
+    "name name";
+  column-gap: 8px;
+  row-gap: 3px;
   width: 100%;
   min-width: 0;
+  overflow: hidden;
+}
+.frame-file .frame-title .file-glyph,
+.frame-fn .frame-title .fn-kind {
+  grid-area: meta;
+}
+.frame-file .frame-title .frame-count {
+  grid-area: meta;
+  justify-self: end;
+}
+.frame-file .frame-title {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "glyph count count"
+    "name name name";
+}
+.frame-file .frame-title .file-glyph { grid-area: glyph; }
+.frame-file .frame-title .frame-count { grid-area: count; }
+.frame-fn .frame-title {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "meta meta"
+    "name name";
 }
 .fn-flow-hint {
   margin: 1px 0 0;
@@ -3446,6 +3495,50 @@ body.reduce-motion .frame-file.edit-anim-burst {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+}
+.placement-mode-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.placement-mode-grid button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  text-align: left;
+  cursor: pointer;
+}
+.placement-mode-grid button.active {
+  border-color: color-mix(in srgb, var(--green) 55%, var(--line));
+  background: color-mix(in srgb, var(--green) 10%, var(--panel));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--green) 22%, transparent);
+}
+.placement-mode-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.placement-mode-meta b {
+  font: 700 12px/1.2 Sora, sans-serif;
+  color: var(--ink);
+}
+.placement-mode-meta em {
+  font: 500 10px/1.2 Sora, sans-serif;
+  color: var(--muted);
+  font-style: normal;
+}
+/* Grid guide while dragging nested chips in grid mode. */
+body[data-nest-placement="grid"] .frame-canvas.nest-canvas-active {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--line) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--line) 55%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: 20px 20px;
 }
 .edit-anim-grid {
   display: grid;

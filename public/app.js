@@ -1969,7 +1969,7 @@ function cancelTraceAlign() {
     traceAlignRaf = 0;
   }
   scene?.querySelectorAll('.trace-flying, .trace-align-focus').forEach(el => {
-    el.classList.remove('trace-flying', 'trace-align-focus');
+    el.classList.remove('trace-flying', 'trace-landing', 'trace-align-focus');
     el.style.zIndex = '';
     el.style.removeProperty('--fly-shadow');
   });
@@ -2473,7 +2473,7 @@ function runTraceAlign(token) {
 
   const clearFlightChrome = () => {
     for (const mover of movers) {
-      mover.el.classList.remove('trace-flying');
+      mover.el.classList.remove('trace-flying', 'trace-landing');
       mover.el.style.removeProperty('--fly-shadow');
       mover.el.style.zIndex = '';
     }
@@ -2491,9 +2491,8 @@ function runTraceAlign(token) {
     }
     const t = Math.min(1, (now - start) / duration);
     const ease = 1 - Math.pow(1 - t, 4);
-    // Hold full lift shadow through most of the flight, then ease it to zero.
-    const shadowT = t < 0.62 ? 1 : Math.max(0, 1 - (t - 0.62) / 0.38);
-    const shadowEase = shadowT * shadowT;
+    // Soft half-sine settle with the seat — no late cliff, no hard cut at t=1.
+    const shadowEase = Math.sin((1 - ease) * Math.PI * 0.5);
     for (const mover of movers) {
       const x = mover.from.x + (mover.to.x - mover.from.x) * ease;
       const y = mover.from.y + (mover.to.y - mover.from.y) * ease;
@@ -2501,7 +2500,7 @@ function runTraceAlign(token) {
       mover.el.style.translate = `${x}px ${y}px`;
       mover.el.style.setProperty('--ox', `${x}px`);
       mover.el.style.setProperty('--oy', `${y}px`);
-      mover.el.style.setProperty('--fly-shadow', String(shadowEase));
+      mover.el.style.setProperty('--fly-shadow', shadowEase.toFixed(4));
     }
     if (t < 1) {
       traceAlignRaf = requestAnimationFrame(tick);
@@ -2512,11 +2511,28 @@ function runTraceAlign(token) {
       mover.el.style.translate = `${mover.to.x}px ${mover.to.y}px`;
       mover.el.style.setProperty('--ox', `${mover.to.x}px`);
       mover.el.style.setProperty('--oy', `${mover.to.y}px`);
-      mover.el.style.setProperty('--fly-shadow', '0');
+      // Soft residual so the post-land CSS fade has something to ease from.
+      mover.el.style.setProperty('--fly-shadow', '0.18');
     }
     bakeFlight();
-    clearFlightChrome();
+    for (const mover of movers) {
+      mover.el.classList.add('trace-landing');
+    }
+    // Kick the CSS filter→none transition on the next frame after bake.
+    requestAnimationFrame(() => {
+      if (token !== traceAlignToken) return;
+      for (const mover of movers) {
+        mover.el.style.setProperty('--fly-shadow', '0');
+      }
+    });
+    focusEl?.classList.remove('trace-align-focus');
+    if (focusEl) focusEl.style.zIndex = '';
+    scene.classList.remove('trace-aligning');
     traceAlignRaf = 0;
+    setTimeout(() => {
+      if (token !== traceAlignToken) return;
+      clearFlightChrome();
+    }, 680);
     blockersDone.then(() => {
       finishClear().then(() => {
         scheduleDraw();

@@ -3534,16 +3534,24 @@ body.reduce-motion .frame-file.edit-anim-burst {
 .frame.trace-flying {
   z-index: 60 !important;
   pointer-events: none;
-  /* --fly-shadow eases 1→0 near landing so the lift shadow fades out, not snaps. */
+  /* --fly-shadow 1→0 during flight; blend each RAF step so it never stair-steps. */
   filter: drop-shadow(
     0
-    calc(4px + 12px * var(--fly-shadow, 1))
-    calc(8px + 20px * var(--fly-shadow, 1))
-    color-mix(in srgb, var(--ink) calc(18% * var(--fly-shadow, 1)), transparent)
+    calc(2px + 14px * var(--fly-shadow, 1))
+    calc(6px + 24px * var(--fly-shadow, 1))
+    color-mix(in srgb, var(--ink) calc(15% * var(--fly-shadow, 1)), transparent)
   );
   will-change: translate, filter;
   /* Flight owns motion via translate — freeze left/top so bake cannot ease twice. */
-  transition: box-shadow .25s ease, border-color .2s ease !important;
+  transition:
+    filter .16s linear,
+    box-shadow .25s ease,
+    border-color .2s ease !important;
+}
+/* After seat bake: keep the class briefly so filter can ease fully to none. */
+.frame.trace-flying.trace-landing {
+  filter: none;
+  transition: filter .65s cubic-bezier(.22, 1, .36, 1) !important;
 }
 .frame.trace-align-focus {
   z-index: 70 !important;
@@ -3551,7 +3559,9 @@ body.reduce-motion .frame-file.edit-anim-burst {
 .frame.float.seat-baking,
 .frame-fn.float.seat-baking,
 .frame-canvas > .frame.float.seat-baking {
-  transition: none !important;
+  /* Instant left/top bake — keep filter so flight shadow can still ease out. */
+  transition-property: filter !important;
+  transition-duration: .01s !important;
   animation: none !important;
 }
 #scene.trace-aligning .frame.float:not(.trace-flying):not(.trace-align-focus) {

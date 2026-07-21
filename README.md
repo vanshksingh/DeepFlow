@@ -136,13 +136,11 @@ The viewer (`npm run dev`) needs to be running for tools that animate the UI. An
 | `deepflow_clear_highlights` | Clear pins, return to rails |
 | `deepflow_set_mode` | Force `rails` / `outline` (alias) or `signal` mode |
 | `deepflow_set_edges` | Toggle calls / imports / dataflow / events |
-| `deepflow_tour` | Short Atlas walkthrough (`autoPlay: true`) |
-| `deepflow_demo` | Full showcase: constellation, flow overlay, agent edit, orphans (`autoPlay: true`) |
 | `deepflow_share_link` | Hash URL for the current focus |
 | `deepflow_file_diff` | Local git diff for one path (includes untracked via `--no-index`) |
 | `deepflow_pr_diff` | Unified diff for a branch/PR range (`base...head`, defaults to main/master) |
 | `deepflow_analyze_workspace` | Full graph JSON |
-| `deepflow_setup_help` | MCP config block + demo roots |
+| `deepflow_setup_help` | MCP config block + sample workspace roots |
 
 Paths may use `file.ts::moduleName` (or `#`) on explain / impact / jump / flow tools. `viewerUrl` must be loopback (`127.0.0.1` / `localhost`).
 
@@ -165,7 +163,7 @@ deepflow_impact { root, path }
 
 | Path | Use |
 |------|-----|
-| `fixtures/atlas-workspace` | Messy TS monorepo, default boot target and full demo |
+| `fixtures/atlas-workspace` | Messy TS monorepo, default boot target |
 | `fixtures/python-mini` | Tiny Python import and call graph |
 
 Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP edges are not inferred; each language's own imports and calls are tracked separately.
@@ -201,7 +199,7 @@ Everything runs locally. No source code or graph data is ever uploaded. The brow
 | `server.js` | HTTP viewer + SSE + track API |
 | `mcp-server.js` | MCP tools (stdio JSON-RPC) |
 | `src/repository-graph.js` | Tree-sitter polyglot graph builder |
-| `src/graph-insights.js` | Summary / find / impact / tour helpers |
+| `src/graph-insights.js` | Summary / find / impact / flow helpers |
 | `public/` | Signal map UI |
-| `fixtures/` | Demo workspaces |
+| `fixtures/` | Sample workspaces |
 | `AGENTS.md` | Agent contract |

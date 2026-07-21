@@ -39,22 +39,9 @@
           <span class="leg unreviewed"><i></i>unreviewed</span>
           <span class="leg removed"><i></i>removed</span>
         </div>
-        <div id="demo-spotlight" class="demo-spotlight" hidden aria-hidden="true"></div>
-        <div id="demo-legend" class="demo-legend" hidden>
-          <span class="demo-legend-kicker" id="demo-legend-kicker">DeepFlow demo</span>
-          <b id="demo-legend-title">Welcome</b>
-          <p id="demo-legend-body">Capability tour</p>
-          <div class="demo-legend-progress"><i id="demo-legend-bar"></i></div>
-          <span class="demo-legend-step" id="demo-legend-step">1 / 1</span>
-        </div>
         <div id="edit-theater" class="edit-theater" hidden aria-hidden="true">
           <header><b id="edit-theater-title">Editing…</b><span id="edit-theater-meta"></span></header>
           <div class="edit-theater-lines" id="edit-theater-lines"></div>
-        </div>
-        <div id="tour-card" class="tour-card" hidden>
-          <span class="tour-kicker">Live tour</span>
-          <b id="tour-title">Architecture rails</b>
-          <p id="tour-body">DeepFlow narrates the repo while your agent drives the map.</p>
         </div>
       </div>
     </section>
@@ -263,19 +250,6 @@
         </div>
       </div>
     </div>
-  </dialog>
-  <dialog id="welcome-splash" class="welcome-splash">
-    <form method="dialog" class="welcome-shell">
-      <div class="welcome-mark" aria-hidden="true"></div>
-      <p class="welcome-kicker">DeepFlow</p>
-      <h1>See the architecture. Follow the signal.</h1>
-      <p class="welcome-copy">Nested frames for folders and files. Live traces. Agent-driven edits. A map your IDE agent can narrate.</p>
-      <div class="welcome-actions">
-        <button type="submit" value="tour" id="welcome-start-tour" class="welcome-primary">Start guided tour</button>
-        <button type="submit" value="skip" id="welcome-skip" class="welcome-ghost">Explore freely</button>
-      </div>
-      <p class="welcome-hint">Tip: agents call <code>deepflow_demo</code> with <code>autoPlay: true</code> on the Atlas fixture.</p>
-    </form>
   </dialog>
   <input id="workspace-files" type="file" webkitdirectory directory multiple hidden>
   <script type="module" src="/app.js"></script>

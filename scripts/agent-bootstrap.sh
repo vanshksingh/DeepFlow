@@ -68,11 +68,10 @@ Paste MCP config into your agent IDE, then run these tools in order:
 1. deepflow_status
 2. deepflow_open_workspace
    root = $ROOT/fixtures/atlas-workspace
-3. deepflow_demo
+3. deepflow_jump_to / deepflow_open_flow
    root = $ROOT/fixtures/atlas-workspace
-   autoPlay = true
 
-Python demo root:
+Python sample root:
   $ROOT/fixtures/python-mini
 
 Live map of ANY local repo:

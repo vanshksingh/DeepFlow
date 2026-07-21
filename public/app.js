@@ -5839,52 +5839,6 @@ function showOpenDialog() {
   if (dialog?.showModal) dialog.showModal();
   else openWorkspace();
 }
-function initWelcomeSplash() {
-  const dialog = $('#welcome-splash');
-  if (!dialog) return;
-  const seen = localStorage.getItem('deepflow-welcome-seen') === '1';
-  const startTour = async () => {
-    localStorage.setItem('deepflow-welcome-seen', '1');
-    if (!graph) {
-      try { await loadGraph(); } catch {}
-    }
-    playLocalCapabilityDemo();
-  };
-  $('#welcome-start-tour')?.addEventListener('click', event => {
-    event.preventDefault();
-    dialog.close('tour');
-    startTour();
-  });
-  $('#welcome-skip')?.addEventListener('click', () => {
-    localStorage.setItem('deepflow-welcome-seen', '1');
-  });
-  dialog.addEventListener('close', () => {
-    if (dialog.returnValue === 'tour') return;
-    localStorage.setItem('deepflow-welcome-seen', '1');
-  });
-  if (!seen && dialog.showModal) {
-    requestAnimationFrame(() => {
-      try { dialog.showModal(); } catch {}
-    });
-  }
-}
-async function playLocalCapabilityDemo() {
-  try {
-    const response = await fetch('/api/demo-steps');
-    if (response.ok) {
-      const data = await response.json();
-      if (data.steps?.length) {
-        await playTour(data.steps);
-        return;
-      }
-    }
-  } catch {}
-  // Minimal fallback if the viewer isn't serving demo steps yet.
-  await playTour([
-    { title: 'Welcome', narrative: 'Nested frames for architecture. Drag freely; neighbors yield when you drop.', dwellMs: 5200, legend: { kicker: 'Tour', title: 'DeepFlow', body: 'Agent-native architecture map.' }, command: { type: 'set-mode', mode: 'outline' } },
-    { title: 'Live traces', narrative: 'Turn on Live and hover to follow wires without changing selection.', dwellMs: 5000, legend: { kicker: 'Live', title: 'Hover traces', body: 'Ribbon → Live' }, command: { type: 'set-live', enabled: true } }
-  ]);
-}
 function initSettings() {
   const savedTheme = localStorage.getItem('deepflow-theme') || 'ocean';
   const knownThemes = new Set([...($('#theme-grid')?.querySelectorAll('[data-theme-choice]') || [])].map(button => button.dataset.themeChoice));
@@ -6117,79 +6071,7 @@ function pulseSelection() {
   element.classList.add('pulse-hit');
   setTimeout(() => element.classList.remove('pulse-hit'), 1400);
 }
-let tourPlaying = false;
 let traceDialects = false;
-function showTourCard(title, body) {
-  const card = $('#tour-card');
-  if (!card) return;
-  $('#tour-title').textContent = title || 'DeepFlow tour';
-  $('#tour-body').textContent = body || '';
-  card.hidden = false;
-  card.classList.add('visible');
-  clearTimeout(showTourCard.timer);
-  showTourCard.timer = setTimeout(() => { card.classList.remove('visible'); card.hidden = true; }, 5200);
-}
-function showDemoLegend(step, index, total) {
-  const legend = $('#demo-legend');
-  if (!legend) return;
-  const meta = step.legend || {};
-  $('#demo-legend-kicker').textContent = meta.kicker || `Step ${index + 1}`;
-  $('#demo-legend-title').textContent = meta.title || step.title || 'DeepFlow';
-  $('#demo-legend-body').textContent = meta.body || step.narrative || '';
-  $('#demo-legend-step').textContent = `${index + 1} / ${total}`;
-  const bar = $('#demo-legend-bar');
-  if (bar) bar.style.width = `${((index + 1) / Math.max(1, total)) * 100}%`;
-  legend.hidden = false;
-  requestAnimationFrame(() => legend.classList.add('visible'));
-}
-function hideDemoLegend() {
-  const legend = $('#demo-legend');
-  if (!legend) return;
-  legend.classList.remove('visible');
-  setTimeout(() => { legend.hidden = true; }, 400);
-}
-function clearDemoSpotlight() {
-  const spot = $('#demo-spotlight');
-  if (spot) {
-    spot.hidden = true;
-    spot.innerHTML = '';
-  }
-  app.classList.remove('demo-spotlight-on');
-  scene.querySelectorAll('.demo-focus').forEach(el => el.classList.remove('demo-focus'));
-}
-function applyDemoSpotlight(step) {
-  clearDemoSpotlight();
-  const target = step?.spotlight;
-  if (!target) return;
-  let el = null;
-  if (target.module) {
-    const file = target.path ? fileByPath(target.path) : null;
-    const mod = file ? modules(file).find(m => m.label === target.module) : null;
-    if (mod) el = scene.querySelector(`[data-module-box="${CSS.escape(mod.id)}"],[data-drag-id="${CSS.escape(mod.id)}"]`);
-  }
-  if (!el && target.path) {
-    const item = fileByPath(target.path) || folderByPath(target.path);
-    if (item) el = scene.querySelector(`[data-id="${CSS.escape(item.id)}"],[data-drag-id="${CSS.escape(item.id)}"]`);
-  }
-  if (!el) return;
-  el.classList.add('demo-focus');
-  const boardRect = board.getBoundingClientRect();
-  const rect = el.getBoundingClientRect();
-  const pad = 16;
-  const spot = $('#demo-spotlight');
-  if (!spot) return;
-  const hole = document.createElement('div');
-  hole.className = 'demo-spotlight-hole';
-  Object.assign(hole.style, {
-    left: `${rect.left - boardRect.left - pad}px`,
-    top: `${rect.top - boardRect.top - pad}px`,
-    width: `${rect.width + pad * 2}px`,
-    height: `${rect.height + pad * 2}px`
-  });
-  spot.appendChild(hole);
-  spot.hidden = false;
-  app.classList.add('demo-spotlight-on');
-}
 function spawnParticleBurst(el, kind = 'hearts') {
   if (!el || document.body.classList.contains('reduce-motion')) return;
   const layer = document.createElement('div');
@@ -6257,38 +6139,8 @@ async function playEditTheater(file) {
   $('#diff-panel')?.classList.add('diff-reveal');
   setTimeout(() => $('#diff-panel')?.classList.remove('diff-reveal'), 1600);
 }
-async function playTour(steps = []) {
-  if (tourPlaying) return;
-  tourPlaying = true;
-  app.classList.add('demo-playing');
-  try {
-    for (let index = 0; index < steps.length; index++) {
-      const step = steps[index];
-      const dwell = Math.max(5600, Number(step.dwellMs) || 6400);
-      showDemoLegend(step, index, steps.length);
-      // Legend carries the story during the capability demo; keep the floating
-      // tour card off so it never fights the minimap / spotlight.
-      const card = $('#tour-card');
-      if (card) { card.classList.remove('visible'); card.hidden = true; }
-      if (step.command) await Promise.resolve(handleViewerCommand({ ...step.command, type: step.command.type }));
-      requestAnimationFrame(() => applyDemoSpotlight(step));
-      // Re-fit spotlight after layout settles from jump/expand.
-      setTimeout(() => applyDemoSpotlight(step), 420);
-      await new Promise(resolve => setTimeout(resolve, dwell));
-    }
-  } finally {
-    tourPlaying = false;
-    app.classList.remove('demo-playing');
-    clearDemoSpotlight();
-    hideDemoLegend();
-    hideEditTheater();
-  }
-}
 function commandKeepsFlowOverlay(command = {}) {
-  if (command.type === 'open-flow' || command.type === 'close-flow') return true;
-  // Tour/demo steps that open the three-plane view should not flash-dismiss first.
-  if (command.type === 'tour-step' && command.command?.type === 'open-flow') return true;
-  return false;
+  return command.type === 'open-flow' || command.type === 'close-flow';
 }
 function handleViewerCommand(command = {}) {
   // MCP / tour commands drive the map — dismiss the three-plane overlay so the
@@ -6387,7 +6239,7 @@ function handleViewerCommand(command = {}) {
   if (command.type === 'clear-highlights') {
     remember(); closeFlowOverlay(); pinned.clear(); exitFlow(); recentPaths.clear(); traceDialects = false;
     document.body.classList.remove('trace-dialects');
-    clearDemoSpotlight(); hideEditTheater();
+    hideEditTheater();
     rebuildTrace(); render(); updateInspector(); writeDeepLink(); return;
   }
   if (command.type === 'set-mode') {
@@ -6425,19 +6277,7 @@ function handleViewerCommand(command = {}) {
       selectedId = item.id;
     }
     rebuildTrace(); render(); updateInspector(); syncToolbar();
-    showTourCard('Orphans', `${paths.length} nodes with no static callers.`);
     if (command.pulse) requestAnimationFrame(pulseSelection);
-    return;
-  }
-  if (command.type === 'tour-step') {
-    showTourCard(command.title, command.narrative);
-    if (command.legend) showDemoLegend({ legend: command.legend, title: command.title, narrative: command.narrative }, command.index || 0, command.total || 1);
-    if (command.command) handleViewerCommand(command.command);
-    if (command.spotlight) requestAnimationFrame(() => applyDemoSpotlight(command));
-    return;
-  }
-  if (command.type === 'tour-play') {
-    playTour(command.steps || []).catch(console.error);
     return;
   }
   if (command.type === 'highlight-paths') {
@@ -6597,7 +6437,6 @@ async function loadGraph({ preserve = false } = {}) { const response = await fet
 initSettings();
 initSearch();
 initFlowOverlay();
-initWelcomeSplash();
 $('#history-back').addEventListener('click', () => moveHistory(true)); $('#history-forward').addEventListener('click', () => moveHistory(false)); $('#reset-view').addEventListener('click', resetPresentation); $('#open-workspace').addEventListener('click', showOpenDialog); $('#choose-folder').addEventListener('click', openWorkspace); $('#workspace-files').addEventListener('change', event => { if (event.target.files.length) snapshotFiles([...event.target.files]); event.target.value = ''; }); $('#inspector-toggle').addEventListener('click', () => app.classList.toggle('inspector-closed'));
 $('#focus-selection')?.addEventListener('click', focusSelection);
 window.addEventListener('hashchange', () => applyDeepLink());

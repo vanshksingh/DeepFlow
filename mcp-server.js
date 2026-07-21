@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { createRepositoryGraph } from './src/repository-graph.js';
 import {
   summarizeGraph, stripSources, findInGraph, impactOf, pathBetween,
-  explainNode, orphans, entrypoints, DEMO_TOUR_STEPS, CAPABILITY_DEMO_STEPS, explainFlow
+  explainNode, orphans, entrypoints, explainFlow
 } from './src/graph-insights.js';
 
 const run = promisify(execFile);
@@ -129,23 +129,6 @@ const tools = [
         additionalProperties: { type: 'boolean' }
       }
     }, ['root', 'edges'])
-  },
-  {
-    name: 'deepflow_tour',
-    description: 'Run the short Atlas walkthrough in the viewer. Prefer deepflow_demo for the full capability showcase.',
-    inputSchema: withRoot({
-      step: { type: 'number', description: '0-based step index. Omit to run/list all steps metadata.' },
-      autoPlay: { type: 'boolean', description: 'When true and step omitted, play the full tour in the viewer.', default: false }
-    })
-  },
-  {
-    name: 'deepflow_demo',
-    description: 'Run the full capability showcase in the viewer: nested frames, edge filters, Live traces, folder focus, jump/pin, code-flow overlay, orphans, and agent-edit reveal. Best on fixtures/atlas-workspace. Use autoPlay: true for demos/judges.',
-    inputSchema: withRoot({
-      step: { type: 'number', description: '0-based step index. Omit with autoPlay to run the full demo, or omit both to list steps.' },
-      autoPlay: { type: 'boolean', description: 'Play the entire capability demo in the viewer.', default: true },
-      paceMs: { type: 'number', description: 'Optional global dwell override (ms) between steps. Default uses each step’s dwellMs.' }
-    })
   },
   {
     name: 'deepflow_open_flow',
@@ -275,8 +258,7 @@ async function call(name, args = {}) {
         '3. npm run dev   # leaves http://127.0.0.1:4317 running',
         '4. Add MCP config pointing at this mcp-server.js (absolute path)',
         '5. Call deepflow_open_workspace with the absolute path of the repo to map',
-        '6. After edits: deepflow_after_edit; to narrate: deepflow_jump_to / deepflow_explain_flow / deepflow_demo',
-        '7. For judges: deepflow_open_workspace on fixtures/atlas-workspace, then deepflow_demo with autoPlay: true'
+        '6. After edits: deepflow_after_edit; to narrate: deepflow_jump_to / deepflow_explain_flow / deepflow_open_flow'
       ],
       mcpConfig: {
         mcpServers: {
@@ -286,8 +268,8 @@ async function call(name, args = {}) {
           }
         }
       },
-      demoWorkspace: resolve(HERE, 'fixtures/atlas-workspace'),
-      pythonDemo: resolve(HERE, 'fixtures/python-mini'),
+      sampleWorkspace: resolve(HERE, 'fixtures/atlas-workspace'),
+      pythonSample: resolve(HERE, 'fixtures/python-mini'),
       docs: ['README.md', 'AGENTS.md']
     };
   }
@@ -378,47 +360,11 @@ async function call(name, args = {}) {
   if (name === 'deepflow_clear_highlights') return viewerRequest(viewer, '/api/mcp-command', { type: 'clear-highlights' });
   if (name === 'deepflow_set_mode') return viewerRequest(viewer, '/api/mcp-command', { type: 'set-mode', mode: args.mode });
   if (name === 'deepflow_set_edges') return viewerRequest(viewer, '/api/mcp-command', { type: 'set-edges', edges: args.edges || {} });
-  if (name === 'deepflow_tour') {
-    await viewerRequest(viewer, '/api/track', { root });
-    if (typeof args.step === 'number') {
-      const step = DEMO_TOUR_STEPS[args.step];
-      if (!step) throw new Error(`Tour step ${args.step} out of range (0-${DEMO_TOUR_STEPS.length - 1}).`);
-      await viewerRequest(viewer, '/api/mcp-command', { type: 'tour-step', index: args.step, ...step });
-      return { step: args.step, ...step, delivered: true };
-    }
-    if (args.autoPlay) {
-      return viewerRequest(viewer, '/api/mcp-command', { type: 'tour-play', steps: DEMO_TOUR_STEPS });
-    }
-    return { steps: DEMO_TOUR_STEPS.map((step, index) => ({ index, title: step.title, narrative: step.narrative })), tip: 'Call again with step: N or autoPlay: true, or use deepflow_demo for the full showcase.' };
-  }
-  if (name === 'deepflow_demo') {
-    await viewerRequest(viewer, '/api/track', { root });
-    const steps = CAPABILITY_DEMO_STEPS;
-    if (typeof args.step === 'number') {
-      const step = steps[args.step];
-      if (!step) throw new Error(`Demo step ${args.step} out of range (0-${steps.length - 1}).`);
-      await viewerRequest(viewer, '/api/mcp-command', { type: 'tour-step', index: args.step, ...step });
-      return { demo: 'capabilities', step: args.step, title: step.title, narrative: step.narrative, delivered: true };
-    }
-    if (args.autoPlay !== false) {
-      const paced = typeof args.paceMs === 'number'
-        ? steps.map(step => ({ ...step, dwellMs: args.paceMs }))
-        : steps;
-      await viewerRequest(viewer, '/api/mcp-command', { type: 'tour-play', steps: paced, demo: 'capabilities' });
-      return {
-        ok: true,
-        demo: 'capabilities',
-        playing: true,
-        steps: paced.length,
-        titles: paced.map(s => s.title),
-        tip: 'Watch the viewer. The capability demo is narrating live.'
-      };
-    }
+  if (name === 'deepflow_tour' || name === 'deepflow_demo') {
     return {
-      demo: 'capabilities',
-      steps: steps.map((step, index) => ({ index, title: step.title, narrative: step.narrative, dwellMs: step.dwellMs || 2800 })),
-      tip: 'Call again with autoPlay: true (default) or step: N',
-      recommendedRoot: 'fixtures/atlas-workspace'
+      deprecated: true,
+      removed: true,
+      message: 'deepflow_tour and deepflow_demo were removed. Use deepflow_jump_to, deepflow_open_flow, deepflow_explain_flow, and deepflow_after_edit instead.'
     };
   }
   if (name === 'deepflow_open_flow') {

@@ -1586,18 +1586,7 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
     maxY = Math.max(maxY, m.to.y + m.h);
   }
   reshapeParentCanvas(parentEl, canvasEl, maxX + NEST_PAD, maxY + NEST_PAD, { allowShrink: true });
-  const grandparentEl = parentEl.parentElement?.closest('.frame.float[data-drag-id]');
-  const grandparentCanvas = grandparentEl?.querySelector(':scope > .frame-canvas');
-  if (grandparentEl && grandparentCanvas) {
-    encapsulateNestedChild(
-      grandparentEl,
-      grandparentCanvas,
-      parentEl,
-      parseFloat(parentEl.style.left) || 0,
-      parseFloat(parentEl.style.top) || 0,
-      { skipId: parentEl.dataset.dragId, deep: true, allowShrink: true }
-    );
-  }
+  accommodateEnclosingFolders(draggedId, { allowShrink: true });
   for (const m of movers) applySeat(m.el, m.from.x, m.from.y);
   nestedSeats.set(draggedId, { ...mineTo });
   userArranged.add(draggedId);
@@ -1617,16 +1606,7 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
       endY = Math.max(endY, m.to.y + m.h);
     }
     reshapeParentCanvas(parentEl, canvasEl, endX + NEST_PAD, endY + NEST_PAD, { allowShrink: true });
-    if (grandparentEl && grandparentCanvas) {
-      encapsulateNestedChild(
-        grandparentEl,
-        grandparentCanvas,
-        parentEl,
-        parseFloat(parentEl.style.left) || 0,
-        parseFloat(parentEl.style.top) || 0,
-        { skipId: parentEl.dataset.dragId, deep: true, allowShrink: true }
-      );
-    }
+    accommodateEnclosingFolders(draggedId, { allowShrink: true });
     const islandId = dragIslandId(parentId);
     const islandEl = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(islandId)}"]`)
       || scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`);
@@ -1677,8 +1657,43 @@ function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH, { allowShri
   const needH = allowShrink ? contentNeedH : Math.max(floorH, contentNeedH);
   parentEl.style.width = `${needW}px`;
   parentEl.style.height = `${needH}px`;
+  // Keep authored layout metrics in sync — ancestors read layoutW/H first, so
+  // leaving them stale left enclosing folders too small after a nested grow.
+  parentEl.dataset.layoutW = String(needW);
+  parentEl.dataset.layoutH = String(needH);
   canvasEl.style.height = `${Math.max(72, needH - headerH - 12)}px`;
   canvasEl.style.minHeight = canvasEl.style.height;
+}
+/** Grow every enclosing folder so a resized/moved child still fits with padding. */
+function accommodateEnclosingFolders(childId, { allowShrink = false } = {}) {
+  if (!childId) return;
+  let id = childId;
+  for (let guard = 0; guard < 12; guard++) {
+    const parentId = parentCanvasId(id);
+    if (!parentId) break;
+    const parentEl = scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`);
+    const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
+    const childEl = scene.querySelector(`[data-drag-id="${CSS.escape(id)}"]`);
+    if (!parentEl || !canvasEl || !childEl) break;
+    if (parentEl.classList.contains('flipping') || parentEl.classList.contains('size-morph')) break;
+    encapsulateNestedChild(
+      parentEl,
+      canvasEl,
+      childEl,
+      parseFloat(childEl.style.left) || 0,
+      parseFloat(childEl.style.top) || 0,
+      { skipId: id, deep: false, allowShrink }
+    );
+    // Top-level pack metrics must match the grown shell for neighbor settle.
+    if (dragIslandId(parentId) === parentId) {
+      const place = floatPlacements.get(parentId);
+      if (place) {
+        const size = frameLayoutSize(parentEl);
+        floatPlacements.set(parentId, { ...place, w: size.w, h: size.h });
+      }
+    }
+    id = parentId;
+  }
 }
 /**
  * Shift nested seats/DOM when the canvas grows left/up around a child.
@@ -2893,6 +2908,9 @@ function finishExpandMorph() {
   pendingAlignAfterMorph = 0;
   clearExpandAnchor();
   if (wasCollapse) return;
+  // Always bubble growth up the nest — even when constellation owns the next
+  // motion, or enclosing folders stay at their pre-expand shell size.
+  if (expandedId) accommodateEnclosingFolders(expandedId, { allowShrink: false });
   if (alignDelay > 0) {
     scheduleTraceAlign(alignDelay);
     return;
@@ -2929,12 +2947,18 @@ function commitFrameLayoutSize(el, canvasEl = null) {
     }
   }
 }
-/** Prefer authored layout size over mid-FLIP offsetWidth. */
+/** Prefer the larger of authored layout and live style — mid-grow parents may
+ *  already have a bigger style.width while dataset.layoutW is still catching up. */
 function frameLayoutSize(el) {
   if (!el) return { w: 0, h: 0 };
-  const w = parseFloat(el.dataset.layoutW) || parseFloat(el.style.width) || el.offsetWidth || 0;
-  const h = parseFloat(el.dataset.layoutH) || parseFloat(el.style.height) || el.offsetHeight || 0;
-  return { w, h };
+  const dw = parseFloat(el.dataset.layoutW) || 0;
+  const dh = parseFloat(el.dataset.layoutH) || 0;
+  const sw = parseFloat(el.style.width) || 0;
+  const sh = parseFloat(el.style.height) || 0;
+  return {
+    w: Math.max(dw, sw, el.offsetWidth || 0),
+    h: Math.max(dh, sh, el.offsetHeight || 0)
+  };
 }
 /** Soft-align nearly matching left/top edges inside a folder canvas. */
 function softSnapNestedSeats(entries) {
@@ -3032,18 +3056,7 @@ function cleanupNestedLayout(parentId, { duration = 520, anchorId = null, allowS
   }), { x: NEST_PAD, y: NEST_PAD });
   // Grow from computed seats — never paint TO seats before the ease (that snapped).
   reshapeParentCanvas(parentEl, canvasEl, grow.x + NEST_PAD, grow.y + NEST_PAD, { allowShrink });
-  const grandparentEl = parentEl.parentElement?.closest('.frame.float[data-drag-id]');
-  const grandparentCanvas = grandparentEl?.querySelector(':scope > .frame-canvas');
-  if (grandparentEl && grandparentCanvas) {
-    encapsulateNestedChild(
-      grandparentEl,
-      grandparentCanvas,
-      parentEl,
-      parseFloat(parentEl.style.left) || 0,
-      parseFloat(parentEl.style.top) || 0,
-      { skipId: parentEl.dataset.dragId, deep: true, allowShrink }
-    );
-  }
+  accommodateEnclosingFolders(anchorId || parentId, { allowShrink });
   const applySeat = (el, x, y) => {
     el.style.left = `${x}px`;
     el.style.top = `${y}px`;
@@ -3108,7 +3121,6 @@ function softSettleAfterExpand(id, { duration = 1800 } = {}) {
     const islandEl = scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(islandId)}"]`)
       || scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`);
     if (!islandEl) return;
-    softSettleNeighbors(islandId, islandEl, { duration: Math.max(720, Math.min(1100, duration)) });
     // Nested open: shelf-resolve siblings inside the parent canvas around the grown chip.
     // Grow-only — shrinking the shell here collapsed folders horizontally mid-morph.
     const parentId = parentCanvasId(id);
@@ -3117,6 +3129,9 @@ function softSettleAfterExpand(id, { duration = 1800 } = {}) {
       anchorId: id,
       allowShrink: false
     });
+    // Re-bubble after nested cleanup so grandparents match the final seats.
+    accommodateEnclosingFolders(id, { allowShrink: false });
+    softSettleNeighbors(islandId, islandEl, { duration: Math.max(720, Math.min(1100, duration)) });
   };
   // Wait two frames so playFlip commits final width/height before any live measure fallback.
   requestAnimationFrame(() => requestAnimationFrame(run));

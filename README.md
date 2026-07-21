@@ -60,7 +60,7 @@ GPT-5.6 drove the sustained coding loop across the full build:
 
 Explore the live interactive fixture map: **[DeepFlow Live Demo](https://deepflow-42li.onrender.com/#path=services&mode=signal)**
 
-*(Note: Hosted on Render's free tier. If the instance has been inactive, it may take ~50 seconds to spin back up on your first click.)*
+*(Hosted on Render's free tier. If the instance has been inactive, it may take ~50 seconds to spin back up on your first click.)*
 
 ---
 
@@ -98,8 +98,8 @@ npm run dev          # viewer on http://localhost:4317
 
 ## What it does
 
-| | |
-|--|--|
+| Feature | Description |
+|---------|-------------|
 | **Live agent loop** | `deepflow_after_edit` refreshes the graph and triggers animations the moment an agent writes a file |
 | **Nested frames** | Folder frames wrap file frames wrap function frames, like Figma for your codebase |
 | **Trace focus** | Pin any node; unrelated rows dim and wires follow calls and imports |
@@ -107,7 +107,7 @@ npm run dev          # viewer on http://localhost:4317
 
 **Keyboard:** `Cmd+K` / `Ctrl+K` to search, double-click a function to open source, `Esc` to collapse, drag to pan, scroll to zoom.
 
-**Deep link:** `#path=apps/gateway/src/routes.ts&module=startIngest&mode=signal`
+**Deep link example:** `#path=apps/gateway/src/routes.ts&module=startIngest&mode=signal`
 
 ---
 
@@ -117,7 +117,7 @@ The viewer (`npm run dev`) needs to be running for tools that animate the UI. An
 
 | Tool | What it does |
 |------|-------------|
-| `deepflow_status` | Health check -- viewer, root, connected browsers |
+| `deepflow_status` | Health check: viewer, root, connected browsers |
 | `deepflow_open_workspace` | Connect a repo and start the FS watcher (call this first) |
 | `deepflow_summary` | Compact brief: languages, entrypoints, orphans, hot files |
 | `deepflow_find` | Search files and modules by substring |
@@ -165,7 +165,7 @@ deepflow_impact { root, path }
 
 | Path | Use |
 |------|-----|
-| `fixtures/atlas-workspace` | Messy TS monorepo -- default boot target and full demo |
+| `fixtures/atlas-workspace` | Messy TS monorepo, default boot target and full demo |
 | `fixtures/python-mini` | Tiny Python import and call graph |
 
 Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP edges are not inferred; each language's own imports and calls are tracked separately.
@@ -186,7 +186,7 @@ Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP e
 ## Requirements
 
 - Node.js **18+** (20+ recommended)
-- A native build toolchain only if `tree-sitter` needs to compile on your platform -- standard `npm install` is enough on macOS and Linux
+- A native build toolchain only if `tree-sitter` needs to compile on your platform (standard `npm install` is enough on macOS and Linux)
 - A browser open to the viewer for live animations
 - Git (optional, enables diff badges on file nodes)
 
@@ -196,12 +196,12 @@ Any JS/TS/Python repo works via `deepflow_open_workspace`. Cross-language HTTP e
 
 Everything runs locally. No source code or graph data is ever uploaded. The browser folder picker builds a static snapshot on your machine. Live watching, Git integration, and agent sync all go through MCP `deepflow_open_workspace` pointing at your disk.
 
-```
-server.js                 HTTP viewer + SSE + track API
-mcp-server.js             MCP tools (stdio JSON-RPC)
-src/repository-graph.js   Tree-sitter polyglot graph
-src/graph-insights.js     Summary / find / impact / tour
-public/                   Signal map UI
-fixtures/                 Demo workspaces
-AGENTS.md                 Agent contract
-```
+| File | Role |
+|------|------|
+| `server.js` | HTTP viewer + SSE + track API |
+| `mcp-server.js` | MCP tools (stdio JSON-RPC) |
+| `src/repository-graph.js` | Tree-sitter polyglot graph builder |
+| `src/graph-insights.js` | Summary / find / impact / tour helpers |
+| `public/` | Signal map UI |
+| `fixtures/` | Demo workspaces |
+| `AGENTS.md` | Agent contract |

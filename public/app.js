@@ -1075,18 +1075,25 @@ function cancelSoftSettle() {
   softSettleToken += 1;
 }
 /**
- * Clear real overlaps only (keep focus + pinned fixed).
- * Stacked folders always unstack; islands that aren't overlapping stay put.
+ * Clear overlaps that involve a constellation pack (and anything sitting on it).
+ * Never reshuffles far/unrelated islands — that caused focus snap-back.
  */
-function softHealIslandGaps(anchorId, { duration = 560 } = {}) {
+function softHealIslandGaps(anchorId, { duration = 480, packIds = null } = {}) {
   if (!anchorId || !scene) return Promise.resolve();
+  const pack = packIds instanceof Set && packIds.size ? packIds : new Set([anchorId, ...traceArranged]);
   const hard = new Set([anchorId, ...pinnedLayout]);
+  const shelfHits = (a, b, gap) => {
+    const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return ox > -gap && oy > -gap;
+  };
   const boxes = [];
+  const byId = new Map();
   for (const el of topLevelIslandElements()) {
     const id = el.dataset.dragId;
     if (!id) continue;
     const shelf = islandShelfBox(el, id);
-    boxes.push({
+    const row = {
       id,
       el,
       left: shelf.left,
@@ -1095,13 +1102,24 @@ function softHealIslandGaps(anchorId, { duration = 560 } = {}) {
       y: shelf.y,
       w: shelf.w,
       h: shelf.h,
-      from: { ...(offsets.get(id) || { x: 0, y: 0 }) }
-    });
+      from: { ...(offsets.get(id) || { x: 0, y: 0 }) },
+      inPack: pack.has(id)
+    };
+    byId.set(id, row);
+    boxes.push(row);
   }
-  if (boxes.length < 2) return Promise.resolve();
-  separateBoxes(boxes, { gap: ISLAND_GAP, passes: 56, anchors: hard, pad: 0 });
+  const packBoxes = boxes.filter(b => b.inPack);
+  if (packBoxes.length < 1) return Promise.resolve();
+  // Only pack members + islands that currently overlap a pack member.
+  const involved = boxes.filter(b => {
+    if (b.inPack) return true;
+    if (hard.has(b.id)) return false;
+    return packBoxes.some(p => shelfHits(b, p, ISLAND_GAP));
+  });
+  if (involved.length < 2) return Promise.resolve();
+  separateBoxes(involved, { gap: ISLAND_GAP, passes: 56, anchors: hard, pad: 0 });
   const movers = [];
-  for (const box of boxes) {
+  for (const box of involved) {
     if (hard.has(box.id)) continue;
     const to = { x: box.x - box.left, y: box.y - box.top };
     if (Math.abs(to.x - box.from.x) < 1 && Math.abs(to.y - box.from.y) < 1) continue;
@@ -2217,70 +2235,88 @@ function computeConstellationMovers() {
   placeDeep(hop2);
   placeDeep(hop3);
 
-  // 1) Clear overlaps among pulled islands (focus stays put).
-  const movable = [...world.entries()].map(([id, box]) => ({ id, ...box }));
-  separateBoxes(movable, { gap: ISLAND_GAP, passes: 36, anchors: new Set([focusTop.id]), pad: 0 });
-  // Tether: hold X hard against the connector (readable wire), ease Y gently.
-  for (let tug = 0; tug < 4; tug++) {
-    for (const box of movable) {
-      if (box.id === focusTop.id) continue;
+  const shelfHits = (a, b, gap) => {
+    const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return ox > -gap && oy > -gap;
+  };
+
+  // Seed pack seats from connector placement.
+  let solve = [...world.entries()].map(([id, box]) => ({
+    id,
+    ...box,
+    role: 'pack',
+    left: byId.get(id)?.left ?? box.x,
+    top: byId.get(id)?.top ?? box.y
+  }));
+  // Pin focus to its live seat.
+  for (const box of solve) {
+    if (box.id === focusTop.id) {
+      box.x = focusBox.x;
+      box.y = focusBox.y;
+      box.w = focusBox.w;
+      box.h = focusBox.h;
+    }
+  }
+
+  // Blockers: only islands that currently sit on a reserved pack landing.
+  const blockers = [];
+  for (const el of topLevelIslandElements()) {
+    const id = el.dataset.dragId;
+    if (!id || packIds.has(id) || pinnedLayout.has(id)) continue;
+    const cur = islandShelfBox(el, id);
+    if (!solve.some(seat => shelfHits(cur, seat, ISLAND_GAP))) continue;
+    blockers.push({
+      id,
+      el: cur.el,
+      left: cur.left,
+      top: cur.top,
+      x: cur.x,
+      y: cur.y,
+      w: cur.w,
+      h: cur.h,
+      role: 'block'
+    });
+  }
+  solve = solve.concat(blockers);
+
+  const hard = new Set([focusTop.id, ...pinnedLayout]);
+  // One shared solve so landed pack seats are vacant before flight starts.
+  for (let round = 0; round < 5; round++) {
+    separateBoxes(solve, { gap: ISLAND_GAP, passes: 48, anchors: hard, pad: 0 });
+    for (const box of solve) {
+      if (box.id === focusTop.id) {
+        box.x = focusBox.x;
+        box.y = focusBox.y;
+        continue;
+      }
+      if (box.role !== 'pack') continue;
       const pref = preferred.get(box.id);
       if (!pref) continue;
-      box.x += (pref.x - box.x) * 0.72;
-      box.y += (pref.y - box.y) * 0.38;
+      box.x += (pref.x - box.x) * 0.5;
+      box.y += (pref.y - box.y) * 0.28;
     }
-    separateBoxes(movable, { gap: ISLAND_GAP, passes: 14, anchors: new Set([focusTop.id]), pad: 0 });
   }
-  for (const box of movable) {
+  separateBoxes(solve, { gap: ISLAND_GAP, passes: 72, anchors: hard, pad: 0 });
+  for (const box of solve) {
     if (box.id === focusTop.id) {
-      world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
-    } else {
-      world.set(box.id, { x: box.x, y: box.y, w: box.w, h: box.h });
+      box.x = focusBox.x;
+      box.y = focusBox.y;
     }
+  }
+
+  world.clear();
+  for (const box of solve) {
+    if (box.role === 'pack') world.set(box.id, { x: box.x, y: box.y, w: box.w, h: box.h });
   }
   world.set(focusTop.id, { x: focusBox.x, y: focusBox.y, w: focusBox.w, h: focusBox.h });
 
   const packSeats = [...world.entries()].map(([id, box]) => ({ id, ...box }));
   const packIdsFinal = new Set(packSeats.map(s => s.id));
 
-  // 2) Only bystanders that actually sit on a reserved landing seat yield.
-  //    Far/unrelated islands stay completely still — no cascade nudges.
-  const shelfHits = (a, b, gap) => {
-    const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
-    const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-    return ox > -gap && oy > -gap;
-  };
-  const bystanderBoxes = [];
-  for (const el of topLevelIslandElements()) {
-    const id = el.dataset.dragId;
-    if (!id || packIdsFinal.has(id)) continue;
-    if (pinnedLayout.has(id)) continue;
-    const box = islandShelfBox(el, id);
-    const blocksLanding = packSeats.some(seat => shelfHits(box, seat, ISLAND_GAP));
-    if (!blocksLanding) continue;
-    bystanderBoxes.push({
-      id,
-      el: box.el,
-      left: box.left,
-      top: box.top,
-      x: box.x,
-      y: box.y,
-      w: box.w,
-      h: box.h
-    });
-  }
-  const walls = packSeats.map(s => ({ id: s.id, x: s.x, y: s.y, w: s.w, h: s.h }));
-  for (const el of topLevelIslandElements()) {
-    const id = el.dataset.dragId;
-    if (!id || packIdsFinal.has(id) || bystanderBoxes.some(b => b.id === id)) continue;
-    if (!pinnedLayout.has(id)) continue;
-    const box = islandShelfBox(el, id);
-    walls.push({ id, x: box.x, y: box.y, w: box.w, h: box.h });
-  }
-  yieldBoxesFromWalls(bystanderBoxes, walls, { gap: ISLAND_GAP, passes: 56, pad: 0 });
-
   const bystanderMoves = [];
-  for (const box of bystanderBoxes) {
+  for (const box of solve) {
+    if (box.role !== 'block') continue;
     const ox = box.x - box.left;
     const oy = box.y - box.top;
     const cur = offsets.get(box.id) || { x: 0, y: 0 };
@@ -2288,6 +2324,7 @@ function computeConstellationMovers() {
     bystanderMoves.push({ id: box.id, ox, oy, x: box.x, y: box.y, w: box.w, h: box.h });
   }
 
+  const STABLE = 40;
   const movers = [];
   const stickIds = [];
   for (const box of boxes) {
@@ -2295,13 +2332,9 @@ function computeConstellationMovers() {
     const ideal = world.get(box.id);
     if (!ideal) continue;
     stickIds.push(box.id);
-    const tx = ideal.x;
-    const ty = ideal.y;
-    const dist = Math.hypot(tx - box.x, ty - box.y);
-    // Always commit to the cleared seat — short blends left islands overlapping
-    // the bystander lane they were supposed to claim.
-    const to = { x: tx - box.left, y: ty - box.top };
-    if (Math.abs(to.x - box.off.x) < 1.5 && Math.abs(to.y - box.off.y) < 1.5) continue;
+    const dist = Math.hypot(ideal.x - box.x, ideal.y - box.y);
+    const to = { x: ideal.x - box.left, y: ideal.y - box.top };
+    if (dist < STABLE && Math.abs(to.x - box.off.x) < 2 && Math.abs(to.y - box.off.y) < 2) continue;
     movers.push({
       id: box.id,
       el: box.el,
@@ -2322,6 +2355,10 @@ function scheduleTraceAlign(delay = 90) {
     runTraceAlign(token);
   }, delay);
 }
+function markTraceArranged(focusTopId, stickIds) {
+  for (const id of stickIds || []) traceArranged.add(id);
+  if (focusTopId) traceArranged.add(focusTopId);
+}
 function runTraceAlign(token) {
   if (!graph || app.classList.contains('dragging')) {
     if (app.classList.contains('dragging')) {
@@ -2338,17 +2375,17 @@ function runTraceAlign(token) {
   if (scene?.querySelector?.('.frame.flipping, .frame.size-morph')) stripFlipTransforms();
   clearTimeout(gravityTimer);
   clearSeatLock();
-  const { movers, stickIds, focusTopId, packSeats, bystanderMoves } = computeConstellationMovers();
+  const { movers, stickIds, focusTopId, packSeats, packIds, bystanderMoves } = computeConstellationMovers();
   const focusIsland = focusTopId
     ? scene.querySelector(`.frame-artboard > .frame.float[data-drag-id="${CSS.escape(focusTopId)}"]`)
     : null;
   const protectIds = new Set([focusTopId, ...(stickIds || []), ...(movers || []).map(m => m.id)].filter(Boolean));
+  const packIdSet = packIds instanceof Set ? packIds : new Set((packSeats || []).map(p => p.id));
   const clearerIds = new Set((bystanderMoves || []).map(m => m.id));
-  // Landing seats only — not pinned islands as extra walls that shove neighbors.
   const walls = [...(packSeats || [])];
 
   const settleClear = (ms) => {
-    if (!focusIsland || !focusTopId) return Promise.resolve();
+    if (!focusIsland || !focusTopId || !(bystanderMoves || []).length) return Promise.resolve();
     return softSettleNeighbors(focusTopId, focusIsland, {
       duration: ms,
       protectIds,
@@ -2378,15 +2415,22 @@ function runTraceAlign(token) {
     if (focusTopId) traceArranged.add(focusTopId);
   };
 
+  const finishClear = () => {
+    bakeClearers();
+    // Pack-scoped residual only — never a global reshuffle (that snapped unrelated back).
+    return softHealIslandGaps(focusTopId, { duration: 420, packIds: packIdSet });
+  };
+
+  // Already settled: no flight, no clearer motion → do nothing (re-click safe).
+  if (!movers.length && !(bystanderMoves || []).length) {
+    markTraceArranged(focusTopId, stickIds);
+    scheduleGravityDrift(400);
+    return;
+  }
+
   if (!movers.length) {
-    for (const id of stickIds || []) traceArranged.add(id);
-    if (focusTopId) traceArranged.add(focusTopId);
-    settleClear(820).then(() => {
-      bakeClearers();
-      softHealIslandGaps(focusTopId, { duration: 560 }).then(() => {
-        scheduleGravityDrift(400);
-      });
-    });
+    markTraceArranged(focusTopId, stickIds);
+    settleClear(640).then(() => finishClear().then(() => scheduleGravityDrift(400)));
     return;
   }
 
@@ -2408,7 +2452,6 @@ function runTraceAlign(token) {
     focusEl.classList.add('trace-align-focus');
     focusEl.style.zIndex = '70';
   }
-  // Clear overlaps in the SAME beat as the flight — not a second snap after.
   const blockersDone = settleClear(duration);
 
   const tick = now => {
@@ -2444,7 +2487,6 @@ function runTraceAlign(token) {
       mover.el.style.setProperty('--ox', `${mover.to.x}px`);
       mover.el.style.setProperty('--oy', `${mover.to.y}px`);
     }
-    // Bake while still .trace-flying (left/top transitions frozen), then clear classes.
     bakeFlight();
     for (const mover of movers) {
       mover.el.classList.remove('trace-flying');
@@ -2455,9 +2497,7 @@ function runTraceAlign(token) {
     scene.classList.remove('trace-aligning');
     traceAlignRaf = 0;
     blockersDone.then(() => {
-      bakeClearers();
-      // Unstack anything still overlapping — only islands that overlapped move.
-      softHealIslandGaps(focusTopId, { duration: 560 }).then(() => {
+      finishClear().then(() => {
         scheduleDraw();
         renderMinimap();
         scheduleGravityDrift(400);
@@ -4398,6 +4438,14 @@ function beginFocusAlignMotion({ animateOpen = true } = {}) {
   }
   scheduleGravityDrift(animateOpen ? 1300 : 700);
 }
+/** True when this click is a no-op re-focus of an already settled constellation. */
+function isStableRefocus(item, { opening = false } = {}) {
+  if (opening || !item) return false;
+  if (selectedId !== item.id) return false;
+  if (traceAlignRaf || softSettleRunning > 0) return false;
+  const top = topLevelOwner(fileOf(item) || item);
+  return !!(top && traceArranged.has(top.id));
+}
 function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   if (!folder || folder.kind !== 'folder') return;
   if (agentRevealPath) {
@@ -4405,9 +4453,17 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
     agentRevealPath = null;
     agentRevealExpandedId = null;
   }
+  const opening = expand && folder.id !== displayRoot()?.id && !expandedFolders.has(folder.id);
+  // Re-clicking an already-focused settled folder must not reshuffle the map.
+  if (isStableRefocus(folder, { opening })) {
+    if (event) captureClickAnchor(folder.id, event);
+    pulseSelection();
+    animateReflowEdges(360);
+    updateInspector();
+    return;
+  }
   remember();
   if (event) captureClickAnchor(folder.id, event);
-  const opening = expand && folder.id !== displayRoot()?.id && !expandedFolders.has(folder.id);
   // Only morph when actually opening — re-focus must not FLIP then constellation.
   beginFocusAlignMotion({ animateOpen: opening });
   if (opening) {
@@ -4440,9 +4496,16 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
     agentRevealPath = null;
     agentRevealExpandedId = null;
   }
+  const opening = expand && !expandedFiles.has(file.id);
+  if (isStableRefocus(file, { opening })) {
+    if (event) captureClickAnchor(file.id, event);
+    pulseSelection();
+    animateReflowEdges(360);
+    updateInspector();
+    return;
+  }
   remember();
   if (event) captureClickAnchor(file.id, event);
-  const opening = expand && !expandedFiles.has(file.id);
   beginFocusAlignMotion({ animateOpen: opening });
   if (opening) {
     clearSeatLock();
@@ -5151,6 +5214,13 @@ function bindScene() {
       // Module / inline: open ancestors first, then one constellation (never align mid-FLIP).
       const file = fileOf(item);
       const openingFile = !!(file && !expandedFiles.has(file.id));
+      if (isStableRefocus(item, { opening: openingFile })) {
+        captureClickAnchor(item.id, event);
+        pulseSelection();
+        animateReflowEdges(360);
+        updateInspector();
+        return;
+      }
       beginFocusAlignMotion({ animateOpen: openingFile });
       if (openingFile) {
         clearSeatLock();

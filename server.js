@@ -115,4 +115,4 @@ createServer(async (req, res) => {
     const file = join(appRoot, 'public', pathname);
     const body = await readFile(file); res.writeHead(200, { 'content-type': contentTypes[extname(file)] || 'application/octet-stream' }); res.end(body);
   } catch (error) { sendJson(res, { error: error.message }, 400); }
-}).listen(process.env.PORT || 4317, () => console.log('DeepFlow → http://localhost:4317'));
+}).listen(process.env.PORT || 4317, '0.0.0.0', () => console.log(`DeepFlow → http://0.0.0.0:${process.env.PORT || 4317}`));

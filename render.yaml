@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: deepflow
+    env: node
+    buildCommand: npm install
+    startCommand: npm run dev
+    plan: free

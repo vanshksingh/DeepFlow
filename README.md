@@ -16,7 +16,7 @@
 
 <br/>
 
-Most code tools either show the human the architecture, or feed context to the agent. DeepFlow does both at the same time. Tree-sitter parses your JS/TS and Python files locally, and an MCP bridge lets any agent open a workspace, query the graph, and animate the viewer as it edits, so you can actually watch your agent navigate the codebase in real time.
+Most code tools either show the human the architecture, or feed context to the agent. DeepFlow does both at the same time. Tree-sitter parses your JS/TS and Python files locally, and an MCP bridge lets any agent open a workspace, query the graph, and animate the viewer as it edits, so you can actually watch your agent navigate the codebase in real time. [Try the live demo.](https://deepflow-42li.onrender.com/#path=services&mode=signal)
 
 > The agent doesn't just edit files. It shows the architecture moving.
 

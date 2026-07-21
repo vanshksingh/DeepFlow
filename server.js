@@ -120,4 +120,4 @@ createServer(async (req, res) => {
     }
     const body = await readFile(file); res.writeHead(200, { 'content-type': contentTypes[extname(file)] || 'application/octet-stream' }); res.end(body);
   } catch (error) { sendJson(res, { error: error.message }, error.message === 'Not found' ? 404 : 400); }
-}).listen(process.env.PORT || 4317, process.env.HOST || '127.0.0.1', () => console.log(`DeepFlow → http://${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 4317}`));
+}).listen(process.env.PORT || 4317, process.env.HOST || '0.0.0.0', () => console.log(`DeepFlow → http://${process.env.HOST || '0.0.0.0'}:${process.env.PORT || 4317}`));

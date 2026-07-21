@@ -2,7 +2,8 @@
 /** Local-only MCP bridge for DeepFlow, agent-native architecture map. */
 import { createInterface } from 'node:readline';
 import { stat } from 'node:fs/promises';
-import { resolve, relative, sep, dirname } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { resolve, relative, sep, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -116,7 +117,7 @@ const tools = [
   {
     name: 'deepflow_set_mode',
     description: 'Force viewer layout mode: rails (architecture overview) or signal (calls-in → focus → calls-out).',
-    inputSchema: withRoot({ mode: { type: 'string', enum: ['rails', 'signal'] } }, ['root', 'mode'])
+    inputSchema: withRoot({ mode: { type: 'string', enum: ['rails', 'signal', 'outline'], description: 'outline is an alias of rails' } }, ['root', 'mode'])
   },
   {
     name: 'deepflow_set_edges',
@@ -207,9 +208,22 @@ async function workspaceRoot(value) {
   if (!(await stat(root)).isDirectory()) throw new Error(`Not a readable local directory: ${root}`);
   return root;
 }
+function insideRoot(root, target) {
+  return target === root || target.startsWith(root + sep);
+}
 function safePath(root, value) {
   const target = resolve(root, String(value || ''));
-  if (target !== root && !target.startsWith(root + sep)) throw new Error('Path must stay inside the requested workspace.');
+  if (!insideRoot(root, target)) throw new Error('Path must stay inside the requested workspace.');
+  let realRoot = root;
+  try { realRoot = realpathSync(root); } catch {}
+  let realTarget = target;
+  try {
+    if (existsSync(target)) realTarget = realpathSync(target);
+    else if (existsSync(dirname(target))) realTarget = join(realpathSync(dirname(target)), relative(dirname(target), target));
+  } catch {
+    realTarget = target;
+  }
+  if (!insideRoot(realRoot, resolve(realTarget))) throw new Error('Path must stay inside the requested workspace.');
   return relative(root, target).replaceAll('\\', '/');
 }
 /** Allow `path/to/file.ts::moduleName` while still sandboxing the file portion. */
@@ -219,8 +233,18 @@ function safePathRef(root, value) {
   if (split === -1) return safePath(root, raw);
   return `${safePath(root, raw.slice(0, split))}${raw.slice(split)}`;
 }
+function assertLoopbackViewer(url) {
+  const base = String(url || DEFAULT_VIEWER);
+  let parsed;
+  try { parsed = new URL(base); } catch { throw new Error(`Invalid viewerUrl: ${base}`); }
+  const host = parsed.hostname;
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    throw new Error(`viewerUrl must target loopback (127.0.0.1/localhost); got ${host}`);
+  }
+  return base.replace(/\/$/, '');
+}
 async function viewerRequest(url, path, body, method = 'POST') {
-  const base = String(url || DEFAULT_VIEWER).replace(/\/$/, '');
+  const base = assertLoopbackViewer(url);
   const response = await fetch(`${base}${path}`, {
     method,
     headers: method === 'GET' ? undefined : { 'content-type': 'application/json' },
@@ -232,6 +256,14 @@ async function viewerRequest(url, path, body, method = 'POST') {
 async function graphFor(root) {
   return createRepositoryGraph({ roots: [root] });
 }
+async function viewerTry(viewer, path, body, method = 'POST') {
+  try {
+    return { ok: true, ...(await viewerRequest(viewer, path, body, method)) };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+}
+
 
 async function call(name, args = {}) {
   if (name === 'deepflow_setup_help') {
@@ -289,8 +321,8 @@ async function call(name, args = {}) {
   }
 
   if (name === 'deepflow_summary') {
-    try { await viewerRequest(viewer, '/api/track', { root }); } catch {}
-    return summarizeGraph(await graphFor(root));
+    const track = await viewerTry(viewer, '/api/track', { root });
+    return { ...summarizeGraph(await graphFor(root)), viewer: track.ok ? { ok: true } : { ok: false, error: track.error } };
   }
 
   if (name === 'deepflow_find') return { query: args.query, matches: findInGraph(await graphFor(root), args.query, { limit: args.limit || 24 }) };
@@ -302,13 +334,16 @@ async function call(name, args = {}) {
   if (name === 'deepflow_entrypoints') return { entrypoints: entrypoints(await graphFor(root)) };
   if (name === 'deepflow_orphans') {
     const list = orphans(await graphFor(root));
+    let viewerStatus = { ok: true };
     if (args.showInViewer !== false) {
-      try {
-        await viewerRequest(viewer, '/api/track', { root });
-        await viewerRequest(viewer, '/api/mcp-command', { type: 'show-orphans', pulse: true, paths: list.filter(i => i.kind === 'file').map(i => i.path).slice(0, 40) });
-      } catch {}
+      const track = await viewerTry(viewer, '/api/track', { root });
+      if (!track.ok) viewerStatus = { ok: false, error: track.error };
+      else {
+        const shown = await viewerTry(viewer, '/api/mcp-command', { type: 'show-orphans', pulse: true, paths: list.filter(i => i.kind === 'file').map(i => i.path).slice(0, 40) });
+        if (!shown.ok) viewerStatus = { ok: false, error: shown.error };
+      }
     }
-    return { count: list.length, orphans: list };
+    return { count: list.length, orphans: list, viewer: viewerStatus };
   }
   if (name === 'deepflow_diagnostics') {
     const graph = await graphFor(root);
@@ -319,10 +354,14 @@ async function call(name, args = {}) {
   if (name === 'deepflow_after_edit') return viewerRequest(viewer, '/api/mcp-change', { root, paths: (args.paths || []).map(p => safePath(root, p)) });
   if (name === 'deepflow_jump_to') {
     await viewerRequest(viewer, '/api/track', { root });
+    const ref = safePathRef(root, args.path);
+    const split = ref.search(/::|#/);
+    const path = split === -1 ? ref : ref.slice(0, split);
+    const moduleFromRef = split === -1 ? null : ref.slice(split + (ref[split] === '#' ? 1 : 2));
     return viewerRequest(viewer, '/api/mcp-command', {
       type: 'jump',
-      path: safePath(root, args.path),
-      module: args.module,
+      path,
+      module: args.module || moduleFromRef || undefined,
       line: args.line,
       pin: !!args.pin,
       pulse: args.pulse !== false
@@ -397,19 +436,22 @@ async function call(name, args = {}) {
   if (name === 'deepflow_explain_flow') {
     const ref = args.module ? `${safePath(root, args.path)}::${args.module}` : safePathRef(root, args.path);
     const story = explainFlow(await graphFor(root), ref);
+    let viewerStatus = { ok: true };
     if (args.openOverlay !== false) {
-      try {
-        await viewerRequest(viewer, '/api/track', { root });
-        await viewerRequest(viewer, '/api/mcp-command', {
+      const track = await viewerTry(viewer, '/api/track', { root });
+      if (!track.ok) viewerStatus = { ok: false, error: track.error };
+      else {
+        const opened = await viewerTry(viewer, '/api/mcp-command', {
           type: 'open-flow',
           path: story.path,
           module: story.module,
           narrative: story.narrative,
           story
         });
-      } catch {}
+        if (!opened.ok) viewerStatus = { ok: false, error: opened.error };
+      }
     }
-    return story;
+    return { ...story, viewer: viewerStatus };
   }
   if (name === 'deepflow_close_flow') return viewerRequest(viewer, '/api/mcp-command', { type: 'close-flow' });
   if (name === 'deepflow_share_link') {
@@ -419,29 +461,55 @@ async function call(name, args = {}) {
     if (args.module) params.set('module', args.module);
     if (args.mode) params.set('mode', args.mode);
     const hash = `#${params.toString()}`;
-    return { url: `${String(viewer).replace(/\/$/, '')}/${hash}`, hash, path, module: args.module || null, mode: args.mode || 'signal' };
+    return { url: `${String(viewer).replace(/\/$/, '')}${hash}`, hash, path, module: args.module || null, mode: args.mode || 'signal' };
   }
   if (name === 'deepflow_file_diff') {
     const path = safePath(root, args.path);
     try {
-      const { stdout } = await run('git', ['-C', root, 'diff', '--no-ext-diff', '--unified=3', 'HEAD', '--', path], { timeout: 5000 });
-      return { root, path, diff: stdout || 'No uncommitted Git diff for this file.' };
+      const { stdout: statusOut } = await run('git', ['-C', root, 'status', '--porcelain', '--', path], { timeout: 5000 });
+      const status = String(statusOut || '').trim();
+      const untracked = status.startsWith('??') || status.startsWith('A ');
+      let stdout = '';
+      if (untracked) {
+        const abs = join(root, path);
+        const result = await run('git', ['-C', root, 'diff', '--no-ext-diff', '--unified=3', '--no-index', '--', '/dev/null', abs], { timeout: 5000 }).catch(error => error);
+        stdout = result.stdout || '';
+        if (!stdout && result.stderr) {
+          return { root, path, error: result.stderr || result.message || 'Git diff failed', diff: null };
+        }
+      } else {
+        const result = await run('git', ['-C', root, 'diff', '--no-ext-diff', '--unified=3', 'HEAD', '--', path], { timeout: 5000 });
+        stdout = result.stdout || '';
+      }
+      return { root, path, untracked: !!untracked, diff: stdout || 'No uncommitted Git diff for this file.' };
     } catch (error) {
-      return { root, path, diff: error.stdout || 'No Git diff is available for this file.' };
+      return { root, path, error: error.stderr || error.message || 'Git diff failed', diff: null };
     }
   }
   if (name === 'deepflow_pr_diff') {
     const head = String(args.head || 'HEAD');
     let base = args.base ? String(args.base) : '';
     if (!base) {
-      for (const candidate of ['main', 'master']) {
+      for (const candidate of ['main', 'master', 'origin/main', 'origin/master']) {
         try {
           await run('git', ['-C', root, 'rev-parse', '--verify', candidate], { timeout: 3000 });
           base = candidate;
           break;
         } catch {}
       }
-      if (!base) base = 'HEAD~1';
+      if (!base) {
+        try {
+          const { stdout } = await run('git', ['-C', root, 'symbolic-ref', 'refs/remotes/origin/HEAD'], { timeout: 3000 });
+          const ref = String(stdout || '').trim().replace(/^refs\/remotes\//, '');
+          if (ref) {
+            await run('git', ['-C', root, 'rev-parse', '--verify', ref], { timeout: 3000 });
+            base = ref;
+          }
+        } catch {}
+      }
+      if (!base) {
+        return { root, head, error: 'No base ref found; pass base explicitly (e.g. main or origin/main).', diff: null };
+      }
     }
     const pathArgs = [];
     if (Array.isArray(args.paths) && args.paths.length) {
@@ -450,6 +518,8 @@ async function call(name, args = {}) {
     }
     const maxChars = Math.max(4000, Math.min(120000, Number(args.maxChars) || 24000));
     try {
+      await run('git', ['-C', root, 'rev-parse', '--verify', base], { timeout: 3000 });
+      await run('git', ['-C', root, 'rev-parse', '--verify', head], { timeout: 3000 });
       const { stdout } = await run(
         'git',
         ['-C', root, 'diff', '--no-ext-diff', '--unified=3', `${base}...${head}`, ...pathArgs],
@@ -458,20 +528,11 @@ async function call(name, args = {}) {
       const raw = stdout || '';
       const truncated = raw.length > maxChars;
       return {
-        root,
-        base,
-        head,
-        truncated,
+        root, base, head, truncated,
         diff: truncated ? `${raw.slice(0, maxChars)}\n\n… truncated (${raw.length} chars total)` : (raw || 'No diff for this range.')
       };
     } catch (error) {
-      return {
-        root,
-        base,
-        head,
-        truncated: false,
-        diff: error.stdout || error.message || 'No Git PR/branch diff is available for this range.'
-      };
+      return { root, base, head, truncated: false, error: error.stderr || error.message || 'Git PR/branch diff failed', diff: null };
     }
   }
   throw new Error(`Unknown tool: ${name}`);
@@ -480,7 +541,11 @@ async function call(name, args = {}) {
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let requestQueue = Promise.resolve();
 input.on('line', line => {
-  requestQueue = requestQueue.then(() => handleRequest(line)).catch(error => send({ jsonrpc: '2.0', error: { code: -32000, message: error.message } }));
+  let peekedId;
+  try { peekedId = JSON.parse(line)?.id; } catch { peekedId = undefined; }
+  requestQueue = requestQueue.then(() => handleRequest(line)).catch(error => {
+    if (peekedId !== undefined) send({ jsonrpc: '2.0', id: peekedId, error: { code: -32000, message: error.message } });
+  });
 });
 async function handleRequest(line) {
   let request;
@@ -503,6 +568,10 @@ async function handleRequest(line) {
     if (request.method === 'ping') return send({ jsonrpc: '2.0', id: request.id, result: {} });
     if (request.id !== undefined) return send({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: `Unsupported method: ${request.method}` } });
   } catch (error) {
-    if (request?.id !== undefined) send({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: error.message } });
+    let id = request?.id;
+    if (id === undefined) {
+      try { id = JSON.parse(line)?.id; } catch { id = undefined; }
+    }
+    if (id !== undefined) send({ jsonrpc: '2.0', id, error: { code: -32000, message: error.message } });
   }
 }

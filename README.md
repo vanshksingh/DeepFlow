@@ -96,20 +96,23 @@ The viewer (`npm run dev`) needs to be running for tools that animate the UI. An
 | `deepflow_orphans` | Unreferenced code, highlighted in viewer |
 | `deepflow_diagnostics` | Unresolved imports, parse issues, TODOs |
 | `deepflow_after_edit` | Refresh map and trigger edit animation after a write |
-| `deepflow_jump_to` | Focus a file or module, enter signal path, pulse |
+| `deepflow_jump_to` | Focus a file or `path::module`, enter signal path, pulse |
 | `deepflow_open_flow` | Code-flow overlay: upstream, focus, downstream + snippets |
 | `deepflow_explain_flow` | Structured flow story for agents, optionally opens overlay |
 | `deepflow_close_flow` | Close the code-flow overlay |
 | `deepflow_highlight_paths` | Multi-select highlight and pin |
 | `deepflow_clear_highlights` | Clear pins, return to rails |
-| `deepflow_set_mode` | Force `rails` or `signal` mode |
+| `deepflow_set_mode` | Force `rails` / `outline` (alias) or `signal` mode |
 | `deepflow_set_edges` | Toggle calls / imports / dataflow / events |
 | `deepflow_tour` | Short Atlas walkthrough (`autoPlay: true`) |
-| `deepflow_demo` | Full showcase: map, edges, live edits, overlay, orphans (`autoPlay: true`) |
+| `deepflow_demo` | Full showcase: constellation, flow overlay, agent edit, orphans (`autoPlay: true`) |
 | `deepflow_share_link` | Hash URL for the current focus |
-| `deepflow_file_diff` | Local `git diff` for one path |
+| `deepflow_file_diff` | Local git diff for one path (includes untracked via `--no-index`) |
+| `deepflow_pr_diff` | Unified diff for a branch/PR range (`base...head`, defaults to main/master) |
 | `deepflow_analyze_workspace` | Full graph JSON |
 | `deepflow_setup_help` | MCP config block + demo roots |
+
+Paths may use `file.ts::moduleName` (or `#`) on explain / impact / jump / flow tools. `viewerUrl` must be loopback (`127.0.0.1` / `localhost`).
 
 ### Recommended agent loop
 

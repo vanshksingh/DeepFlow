@@ -65,3 +65,20 @@ test('indexes a Python workspace with import and call edges', async () => {
   assert.ok(graph.edges.some(edge => edge.type === 'imports' && edge.evidence.includes('imports app.api')));
   assert.ok(graph.edges.some(edge => edge.type === 'calls'));
 });
+
+test('workspace package imports resolve to source files, not package.json', async () => {
+  const graph = await createRepositoryGraph({ roots: [fixture] });
+  const sharedImport = graph.edges.find(edge =>
+    edge.type === 'imports'
+    && edge.evidence.includes('imports @atlas/shared')
+  );
+  assert.ok(sharedImport, 'expected an imports edge for @atlas/shared');
+  const target = graph.nodes.find(node => node.id === sharedImport.to);
+  assert.ok(target);
+  assert.equal(target.kind, 'file');
+  assert.ok(target.path.endsWith('.ts') || target.path.endsWith('.js'), `expected source file, got ${target.path}`);
+  assert.ok(!target.path.endsWith('package.json'));
+  assert.ok(graph.edges.some(edge =>
+    edge.type === 'references' && edge.evidence.includes('createId')
+  ));
+});

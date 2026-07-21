@@ -266,20 +266,77 @@ function resolvePythonImport(specifier, fromPath, fileByAbsolute) {
   return null;
 }
 
-function resolveImport(specifier, fromPath, fileByAbsolute, packageRoots) {
+function jsCandidates(base) {
+  return [
+    base,
+    ...[...JS_EXTENSIONS].map(extension => base + extension),
+    ...[...JS_EXTENSIONS].map(extension => base.replace(/\.[cm]?[jt]sx?$/, extension)),
+    ...[...JS_EXTENSIONS].map(extension => join(base, 'index' + extension))
+  ];
+}
+
+function firstExisting(candidates, fileByAbsolute) {
+  for (const candidate of candidates) {
+    const normalized = normalize(candidate);
+    if (fileByAbsolute.has(normalized)) return normalized;
+  }
+  return null;
+}
+
+function resolvePackageField(pkgDir, field, fileByAbsolute) {
+  if (!field || typeof field !== 'string') return null;
+  const cleaned = field.replace(/^\.\//, '');
+  return firstExisting(jsCandidates(join(pkgDir, cleaned)), fileByAbsolute);
+}
+
+function resolvePackageImport(specifier, packageRoots, fileByAbsolute, packageMeta = new Map()) {
+  const hit = [...packageRoots.entries()].find(([name]) => specifier === name || specifier.startsWith(name + '/'));
+  if (!hit) return null;
+  const [pkgName, pkgDir] = hit;
+  const subpath = specifier === pkgName ? '' : specifier.slice(pkgName.length + 1);
+  if (subpath) return firstExisting(jsCandidates(join(pkgDir, subpath)), fileByAbsolute);
+  const meta = packageMeta.get(pkgName) || {};
+  const fromExports = meta.exports;
+  if (typeof fromExports === 'string') {
+    const hitExport = resolvePackageField(pkgDir, fromExports, fileByAbsolute);
+    if (hitExport) return hitExport;
+  } else if (fromExports && typeof fromExports === 'object') {
+    const dot = fromExports['.'] || fromExports['./'];
+    const entry = typeof dot === 'string' ? dot : (dot && (dot.import || dot.default || dot.require));
+    const hitExport = resolvePackageField(pkgDir, entry, fileByAbsolute);
+    if (hitExport) return hitExport;
+  }
+  for (const field of [meta.module, meta.main]) {
+    const hitField = resolvePackageField(pkgDir, field, fileByAbsolute);
+    if (hitField) return hitField;
+  }
+  return firstExisting([
+    ...jsCandidates(join(pkgDir, 'src/index')),
+    ...jsCandidates(join(pkgDir, 'index'))
+  ], fileByAbsolute);
+}
+
+function findBindingInPackage(pkgDir, binding, moduleByFileAndName, fileByAbsolute) {
+  if (!binding || binding === '*') return null;
+  const root = normalize(pkgDir);
+  for (const [, mod] of moduleByFileAndName) {
+    if (mod.label !== binding && !mod.label.endsWith(`.${binding}`)) continue;
+    const file = [...fileByAbsolute.values()].find(f => f.id === mod.fileId || f.id === mod.parentId);
+    if (!file) continue;
+    if (normalize(file.absolutePath) === root || normalize(file.absolutePath).startsWith(root + '/')) {
+      return { file, mod };
+    }
+  }
+  return null;
+}
+
+function resolveImport(specifier, fromPath, fileByAbsolute, packageRoots, packageMeta = new Map()) {
   if (extname(fromPath) === '.py') return resolvePythonImport(specifier, fromPath, fileByAbsolute);
   if (specifier.startsWith('.')) {
     const base = resolve(dirname(fromPath), specifier);
-    const candidates = [
-      base,
-      ...[...JS_EXTENSIONS].map(extension => base + extension),
-      ...[...JS_EXTENSIONS].map(extension => base.replace(/\.[cm]?[jt]sx?$/, extension)),
-      ...[...JS_EXTENSIONS].map(extension => join(base, 'index' + extension))
-    ];
-    return candidates.find(candidate => fileByAbsolute.has(normalize(candidate))) || null;
+    return firstExisting(jsCandidates(base), fileByAbsolute);
   }
-  const packageRoot = [...packageRoots.entries()].find(([name]) => specifier === name || specifier.startsWith(name + '/'));
-  return packageRoot?.[1] || null;
+  return resolvePackageImport(specifier, packageRoots, fileByAbsolute, packageMeta);
 }
 
 function languageFor(filePath) {
@@ -290,7 +347,7 @@ function languageFor(filePath) {
 
 export async function createRepositoryGraph({ roots, analyzer = defaultAnalyzer }) {
   const normalizedRoots = roots.map((path, index) => ({ id: `root-${index + 1}`, path: resolve(path), label: basename(path) || path }));
-  const nodes = [], edges = [], diagnostics = [], files = [], folders = new Map(), packageRoots = new Map();
+  const nodes = [], edges = [], diagnostics = [], files = [], folders = new Map(), packageRoots = new Map(), packageMeta = new Map();
   for (const root of normalizedRoots) {
     const all = await walk(root.path); const git = await gitMetadata(root.path);
     folders.set(id(root.id, '/'), { id: id(root.id, '/'), kind: 'folder', rootId: root.id, parentId: root.id, label: root.label, path: '/', depth: 0 });
@@ -313,7 +370,13 @@ export async function createRepositoryGraph({ roots, analyzer = defaultAnalyzer 
       file.parentId = parentId; files.push({ ...file, absolutePath }); nodes.push(file);
       edges.push({ id: id('contains', parentId, fileId), type: 'contains', from: parentId, to: fileId, evidence: 'folder contains file', confidence: 'high' });
       if (basename(absolutePath) === 'package.json') {
-        try { const pkg = JSON.parse(await readFile(absolutePath, 'utf8')); if (pkg.name) packageRoots.set(pkg.name, absolutePath); } catch {}
+        try {
+          const pkg = JSON.parse(await readFile(absolutePath, 'utf8'));
+          if (pkg.name) {
+            packageRoots.set(pkg.name, dirname(absolutePath));
+            packageMeta.set(pkg.name, { main: pkg.main, module: pkg.module, exports: pkg.exports });
+          }
+        } catch {}
       }
     }
   }
@@ -349,18 +412,46 @@ export async function createRepositoryGraph({ roots, analyzer = defaultAnalyzer 
   for (const file of files.filter((item) => importsByFile.has(item.id))) {
     const result = importsByFile.get(file.id);
     for (const imported of result.imports) {
-      const targetPath = resolveImport(imported.specifier, file.absolutePath, fileByAbsolute, packageRoots);
-      if (!targetPath) {
-        // Skip unresolved absolute Python imports (stdlib / third-party noise).
+      let targetPath = resolveImport(imported.specifier, file.absolutePath, fileByAbsolute, packageRoots, packageMeta);
+      let target = targetPath ? fileByAbsolute.get(normalize(targetPath)) : null;
+      if (!target) {
+        const pkgHit = [...packageRoots.entries()].find(([name]) => imported.specifier === name || imported.specifier.startsWith(name + '/'));
+        if (pkgHit && (imported.specifier === pkgHit[0])) {
+          const linked = [];
+          for (const binding of imported.bindings || []) {
+            const found = findBindingInPackage(pkgHit[1], binding, moduleByFileAndName, fileByAbsolute);
+            if (!found) continue;
+            linked.push(found);
+            if (!target) target = found.file;
+          }
+          if (target) {
+            edges.push({ id: id('imports', file.id, target.id, imported.line), type: imported.reexport ? 'reexports' : 'imports', from: file.id, to: target.id, evidence: `${file.label} imports ${imported.specifier}`, line: imported.line, confidence: 'high' });
+            for (const { mod } of linked) {
+              edges.push({ id: id('references', file.id, mod.id, imported.line), type: 'references', from: file.id, to: mod.id, evidence: `imports ${mod.label}`, line: imported.line, confidence: 'high' });
+            }
+            continue;
+          }
+        }
+      }
+      if (!target) {
         if (file.extension === '.py' && !imported.specifier.startsWith('.')) continue;
         diagnostics.push({ severity: 'error', path: file.path, fileId: file.id, line: imported.line, message: `Unresolved import: ${imported.specifier}` });
         continue;
       }
-      const target = fileByAbsolute.get(normalize(targetPath)); if (!target) continue;
       edges.push({ id: id('imports', file.id, target.id, imported.line), type: imported.reexport ? 'reexports' : 'imports', from: file.id, to: target.id, evidence: `${file.label} imports ${imported.specifier}`, line: imported.line, confidence: 'high' });
       for (const binding of imported.bindings) {
         if (binding === '*') continue;
-        const importedModule = moduleByFileAndName.get(`${target.id}:${binding}`);
+        let importedModule = moduleByFileAndName.get(`${target.id}:${binding}`);
+        if (!importedModule) {
+          const pkgHit = [...packageRoots.entries()].find(([name]) => imported.specifier === name || imported.specifier.startsWith(name + '/'));
+          if (pkgHit) {
+            const found = findBindingInPackage(pkgHit[1], binding, moduleByFileAndName, fileByAbsolute);
+            importedModule = found?.mod || null;
+            if (found && found.file.id !== target.id) {
+              edges.push({ id: id('imports', file.id, found.file.id, imported.line, binding), type: 'imports', from: file.id, to: found.file.id, evidence: `${file.label} imports ${imported.specifier}`, line: imported.line, confidence: 'medium' });
+            }
+          }
+        }
         if (importedModule) edges.push({ id: id('references', file.id, importedModule.id, imported.line), type: 'references', from: file.id, to: importedModule.id, evidence: `imports ${binding}`, line: imported.line, confidence: 'high' });
       }
     }

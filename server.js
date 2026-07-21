@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile, readdir, stat, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { watch as watchFilesystem } from 'node:fs';
-import { extname, join, dirname, resolve, relative } from 'node:path';
+import { extname, join, dirname, resolve, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createRepositoryGraph } from './src/repository-graph.js';
 import { CAPABILITY_DEMO_STEPS } from './src/graph-insights.js';
@@ -111,8 +111,13 @@ createServer(async (req, res) => {
         const graph = await graphFor(directory); graph.roots[0].label = payload.name || payload.files[0].path.split('/')[0] || 'workspace'; return sendJson(res, graph);
       } finally { await rm(directory, { recursive: true, force: true }); }
     }
-    const pathname = req.url === '/' ? '/index.html' : req.url;
-    const file = join(appRoot, 'public', pathname);
+    const pathname = decodeURIComponent((req.url || '/').split('?')[0] || '/');
+    const safeName = pathname === '/' ? '/index.html' : pathname;
+    const publicRoot = resolve(appRoot, 'public');
+    const file = resolve(publicRoot, '.' + safeName);
+    if (file !== publicRoot && !file.startsWith(publicRoot + sep)) {
+      return sendJson(res, { error: 'Not found' }, 404);
+    }
     const body = await readFile(file); res.writeHead(200, { 'content-type': contentTypes[extname(file)] || 'application/octet-stream' }); res.end(body);
-  } catch (error) { sendJson(res, { error: error.message }, 400); }
-}).listen(process.env.PORT || 4317, '0.0.0.0', () => console.log(`DeepFlow → http://0.0.0.0:${process.env.PORT || 4317}`));
+  } catch (error) { sendJson(res, { error: error.message }, error.message === 'Not found' ? 404 : 400); }
+}).listen(process.env.PORT || 4317, process.env.HOST || '127.0.0.1', () => console.log(`DeepFlow → http://${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 4317}`));

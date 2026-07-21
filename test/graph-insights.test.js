@@ -35,6 +35,14 @@ test('findInGraph locates python worker', async () => {
   assert.ok(matches.some(m => m.path.includes('worker')));
 });
 
+test('impact excludes the target from upstream and downstream', async () => {
+  const graph = await createRepositoryGraph({ roots: [pythonRoot] });
+  const impact = impactOf(graph, 'main.py');
+  assert.equal(impact.target.path, 'main.py');
+  assert.ok(!impact.upstream.some(item => item.path === 'main.py'));
+  assert.ok(!impact.downstream.some(item => item.path === 'main.py'));
+});
+
 test('impact and explain work on python main', async () => {
   const graph = await createRepositoryGraph({ roots: [pythonRoot] });
   const impact = impactOf(graph, 'main.py');

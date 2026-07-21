@@ -12,7 +12,7 @@
   </p>
 </div>
 
-<img width="1376" height="768" alt="DeepFlow Demo" src="./public/hero.gif" />
+<img width="1376" height="768" alt="IMG_7059" src="https://github.com/user-attachments/assets/cc5a1f5d-e9e5-4c56-b5c4-a665f7beb87b" />
 
 <br/>
 
@@ -61,6 +61,8 @@ GPT-5.6 drove the sustained coding loop across the full build:
 Explore the live interactive fixture map: **[DeepFlow Live Demo](https://deepflow-42li.onrender.com/#path=services&mode=signal)**
 
 *(Hosted on Render's free tier. If the instance has been inactive, it may take ~50 seconds to spin back up on your first click.)*
+
+<img width="1376" height="768" alt="DeepFlow Demo" src="./public/hero.gif" />
 
 ---
 

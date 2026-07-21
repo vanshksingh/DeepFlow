@@ -16,12 +16,12 @@
 }
 
 body[data-theme="solarized"] {
-  --ink: #657b83;
-  --muted: #93a1a1;
-  --line: #eee8d5;
+  --ink: #073642;
+  --muted: #657b83;
+  --line: #dcd3b6;
   --paper: #fdf6e3;
   --panel: #eee8d5;
-  --green: #859900;
+  --green: #719e07;
   --teal: #2aa198;
   --blue: #268bd2;
   --amber: #b58900;
@@ -1942,11 +1942,15 @@ body.trace-dialects .wire.dialect-live {
 
 .frame.float.dragging {
   z-index: 80 !important;
-  opacity: .98;
-  filter: drop-shadow(0 22px 36px color-mix(in srgb, var(--ink) 26%, transparent));
+  opacity: 1;
+  filter: none;
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent),
+    0 10px 24px color-mix(in srgb, var(--ink) 12%, transparent),
+    0 28px 56px color-mix(in srgb, var(--ink) 18%, transparent);
   animation: none !important;
   transition: none !important;
-  will-change: translate;
+  will-change: translate, left, top;
 }
 
 .search-dialog {
@@ -2160,6 +2164,16 @@ body.trace-dialects .wire.dialect-live {
   min-height: 40px;
   padding: 7px 10px 7px 12px;
 }
+.frame-bar-file,
+.frame-bar-module {
+  grid-template-columns: 20px minmax(0, 1fr) auto auto;
+  align-items: start;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+.frame-bar-module {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
 .frame.expanded > .frame-bar {
   border-bottom: 1px solid color-mix(in srgb, var(--node) 16%, var(--line));
 }
@@ -2181,6 +2195,7 @@ body.trace-dialects .wire.dialect-live {
   place-items: center;
   border-radius: 6px;
   color: var(--muted);
+  margin-top: 1px;
 }
 .frame-toggle:hover { background: color-mix(in srgb, var(--node) 14%, transparent); color: var(--ink); }
 .frame-title {
@@ -2188,14 +2203,26 @@ body.trace-dialects .wire.dialect-live {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 8px;
+  min-width: 0;
+  width: 100%;
 }
 .frame-title b {
-  font: 700 12px/1.15 Sora, sans-serif;
+  font: 700 12px/1.35 Sora, sans-serif;
   color: var(--ink);
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
 }
-.frame-title span {
+.frame-title span,
+.frame-title .frame-count {
   font: 600 10px/1 "IBM Plex Mono", ui-monospace, monospace;
   color: var(--muted);
+  flex: 0 0 auto;
 }
 .frame-kind,
 .fn-kind {
@@ -2208,31 +2235,35 @@ body.trace-dialects .wire.dialect-live {
   letter-spacing: .04em;
   text-transform: uppercase;
   font-style: normal;
+  flex: 0 0 auto;
 }
 .frame-file .frame-title,
 .frame-fn .frame-title {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
   width: 100%;
-}
-.frame-file .fn-flow-hint {
-  flex: 0 0 auto;
+  min-width: 0;
 }
 .fn-flow-hint {
-  margin-left: auto;
+  margin: 1px 0 0;
   flex: 0 0 auto;
-  padding: 2px 7px;
+  align-self: start;
+  padding: 4px 9px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--green) 28%, var(--line));
   background: color-mix(in srgb, var(--green) 10%, transparent);
   color: color-mix(in srgb, var(--green) 72%, var(--ink));
-  font: 800 8px/1.2 "IBM Plex Mono", ui-monospace, monospace;
+  font: 800 9px/1.2 "IBM Plex Mono", ui-monospace, monospace;
   letter-spacing: .08em;
   text-transform: uppercase;
-  opacity: .85;
+  opacity: .88;
+  cursor: pointer;
 }
-.frame-fn:hover .fn-flow-hint {
+.frame-file:hover .fn-flow-hint,
+.frame-fn:hover .fn-flow-hint,
+.fn-flow-hint:hover {
   opacity: 1;
   border-color: color-mix(in srgb, var(--green) 45%, var(--line));
   background: color-mix(in srgb, var(--green) 16%, transparent);
@@ -2322,33 +2353,52 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
 #app.dragging { cursor: grabbing; }
 .frame.dragging {
   z-index: 40;
-  transition: none;
-  box-shadow: 0 22px 48px color-mix(in srgb, var(--ink) 18%, transparent);
+  transition: none !important;
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--ink) 8%, transparent),
+    0 10px 24px color-mix(in srgb, var(--ink) 12%, transparent),
+    0 28px 56px color-mix(in srgb, var(--ink) 18%, transparent);
 }
 .frame.float.drop-target {
   outline: 2px solid color-mix(in srgb, var(--green) 55%, transparent);
   outline-offset: 3px;
+  transition: outline-color .2s ease, box-shadow .28s cubic-bezier(.22, 1, .36, 1);
 }
 .frame.nest-dragging {
   z-index: 90 !important;
-  opacity: .97;
-  filter: drop-shadow(0 18px 28px color-mix(in srgb, var(--ink) 22%, transparent));
+  opacity: 1;
+  filter: none;
+  box-shadow:
+    0 2px 4px color-mix(in srgb, var(--ink) 10%, transparent),
+    0 14px 32px color-mix(in srgb, var(--ink) 14%, transparent),
+    0 36px 64px color-mix(in srgb, var(--ink) 16%, transparent);
+  transition: none !important;
+  will-change: translate, left, top;
 }
 .frame-folder.nest-drop-active {
-  border-color: color-mix(in srgb, var(--green) 45%, var(--node));
+  border-color: color-mix(in srgb, var(--green) 42%, var(--node));
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--green) 18%, transparent),
-    0 16px 36px color-mix(in srgb, var(--node) 14%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--green) 14%, transparent),
+    0 12px 28px color-mix(in srgb, var(--node) 12%, transparent);
+  transition: border-color .22s ease, box-shadow .28s cubic-bezier(.22, 1, .36, 1);
 }
 .frame-canvas.nest-canvas-active {
   overflow: visible !important;
-  background: color-mix(in srgb, var(--green) 5%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 16%, transparent);
+  background: color-mix(in srgb, var(--green) 4%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 12%, transparent);
   border-radius: 10px;
+  transition: none !important;
 }
 .frame-folder.nest-drop-active,
 .frame-file.nest-drop-active {
   overflow: visible;
+  transition: none !important;
+}
+#app.dragging .frame.float:not(.dragging):not(.nest-dragging) {
+  transition: none;
+}
+#app.dragging .frame-canvas.float-canvas {
+  transition: none !important;
 }
 
 /* —— Code-flow overlay (three planes: comes from ← here → goes to) —— */
@@ -2865,17 +2915,35 @@ body[data-theme]:not([data-theme="solarized"]) .frame-title b { color: var(--ink
   overflow: visible;
 }
 .frame.float.flipping {
-  animation: none;
+  animation: none !important;
   transition:
-    transform 1.05s cubic-bezier(.22, .08, .25, 1),
-    width 1.05s cubic-bezier(.22, .08, .25, 1),
-    height 1.05s cubic-bezier(.22, .08, .25, 1) !important;
+    transform .7s cubic-bezier(.22, 1, .36, 1),
+    width .7s cubic-bezier(.22, 1, .36, 1),
+    height .7s cubic-bezier(.22, 1, .36, 1) !important;
   will-change: transform, width, height;
   overflow: visible !important;
+}
+/* During FLIP, freeze left/top so CSS seat transitions don't fight transform. */
+.frame.float.flipping,
+.frame-fn.float.flipping,
+.frame-canvas > .frame.float.flipping {
+  transition:
+    transform .7s cubic-bezier(.22, 1, .36, 1),
+    width .7s cubic-bezier(.22, 1, .36, 1),
+    height .7s cubic-bezier(.22, 1, .36, 1) !important;
+}
+.frame.float.collapsing,
+.frame.float.collapsing > .frame-canvas.float-canvas {
+  overflow: hidden !important;
+  pointer-events: none;
 }
 .frame.float.size-morph,
 .frame.float.size-morph > .frame-canvas.float-canvas {
   overflow: visible !important;
+}
+.frame.float.collapsing.size-morph,
+.frame.float.collapsing.size-morph > .frame-canvas.float-canvas {
+  overflow: hidden !important;
 }
 .frame.float.calm-in {
   animation: calm-in .7s cubic-bezier(.22, .08, .25, 1) both;

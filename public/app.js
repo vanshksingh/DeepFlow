@@ -737,7 +737,6 @@ function playFlip(before) {
     el.style.setProperty('--inertia', String(index % 7));
     const prev = before.get(id);
     if (!prev) {
-      // Fresh modules/files fade in instead of popping.
       el.classList.add(nested ? 'nest-arrive' : 'calm-in');
       return;
     }
@@ -748,42 +747,44 @@ function playFlip(before) {
     const prevH = prev.height / scale;
     const nextW = el.offsetWidth;
     const nextH = el.offsetHeight;
-    const moved = Math.abs(dx) >= 1 || Math.abs(dy) >= 1;
-    const resized = Math.abs(prevW - nextW) >= 2 || Math.abs(prevH - nextH) >= 2;
+    const moved = Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5;
+    const resized = Math.abs(prevW - nextW) >= 1 || Math.abs(prevH - nextH) >= 1;
     if (!moved && !resized) return;
     const canvasEl = el.querySelector(':scope > .frame-canvas');
     const nextCanvasH = canvasEl ? canvasEl.offsetHeight : 0;
-    el.classList.add('flipping');
+
+    // Correct FLIP: invert with transitions off, then play forward.
+    el.style.transition = 'none';
+    el.style.animation = 'none';
+    el.classList.remove('flipping', 'size-morph', 'jelly-wobble');
     if (resized) {
-      el.classList.add('size-morph');
       el.style.width = `${prevW}px`;
       el.style.height = `${prevH}px`;
-      if (canvasEl && prev.canvasH > 0) {
-        canvasEl.style.height = `${prev.canvasH}px`;
-      }
+      if (canvasEl && prev.canvasH > 0) canvasEl.style.height = `${prev.canvasH}px`;
     }
     if (moved) el.style.transform = `translate(${dx}px, ${dy}px)`;
+    void el.offsetWidth;
+
+    el.classList.add('flipping');
+    if (resized) el.classList.add('size-morph');
+    el.style.transition = '';
+    el.style.animation = '';
+
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (resized) {
-          el.style.width = `${nextW}px`;
-          el.style.height = `${nextH}px`;
-          if (canvasEl) {
-            canvasEl.style.height = nextCanvasH ? `${nextCanvasH}px` : '';
-          }
-        }
-        el.style.transform = '';
-        const done = (event) => {
-          if (event?.propertyName && event.propertyName !== 'transform'
-            && event.propertyName !== 'width' && event.propertyName !== 'height') return;
-          el.classList.remove('flipping', 'size-morph');
-          el.removeEventListener('transitionend', done);
-        };
-        el.addEventListener('transitionend', done);
-        setTimeout(() => {
-          el.classList.remove('flipping', 'size-morph');
-        }, 5000);
-      });
+      if (resized) {
+        el.style.width = `${nextW}px`;
+        el.style.height = `${nextH}px`;
+        if (canvasEl) canvasEl.style.height = nextCanvasH ? `${nextCanvasH}px` : '';
+      }
+      el.style.transform = '';
+      const done = (event) => {
+        if (event?.propertyName && event.propertyName !== 'transform'
+          && event.propertyName !== 'width' && event.propertyName !== 'height') return;
+        el.classList.remove('flipping', 'size-morph');
+        el.removeEventListener('transitionend', done);
+      };
+      el.addEventListener('transitionend', done);
+      setTimeout(() => el.classList.remove('flipping', 'size-morph'), 1300);
     });
   });
 }
@@ -796,9 +797,10 @@ function triggerJelly(el, strength = 1) {
   clearTimeout(el._jellyTimer);
   el._jellyTimer = setTimeout(() => el.classList.remove('jelly-wobble'), 1400);
 }
-const ISLAND_GAP = 26; // same breathing room between top-level islands as nested siblings
-const MODULE_GAP = 22; // always keep air between fn modules inside a file
-const NESTED_GAP = 26; // padding between sibling folders/files inside a parent
+const ISLAND_GAP = 56; // extra breathing room so trace lines can route between islands
+const MODULE_GAP = 10; // tight pack for fn modules inside a file
+const NESTED_GAP = 16; // sibling folders/files inside a parent
+const NEST_PAD = 10; // inner canvas padding — never shift origin past this; clamp instead
 function topLevelIslandElements() {
   return [...scene.querySelectorAll('.frame-artboard > .frame.float[data-drag-id]')];
 }
@@ -926,7 +928,7 @@ function clearDropTargets() {
 function cancelSoftSettle() {
   softSettleToken += 1;
 }
-function softSettleNeighbors(islandId, islandEl, { duration = 1600 } = {}) {
+function softSettleNeighbors(islandId, islandEl, { duration = 780 } = {}) {
   if (!islandEl) return;
   const token = ++softSettleToken;
   const scale = Math.max(.35, canvas.scale || 1);
@@ -980,7 +982,7 @@ function softSettleNeighbors(islandId, islandEl, { duration = 1600 } = {}) {
   const tick = now => {
     if (token !== softSettleToken) return;
     const t = Math.min(1, (now - start) / duration);
-    const ease = 1 - Math.pow(1 - t, 3);
+    const ease = 1 - Math.pow(1 - t, 4);
     for (const m of movers) {
       const x = m.from.x + (m.to.x - m.from.x) * ease;
       const y = m.from.y + (m.to.y - m.from.y) * ease;
@@ -995,10 +997,11 @@ function softSettleNeighbors(islandId, islandEl, { duration = 1600 } = {}) {
   requestAnimationFrame(tick);
 }
 /** Soft-push siblings inside a folder/file canvas after a nested drop. */
-function softSettleNested(draggedId, parentId, { duration = 1500 } = {}) {
+function softSettleNested(draggedId, parentId, { duration = 720 } = {}) {
   const parentEl = scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`);
   const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
   if (!canvasEl) return;
+  const token = ++softSettleToken;
   const kids = [...canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')];
   const mine = kids.find(el => el.dataset.dragId === draggedId);
   if (!mine) return;
@@ -1015,16 +1018,20 @@ function softSettleNested(draggedId, parentId, { duration = 1500 } = {}) {
     el.style.setProperty('--ox', '0px');
     el.style.setProperty('--oy', '0px');
   };
+  // Clamp the dropped chip inside the canvas — never shift the folder origin.
+  const rawX = parseFloat(mine.style.left) || 0;
+  const rawY = parseFloat(mine.style.top) || 0;
+  const mineTo = { x: Math.max(NEST_PAD, rawX), y: Math.max(NEST_PAD, rawY) };
+  const mineBox = {
+    left: mineTo.x,
+    top: mineTo.y,
+    right: mineTo.x + mine.offsetWidth,
+    bottom: mineTo.y + mine.offsetHeight,
+    width: mine.offsetWidth,
+    height: mine.offsetHeight
+  };
   for (let pass = 0; pass < 16; pass++) {
     let hit = false;
-    const mineBox = {
-      left: parseFloat(mine.style.left) || 0,
-      top: parseFloat(mine.style.top) || 0,
-      right: (parseFloat(mine.style.left) || 0) + mine.offsetWidth,
-      bottom: (parseFloat(mine.style.top) || 0) + mine.offsetHeight,
-      width: mine.offsetWidth,
-      height: mine.offsetHeight
-    };
     for (const m of movers) {
       const box = {
         left: m.to.x,
@@ -1066,75 +1073,87 @@ function softSettleNested(draggedId, parentId, { duration = 1500 } = {}) {
     }
     if (!hit) break;
   }
-  // Grow parent around the dragged chip — do not clamp it back inside.
-  const pad = 12;
-  let mineX = parseFloat(mine.style.left) || 0;
-  let mineY = parseFloat(mine.style.top) || 0;
-  const enc = encapsulateNestedChild(parentEl, canvasEl, mine, mineX, mineY, { skipId: draggedId });
-  mineX = enc.x ?? mineX;
-  mineY = enc.y ?? mineY;
-  mine.style.left = `${mineX}px`;
-  mine.style.top = `${mineY}px`;
-  nestedSeats.set(draggedId, { x: mineX, y: mineY });
-  const maxX = Math.max(
-    canvasEl.clientWidth,
-    ...movers.map(m => m.to.x + m.el.offsetWidth),
-    mineX + mine.offsetWidth
-  ) + pad;
-  const maxY = Math.max(
-    canvasEl.clientHeight,
-    ...movers.map(m => m.to.y + m.el.offsetHeight),
-    mineY + mine.offsetHeight
-  ) + pad;
+
+  // Keep siblings inside the canvas pad too (yield right/down, never yank origin).
   for (const m of movers) {
-    // Siblings may sit near the rim; keep a little pad without yanking the dragged chip.
-    m.to.x = Math.max(pad, m.to.x);
-    m.to.y = Math.max(pad, m.to.y);
+    m.to.x = Math.max(NEST_PAD, m.to.x);
+    m.to.y = Math.max(NEST_PAD, m.to.y);
   }
+
+  for (const m of movers) {
+    m.el.style.left = `${m.to.x}px`;
+    m.el.style.top = `${m.to.y}px`;
+  }
+
+  parentEl.style.transition = 'width .55s cubic-bezier(.22, 1, .36, 1), height .55s cubic-bezier(.22, 1, .36, 1)';
+  canvasEl.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), min-height .55s cubic-bezier(.22, 1, .36, 1)';
+
+  encapsulateNestedChild(parentEl, canvasEl, mine, mineTo.x, mineTo.y, {
+    skipId: draggedId,
+    deep: true,
+    allowShrink: true
+  });
+
+  for (const m of movers) {
+    m.el.style.left = `${m.from.x}px`;
+    m.el.style.top = `${m.from.y}px`;
+  }
+
+  const mineFrom = { x: rawX, y: rawY };
+  applySeat(mine, mineFrom.x, mineFrom.y);
+  nestedSeats.set(draggedId, { ...mineTo });
+  userArranged.add(draggedId);
+
   const start = performance.now();
   const tick = now => {
+    if (token !== softSettleToken) return;
     const t = Math.min(1, (now - start) / duration);
-    const ease = 1 - Math.pow(1 - t, 3);
+    const ease = 1 - Math.pow(1 - t, 4);
     for (const m of movers) {
-      const x = m.from.x + (m.to.x - m.from.x) * ease;
-      const y = m.from.y + (m.to.y - m.from.y) * ease;
-      applySeat(m.el, x, y);
-      if (Math.hypot(m.to.x - m.from.x, m.to.y - m.from.y) > 1) {
-        userArranged.add(m.id);
-        nestedSeats.set(m.id, { x, y });
-      }
+      applySeat(m.el, m.from.x + (m.to.x - m.from.x) * ease, m.from.y + (m.to.y - m.from.y) * ease);
     }
-    reshapeParentCanvas(parentEl, canvasEl, maxX, maxY);
+    applySeat(
+      mine,
+      mineFrom.x + (mineTo.x - mineFrom.x) * ease,
+      mineFrom.y + (mineTo.y - mineFrom.y) * ease
+    );
     if (t < 1) requestAnimationFrame(tick);
     else {
+      parentEl.style.transition = '';
+      canvasEl.style.transition = '';
+      applySeat(mine, mineTo.x, mineTo.y);
       for (const m of movers) {
         if (Math.hypot(m.to.x - m.from.x, m.to.y - m.from.y) > 1) {
           nestedSeats.set(m.id, { ...m.to });
           userArranged.add(m.id);
         }
       }
-      softSettleAfterExpand(parentId, { duration: 1400 });
+      softSettleAfterExpand(parentId, { duration: 900 });
       scheduleDraw();
-      animateReflowEdges(700);
-      // Reconcile pack sizes / parent bounds without snapping seats (skip FLIP).
+      animateReflowEdges(500);
+      // Don't full-render with skipFlip — that snapped siblings after the settle.
       clearTimeout(softSettleNested._reconcile);
       softSettleNested._reconcile = setTimeout(() => {
         if (app.classList.contains('dragging')) return;
-        skipFlipOnce = true;
-        render();
-      }, 200);
+        scheduleDraw();
+        renderMinimap();
+      }, 80);
     }
   };
   requestAnimationFrame(tick);
 }
-function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH) {
+function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH, { allowShrink = false } = {}) {
   if (!parentEl || !canvasEl) return;
   const header = parentEl.querySelector(':scope > .frame-bar');
   const headerH = header?.offsetHeight || 54;
   const pad = 16;
-  const needW = Math.max(parentEl.offsetWidth, Math.ceil((contentW || canvasEl.scrollWidth) + pad));
-  const needH = Math.ceil(headerH + Math.max(64, contentH || canvasEl.scrollHeight) + 12);
+  const wantW = Math.ceil((contentW || canvasEl.scrollWidth) + pad);
+  const wantH = Math.ceil(headerH + Math.max(64, contentH || canvasEl.scrollHeight) + 12);
+  // Mid-drag shrink makes nested coords jump; only settle may tighten.
+  const needW = allowShrink ? wantW : Math.max(parentEl.offsetWidth || 0, wantW);
+  const needH = allowShrink ? wantH : Math.max(parentEl.offsetHeight || 0, wantH);
   parentEl.style.width = `${needW}px`;
+  parentEl.style.height = `${needH}px`;
   canvasEl.style.height = `${Math.max(64, needH - headerH - 10)}px`;
   canvasEl.style.minHeight = canvasEl.style.height;
 }
@@ -1177,24 +1196,48 @@ function shiftNestedCanvasOrigin(parentEl, canvasEl, skipId, shiftX, shiftY) {
     parentEl.style.top = `${next.y}px`;
   }
 }
-/** Grow/shift the parent folder so a nested child stays encapsulated. */
-function encapsulateNestedChild(parentEl, canvasEl, childEl, childX, childY, { skipId = null } = {}) {
-  if (!parentEl || !canvasEl || !childEl) return { shiftX: 0, shiftY: 0 };
-  const pad = 14;
-  let shiftX = 0;
-  let shiftY = 0;
-  if (childX < pad) shiftX = pad - childX;
-  if (childY < pad) shiftY = pad - childY;
-  if (shiftX || shiftY) shiftNestedCanvasOrigin(parentEl, canvasEl, skipId, shiftX, shiftY);
-  const x = childX + shiftX;
-  const y = childY + shiftY;
-  reshapeParentCanvas(
-    parentEl,
-    canvasEl,
-    x + childEl.offsetWidth + pad,
-    y + childEl.offsetHeight + pad
-  );
-  return { shiftX, shiftY, x, y };
+/** Grow the parent folder around a nested child. Never shifts canvas origin —
+ *  left/top overflow is clamped so siblings and selection stay put. */
+function encapsulateNestedChild(parentEl, canvasEl, childEl, childX, childY, {
+  skipId = null,
+  deep = false,
+  allowShrink = false
+} = {}) {
+  if (!parentEl || !canvasEl || !childEl) return { shiftX: 0, shiftY: 0, x: childX, y: childY };
+  // Clamp into the canvas — shifting origin hijacked folders leftward and
+  // dragged selection/siblings with it.
+  const x = Math.max(NEST_PAD, childX);
+  const y = Math.max(NEST_PAD, childY);
+
+  let maxX = x + (parseFloat(childEl.style.width) || childEl.offsetWidth);
+  let maxY = y + (parseFloat(childEl.style.height) || childEl.offsetHeight);
+  for (const k of canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')) {
+    if (k.dataset.dragId === childEl.dataset.dragId) continue;
+    const kLeft = parseFloat(k.style.left) || 0;
+    const kTop = parseFloat(k.style.top) || 0;
+    maxX = Math.max(maxX, kLeft + (parseFloat(k.style.width) || k.offsetWidth));
+    maxY = Math.max(maxY, kTop + (parseFloat(k.style.height) || k.offsetHeight));
+  }
+
+  reshapeParentCanvas(parentEl, canvasEl, maxX + NEST_PAD, maxY + NEST_PAD, { allowShrink });
+
+  // Deep growth only on drop/settle — live drag must stay pointer-sticky.
+  if (deep) {
+    const grandparentEl = parentEl.parentElement?.closest('.frame.float[data-drag-id]');
+    const grandparentCanvas = grandparentEl?.querySelector(':scope > .frame-canvas');
+    if (grandparentEl && grandparentCanvas) {
+      encapsulateNestedChild(
+        grandparentEl,
+        grandparentCanvas,
+        parentEl,
+        parseFloat(parentEl.style.left) || 0,
+        parseFloat(parentEl.style.top) || 0,
+        { skipId: parentEl.dataset.dragId, deep: true, allowShrink }
+      );
+    }
+  }
+
+  return { shiftX: 0, shiftY: 0, x, y };
 }
 function clearNestDragChrome() {
   scene.querySelectorAll('.nest-drop-active, .nest-canvas-active').forEach(el => {
@@ -1296,8 +1339,8 @@ function softGravityStep(pass) {
         continue;
       }
       // Both far: separate at full strength so they don't clump on the rim.
-      // Both in-view: only heal real overlaps (gentle) - no continuous drift.
-      const strength = aFar ? 1 : 0.35;
+      // Both in-view: gentle heal only — strong continuous push feels uncontrollable.
+      const strength = aFar ? 1 : 0.38;
       const sx = (dx / scale) * strength;
       const sy = (dy / scale) * strength;
       if (Math.abs(sx) < 0.04 && Math.abs(sy) < 0.04) continue;
@@ -1322,22 +1365,22 @@ function softGravityStep(pass) {
   }
   // Pull along committed trace only (never hover). Keep partners on the
   // correct side of focus and stop yanking when already close.
+  // Runs even when partners are off-screen so startup rubber-band still works.
   if (hasCommittedTraceFocus() && !hoverPreviewTrace()) {
     const byId = new Map(centers.map(c => [c.item.id, c]));
     const focusTopId = lockedFocusIslandId() || topLevelOwner(fileOf(selected()) || selected())?.id || null;
     const focusC = focusTopId ? byId.get(focusTopId) : null;
     const live = traceEdges;
-    const MIN_GAP = 56;   // stop pulling once this close
-    const COMFORT = 110;  // start pulling when farther than this
+    const MIN_GAP = 56;
+    const COMFORT = 110;
     const seen = new Set();
-    if (focusC && !focusC.far) {
+    if (focusC) {
       for (const edge of edgeTypes()) {
         if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
         if (!live.has(edge.id)) continue;
         const aTop = topLevelOwner(fileOf(node(edge.from)) || node(edge.from));
         const bTop = topLevelOwner(fileOf(node(edge.to)) || node(edge.to));
         if (!aTop || !bTop || aTop.id === bTop.id) continue;
-        // Only edges that touch the focused island — avoid scrambling side chains.
         const focusIsEmitter = aTop.id === focusTopId;
         const focusIsReceiver = bTop.id === focusTopId;
         if (!focusIsEmitter && !focusIsReceiver) continue;
@@ -1346,9 +1389,9 @@ function softGravityStep(pass) {
         if (seen.has(pairKey)) continue;
         seen.add(pairKey);
         const partner = byId.get(partnerTop.id);
-        if (!partner || partner.far) continue;
+        if (!partner) continue;
         if (partner.locked || pinnedLayout.has(partner.item.id)) continue;
-        const wantRight = focusIsEmitter; // focus emits → partner is receiver → right
+        const wantRight = focusIsEmitter;
         const fCx = focusC.rect.left + focusC.rect.width / 2;
         const pCx = partner.rect.left + partner.rect.width / 2;
         const fCy = focusC.rect.top + focusC.rect.height / 2;
@@ -1357,28 +1400,27 @@ function softGravityStep(pass) {
           ? partner.rect.left - focusC.rect.right
           : focusC.rect.left - partner.rect.right;
         const onWrongSide = wantRight ? pCx <= fCx + 12 : pCx >= fCx - 12;
-        // 1) Full-ish side repair when clearly on the wrong side of focus.
+        // Far partners get a stronger tug so off-screen traces still rubber-band in.
+        const farBoost = partner.far || focusC.far ? 2.4 : 1;
         if (onWrongSide) {
-          const fix = Math.min(4.5, 1.6 + Math.abs(pCx - fCx) * 0.02) / scale;
+          const fix = Math.min(4.5 * farBoost, (1.6 + Math.abs(pCx - fCx) * 0.02) * farBoost) / scale;
           applyIslandTranslate(partner, {
             x: partner.off.x + (wantRight ? fix : -fix),
-            y: partner.off.y + Math.max(-0.8, Math.min(0.8, (fCy - pCy) * 0.01 / scale))
+            y: partner.off.y + Math.max(-1.2, Math.min(1.2, (fCy - pCy) * 0.012 / scale))
           });
           moved = true;
-          continue; // don't also pull this frame — avoids jumble
+          continue;
         }
-        // 2) Pull closer only when there's clear air; never when overlapping/tight.
         if (gap > COMFORT) {
-          const step = Math.min(1.8, (gap - COMFORT) * 0.02) / scale;
-          const vy = Math.max(-0.9, Math.min(0.9, (fCy - pCy) * 0.012 / scale));
+          const step = Math.min(1.8 * farBoost, (gap - COMFORT) * 0.02 * farBoost) / scale;
+          const vy = Math.max(-1.1, Math.min(1.1, (fCy - pCy) * 0.012 / scale));
           applyIslandTranslate(partner, {
             x: partner.off.x + (wantRight ? -step : step),
             y: partner.off.y + vy
           });
           moved = true;
         } else if (gap < MIN_GAP && gap > -40) {
-          // Gentle breathe apart when too tight (no thrash on deep overlap).
-          const step = Math.min(1.2, (MIN_GAP - gap) * 0.04) / scale;
+          const step = Math.min(1.2 * farBoost, (MIN_GAP - gap) * 0.04 * farBoost) / scale;
           applyIslandTranslate(partner, {
             x: partner.off.x + (wantRight ? step : -step),
             y: partner.off.y
@@ -1386,34 +1428,55 @@ function softGravityStep(pass) {
           moved = true;
         }
       }
-      // 3) Non-trace islands in a wide focus↔partner corridor yield aside.
-      for (const partner of centers) {
-        if (partner.item.id === focusTopId || partner.far) continue;
-        if (!hasTrace(partner.item)) continue;
-        const gap = Math.min(
-          Math.abs(partner.rect.left - focusC.rect.right),
-          Math.abs(focusC.rect.left - partner.rect.right)
-        );
-        if (gap < MIN_GAP) continue; // corridor too tight — don't shove extras
-        const left = Math.min(focusC.rect.left, partner.rect.left) - 4;
-        const right = Math.max(focusC.rect.right, partner.rect.right) + 4;
-        const top = Math.min(focusC.rect.top, partner.rect.top) + 8;
-        const bottom = Math.max(focusC.rect.bottom, partner.rect.bottom) - 8;
-        if (bottom - top < 40) continue;
+      // Clear non-trace islands sitting under any live trace corridor.
+      const tracedPairs = [];
+      for (const edge of edgeTypes()) {
+        if (!WALK_TYPES.has(edge.type) && edge.type !== 'imports') continue;
+        if (!live.has(edge.id)) continue;
+        const aTop = topLevelOwner(fileOf(node(edge.from)) || node(edge.from));
+        const bTop = topLevelOwner(fileOf(node(edge.to)) || node(edge.to));
+        if (!aTop || !bTop || aTop.id === bTop.id) continue;
+        const A = byId.get(aTop.id);
+        const B = byId.get(bTop.id);
+        if (!A || !B) continue;
+        tracedPairs.push([A, B]);
+      }
+      if (focusC) {
+        for (const partner of centers) {
+          if (partner.item.id === focusTopId) continue;
+          if (!hasTrace(partner.item)) continue;
+          tracedPairs.push([focusC, partner]);
+        }
+      }
+      const cleared = new Set();
+      for (const [A, B] of tracedPairs) {
+        const left = Math.min(A.rect.left, B.rect.left) - 8;
+        const right = Math.max(A.rect.right, B.rect.right) + 8;
+        const top = Math.min(A.rect.top, B.rect.top) - 12;
+        const bottom = Math.max(A.rect.bottom, B.rect.bottom) + 12;
+        if (right - left < 24 || bottom - top < 24) continue;
+        // Wire mid-band: prefer clearing the horizontal strip between hubs.
+        const midTop = Math.min(A.rect.top + A.rect.height * 0.25, B.rect.top + B.rect.height * 0.25);
+        const midBot = Math.max(A.rect.bottom - A.rect.height * 0.25, B.rect.bottom - B.rect.height * 0.25);
         for (const mid of centers) {
-          if (mid.item.id === focusTopId || mid.item.id === partner.item.id) continue;
+          if (mid.item.id === A.item.id || mid.item.id === B.item.id) continue;
           if (mid.far || mid.locked || pinnedLayout.has(mid.item.id)) continue;
           if (hasTrace(mid.item)) continue;
+          const key = mid.item.id;
+          if (cleared.has(key)) continue;
           const mx = mid.rect.left + mid.rect.width / 2;
           const my = mid.rect.top + mid.rect.height / 2;
-          if (mx < left || mx > right || my < top || my > bottom) continue;
+          if (mx < left || mx > right) continue;
+          const inBand = my >= Math.min(midTop, top) && my <= Math.max(midBot, bottom);
+          if (!inBand && (my < top || my > bottom)) continue;
           const up = my - top;
           const down = bottom - my;
-          const push = Math.min(1.8, 0.8 + Math.min(up, down) * 0.015) / scale;
+          const push = Math.min(3.2, 1.4 + Math.min(Math.abs(up), Math.abs(down)) * 0.02) / scale;
           applyIslandTranslate(mid, {
             x: mid.off.x,
             y: mid.off.y + (up <= down ? -push : push)
           });
+          cleared.add(key);
           moved = true;
         }
       }
@@ -1983,11 +2046,11 @@ function frameLabelMetrics(label = '', { minW = 220, maxW = 420, chrome = 84, ch
 }
 function frameModuleSize(_file, module) {
   const label = module?.label ? `${module.label}()` : 'fn';
-  const { w, h } = frameLabelMetrics(label, { minW: 172, maxW: 320, chrome: 56, baseH: 50, lineH: 16, maxLines: 2 });
-  return { w, h: Math.max(50, h) };
+  const { w, h } = frameLabelMetrics(label, { minW: 188, maxW: 360, chrome: 72, charW: 7.1, baseH: 52, lineH: 16, maxLines: 3 });
+  return { w, h: Math.max(52, h) };
 }
 function frameFileSize(file) {
-  const header = frameLabelMetrics(file.label, { minW: 228, maxW: 440, chrome: 96, baseH: 54, lineH: 17, maxLines: 3 });
+  const header = frameLabelMetrics(file.label, { minW: 248, maxW: 480, chrome: 118, charW: 7.1, baseH: 56, lineH: 17, maxLines: 3 });
   if (!expandedFiles.has(file.id)) return { w: header.w, h: header.h, headerH: header.h, children: [] };
   const boxes = modules(file).slice(0, 18).map(module => {
     const size = frameModuleSize(file, module);
@@ -1995,14 +2058,14 @@ function frameFileSize(file) {
   });
   const packed = packBoxes(boxes, {
     gap: MODULE_GAP,
-    pad: 18,
+    pad: NEST_PAD,
     maxWidth: Math.max(720, header.w - 24),
     mode: layoutModes.get(file.id) || 'auto',
     persistLocals: true,
     // Never pin modules to file/folder expand anchors - that skewed the shelf.
     anchors: null
   });
-  return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 12, headerH: header.h, children: packed.items };
+  return { w: Math.max(header.w, packed.w + 8), h: Math.max(header.h, 48) + packed.h + 8, headerH: header.h, children: packed.items };
 }
 function frameFolderSize(item, depth = 0) {
   const header = frameLabelMetrics(item.label, { minW: depth ? 208 : 232, maxW: 460, chrome: 108, baseH: 54, lineH: 17, maxLines: 3 });
@@ -2015,14 +2078,14 @@ function frameFolderSize(item, depth = 0) {
   });
   const packed = packBoxes(boxes, {
     gap: NESTED_GAP,
-    pad: 20,
+    pad: NEST_PAD,
     // Prefer wide shelves so nested trees read left→right, not a deep stack.
     maxWidth: depth === 0 ? 1280 : depth === 1 ? 980 : 760,
     mode: layoutModes.get(item.id) || 'auto',
     persistLocals: true,
     anchors: layoutAnchorIds
   });
-  return { w: Math.max(header.w, packed.w + 12), h: Math.max(header.h, 48) + packed.h + 16, headerH: header.h, children: packed.items };
+  return { w: Math.max(header.w, packed.w + 8), h: Math.max(header.h, 48) + packed.h + 10, headerH: header.h, children: packed.items };
 }
 /** Shelf-pack floating boxes left→right, wrap on maxWidth, then separate overlaps. */
 function packBoxes(boxes, { gap = 14, pad = 12, maxWidth = 900, mode = 'auto', persistLocals = false, anchors = null } = {}) {
@@ -2414,13 +2477,13 @@ function frameModuleHtml(file, module, placement, depth = 0, inertia = 0) {
   const hot = hoverId === module.id ? 'hot' : '';
   const tint = fileTint(file);
   return `<section class="frame frame-fn float ${selectedId === module.id ? 'selected' : ''} ${hot}" data-module-box="${module.id}" data-hover="${module.id}" data-drag-id="${module.id}" data-open-flow="${module.id}" title="Open code flow" style="${frameStyle(placement, tint, module.id, { depth: depth + 1, inertia })}">
-    <header class="frame-bar" data-outline-row="${module.id}" data-hover="${module.id}">
+    <header class="frame-bar frame-bar-module" data-outline-row="${module.id}" data-hover="${module.id}">
       ${framePorts(module.id)}
       <button class="frame-title" data-module="${module.id}" data-open-flow="${module.id}" type="button" title="Open code flow: ${escape(module.label)}()">
         <em class="fn-kind">${module.moduleKind === 'class' ? 'class' : 'fn'}</em>
         <b>${escape(module.label)}()</b>
-        <span class="fn-flow-hint">flow</span>
       </button>
+      <button class="fn-flow-hint" data-open-flow="${module.id}" type="button" title="Open code flow">flow</button>
       <button class="port pin-btn ${pinned.has(module.id) ? 'pinned' : ''}" data-pin="${module.id}" type="button" title="Pin"></button>
     </header>
   </section>`;
@@ -2437,15 +2500,15 @@ function frameFileHtml(file, placement, size = frameFileSize(file), depth = 0) {
     }).join('')
     : '';
   return `<section class="frame frame-file float ${expanded ? 'expanded' : ''} ${selectedId === file.id || fileOf(selected())?.id === file.id ? 'selected' : ''} ${recentFor(file) ? 'live-changed' : ''} ${file.orphan ? 'orphan' : ''} ${file.entrypoint ? 'entrypoint' : ''} ${hot}" data-id="${file.id}" data-inline="${file.id}" data-inline-file="${file.id}" data-kind="file" data-hover="${file.id}" data-drag-id="${file.id}" data-depth="${depth}" style="${frameStyle(placement, tint, file.id, { depth })}">
-    <header class="frame-bar" data-outline-row="${file.id}" data-hover="${file.id}">
+    <header class="frame-bar frame-bar-file" data-outline-row="${file.id}" data-hover="${file.id}">
       ${framePorts(file.id)}
       <button class="frame-toggle" data-expand="${file.id}" type="button">${expanded ? '⌄' : '›'}</button>
       <button class="frame-title outline-label" data-inline="${file.id}" data-kind="file" data-focus-file="${file.id}" type="button">
         <span class="file-glyph" style="--glyph:${glyph.c}" title="${escape(file.extension || '')}">${escape(glyph.g)}</span>
         <b title="${escape(file.path)}">${escape(file.label)}</b>
-        <span>${modules(file).length || '-'}</span>
-        <span class="fn-flow-hint" data-open-file-flow="${file.id}" title="Open code flow">flow</span>
+        <span class="frame-count">${modules(file).length || '-'}</span>
       </button>
+      <button class="fn-flow-hint" data-open-file-flow="${file.id}" type="button" title="Open code flow">flow</button>
       <button class="port pin-btn ${pinned.has(file.id) ? 'pinned' : ''}" data-pin="${file.id}" type="button" title="Pin"></button>
     </header>
     ${expanded ? `<div class="frame-canvas float-canvas" style="height:${Math.max(64, placement.h - (size.headerH || 54) - 10)}px">${kids || '<p class="frame-empty">Empty</p>'}</div>` : ''}
@@ -2781,37 +2844,43 @@ function familyLaneBias(type) {
 }
 function moduleBusPath(a, b, spread, cross, backwards) {
   const lanePad = 34 + Math.min(46, Math.abs(cross) * .55);
-  const sourceLaneX = a.x + (backwards ? -lanePad : lanePad);
-  const targetLaneX = b.x + (backwards ? lanePad : -lanePad);
-  const midY = (a.y + b.y) / 2 + cross;
-  return `M ${a.x} ${a.y + spread * .18} C ${sourceLaneX} ${a.y + spread * .18}, ${sourceLaneX} ${midY}, ${sourceLaneX} ${midY} L ${targetLaneX} ${midY} C ${targetLaneX} ${midY}, ${targetLaneX} ${b.y + spread * .18}, ${b.x} ${b.y + spread * .18}`;
+  // Always leave right / arrive left — even when the bus runs backwards.
+  const sourceLaneX = a.x + lanePad;
+  const targetLaneX = b.x - lanePad;
+  const midY = (a.y + b.y) / 2 + cross + spread * .18;
+  return `M ${a.x} ${a.y} C ${sourceLaneX} ${a.y}, ${sourceLaneX} ${midY}, ${(sourceLaneX + targetLaneX) / 2} ${midY} C ${targetLaneX} ${midY}, ${targetLaneX} ${b.y}, ${b.x} ${b.y}`;
 }
-/** Out ports leave right, in ports arrive from the left.
- *  One cubic (or a U-loop of two) with horizontal end tangents — no stub L segments,
- *  which were causing a visible kink at the ports. */
+/** Out ports leave RIGHT, in ports arrive from the LEFT.
+ *  Endpoints lock to exact port centers; spread/cross only bend the mid curve. */
 function directedWirePath(a, b, spread = 0, cross = 0, family = 'flow') {
-  const ay = a.y + spread * .1;
-  const by = b.y + spread * .1 + cross;
+  const y0 = a.y;
+  const y1 = b.y;
   const dx = b.x - a.x;
-  // Imports bow farther out and sit lower so they don't paint over call traces.
+  // Imports sit a touch lower in the mid-span so they don't paint over calls.
   const familyY = family === 'context' ? 16 : -10;
   const familyBow = family === 'context' ? 32 : 0;
+  const midLift = familyY + spread * .1 + cross * .45;
 
-  // Nearby or backwards: soft outer loop, still horizontal at both ports.
-  if (dx < 72) {
-    const bow = Math.max(56, Math.min(140, 64 + Math.abs(dx) * .25 + Math.abs(cross) * .4)) + familyBow;
-    const midY = (ay + by) / 2 + familyY
-      + (Math.abs(ay - by) < 24 ? (cross >= 0 ? bow * .42 : -bow * .42) : cross * .08);
+  // Backwards: compact U-loop that still exits right and enters left.
+  if (dx < 0) {
+    const bow = Math.max(32, Math.min(68, 36 + Math.abs(dx) * .18 + Math.abs(cross) * .2)) + familyBow * .35;
+    const midY = (y0 + y1) / 2 + midLift
+      + (Math.abs(y0 - y1) < 24 ? (cross >= 0 ? bow * .3 : -bow * .3) : 0);
     const right = Math.max(a.x, b.x) + bow;
     const left = Math.min(a.x, b.x) - bow;
     const midX = (a.x + b.x) / 2;
-    return `M ${a.x} ${ay} C ${a.x + bow * .55} ${ay}, ${right} ${midY}, ${midX} ${midY} C ${left} ${midY}, ${b.x - bow * .55} ${by}, ${b.x} ${by}`;
+    return `M ${a.x} ${y0} C ${a.x + bow * .55} ${y0}, ${right} ${midY}, ${midX} ${midY} C ${left} ${midY}, ${b.x - bow * .55} ${y1}, ${b.x} ${y1}`;
   }
 
+  // Close but forward: short directed cubic (no wide loop).
+  if (dx < 72) {
+    const reach = Math.min(Math.max(dx * .42, 18), 36) + (family === 'context' ? 8 : 0);
+    return `M ${a.x} ${y0} C ${a.x + reach} ${y0 + midLift * .6}, ${b.x - reach} ${y1 + midLift * .6}, ${b.x} ${y1}`;
+  }
+
+  // Normal forward span — classic soft cubic, exit right / enter left.
   const reach = Math.min(Math.max(dx * .4, 48), 120) + (family === 'context' ? 22 : 0);
-  const c1y = ay + familyY;
-  const c2y = by + familyY;
-  return `M ${a.x} ${ay} C ${a.x + reach} ${c1y}, ${b.x - reach} ${c2y}, ${b.x} ${by}`;
+  return `M ${a.x} ${y0} C ${a.x + reach} ${y0 + midLift}, ${b.x - reach} ${y1 + midLift}, ${b.x} ${y1}`;
 }
 function drawEdges() {
   scene.querySelectorAll('.connected-port').forEach(port => port.classList.remove('connected-port'));
@@ -3211,23 +3280,10 @@ function bindFrameDrag(frame) {
     if (!drag) return;
     const { dx, dy } = drag;
     if (drag.nested && drag.parentId) {
-      // Free nested drag — overflow is unlocked; parent grows/shifts to encapsulate.
-      let x = drag.baseLeft + dx;
-      let y = drag.baseTop + dy;
-      if (drag.parentEl && drag.canvasEl) {
-        const enc = encapsulateNestedChild(drag.parentEl, drag.canvasEl, frame, x, y, { skipId: drag.id });
-        if (enc.shiftX || enc.shiftY) {
-          drag.baseLeft += enc.shiftX;
-          drag.baseTop += enc.shiftY;
-          // Keep the chip under the pointer after origin shift.
-          drag.x += enc.shiftX * canvas.scale;
-          drag.y += enc.shiftY * canvas.scale;
-          frame.style.left = `${drag.baseLeft}px`;
-          frame.style.top = `${drag.baseTop}px`;
-          x = enc.x;
-          y = enc.y;
-        }
-      }
+      // Pure translate while held — never encapsulate/shift origin mid-drag
+      // (that expanded folders leftward and yanked siblings + selection).
+      const x = drag.baseLeft + dx;
+      const y = drag.baseTop + dy;
       frame.style.translate = `${x - drag.baseLeft}px ${y - drag.baseTop}px`;
       frame.style.setProperty('--ox', `${x - drag.baseLeft}px`);
       frame.style.setProperty('--oy', `${y - drag.baseTop}px`);
@@ -3247,6 +3303,7 @@ function bindFrameDrag(frame) {
     event.stopPropagation();
     clearTimeout(gravityTimer);
     cancelTraceAlign();
+    cancelSoftSettle();
     const islandId = dragIslandId(id);
     const islandEl = scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`) || frame;
     // Kill in-flight FLIP / jelly so grab doesn't fight a mid-transition transform.
@@ -3284,6 +3341,8 @@ function bindFrameDrag(frame) {
       parentEl?.classList.add('nest-drop-active');
       canvasEl?.classList.add('nest-canvas-active');
       frame.classList.add('nest-dragging');
+      if (parentEl) parentEl.style.transition = 'none';
+      if (canvasEl) canvasEl.style.transition = 'none';
     }
     app.classList.add('dragging');
     wires.style.opacity = '.2';
@@ -3320,29 +3379,34 @@ function bindFrameDrag(frame) {
       frame.dataset.dragged = String(Date.now());
       if (!nested) pinnedLayout.add(islandId);
       if (nested && parentId) {
-        let dropX = baseLeft + dx;
-        let dropY = baseTop + dy;
-        const enc = encapsulateNestedChild(parentEl, canvasEl, frame, dropX, dropY, { skipId: draggedId });
-        dropX = enc.x ?? dropX;
-        dropY = enc.y ?? dropY;
+        // Keep raw seat for rubber-band settle; clamp happens in softSettleNested.
+        const dropX = baseLeft + dx;
+        const dropY = baseTop + dy;
         userArranged.add(draggedId);
-        nestedSeats.set(draggedId, { x: dropX, y: dropY });
+        nestedSeats.set(draggedId, {
+          x: Math.max(NEST_PAD, dropX),
+          y: Math.max(NEST_PAD, dropY)
+        });
         localOffsets.delete(draggedId);
         frame.style.left = `${dropX}px`;
         frame.style.top = `${dropY}px`;
         frame.style.translate = '0px 0px';
         frame.style.setProperty('--ox', '0px');
         frame.style.setProperty('--oy', '0px');
+        void frame.offsetWidth;
+        if (islandEl) void islandEl.offsetWidth;
         islandEl?.classList.remove('dragging');
         frame.classList.remove('dragging', 'nest-dragging');
         frame.style.transition = '';
         islandEl.style.transition = '';
+        if (parentEl) parentEl.style.transition = '';
+        if (canvasEl) canvasEl.style.transition = '';
         app.classList.remove('dragging');
         draggingTraceAnchorId = null;
         drag = null;
-        softSettleNested(draggedId, parentId, { duration: 1500 });
+        softSettleNested(draggedId, parentId, { duration: 720 });
         scheduleDraw();
-        scheduleGravityDrift(900);
+        scheduleGravityDrift(1100);
         return;
       }
       // Keep the dropped island where released; softly push neighbors aside.
@@ -3351,6 +3415,8 @@ function bindFrameDrag(frame) {
       islandEl.style.translate = `${value.x}px ${value.y}px`;
       islandEl.style.setProperty('--ox', `${value.x}px`);
       islandEl.style.setProperty('--oy', `${value.y}px`);
+      void islandEl.offsetWidth;
+      void frame.offsetWidth;
       islandEl.classList.remove('dragging');
       frame.classList.remove('dragging');
       frame.style.transition = '';
@@ -3358,12 +3424,14 @@ function bindFrameDrag(frame) {
       app.classList.remove('dragging');
       draggingTraceAnchorId = null;
       drag = null;
-      softSettleNeighbors(islandId, islandEl, { duration: 1600 });
+      softSettleNeighbors(islandId, islandEl, { duration: 780 });
       scheduleDraw();
       renderMinimap();
-      scheduleGravityDrift(1800);
+      scheduleGravityDrift(1400);
       return;
     }
+    void frame.offsetWidth;
+    if (islandEl) void islandEl.offsetWidth;
     islandEl?.classList.remove('dragging');
     frame.classList.remove('dragging', 'nest-dragging');
     frame.style.transition = '';
@@ -3901,9 +3969,67 @@ function closeFlowOverlay() {
   flowNavCache = { upstream: [], downstream: [] };
   updateFlowNavButtons();
 }
+function waitMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+/** Animate a folder/file closed before DOM drop so minimize doesn't snap.
+ *  Also eases siblings below upward so the pack doesn't jump. */
+async function morphCollapseFrame(el) {
+  if (!el || document.body.classList.contains('reduce-motion')) return false;
+  const canvasEl = el.querySelector(':scope > .frame-canvas');
+  const header = el.querySelector(':scope > .frame-bar');
+  const startH = el.offsetHeight;
+  const endH = (header?.offsetHeight || 54) + 8;
+  if (startH - endH < 8) return false;
+  cancelSoftSettle();
+  const parentCanvas = el.parentElement?.classList.contains('frame-canvas') ? el.parentElement : null;
+  const freed = startH - endH;
+  const elTop = parseFloat(el.style.top) || 0;
+  const elBottom = elTop + startH;
+  const siblings = parentCanvas
+    ? [...parentCanvas.querySelectorAll(':scope > .frame.float[data-drag-id]')].filter(sib => sib !== el)
+    : [];
+  const ease = 'left .55s cubic-bezier(.22, 1, .36, 1), top .55s cubic-bezier(.22, 1, .36, 1)';
+  for (const sib of siblings) {
+    const top = parseFloat(sib.style.top) || 0;
+    if (top < elBottom - 2) continue;
+    sib.style.transition = ease;
+    sib.style.top = `${Math.max(NEST_PAD, top - freed)}px`;
+  }
+  // Parent canvas / island shrink in parallel so the hole closes smoothly.
+  const parentFrame = parentCanvas?.closest?.('.frame.float');
+  if (parentFrame && parentCanvas) {
+    parentFrame.classList.add('flipping', 'size-morph');
+    parentFrame.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1)';
+    parentCanvas.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1)';
+    const parentH = parentFrame.offsetHeight;
+    const canvasH = parentCanvas.offsetHeight;
+    parentFrame.style.height = `${parentH}px`;
+    parentCanvas.style.height = `${canvasH}px`;
+    void parentFrame.offsetWidth;
+    parentFrame.style.height = `${Math.max(56, parentH - freed)}px`;
+    parentCanvas.style.height = `${Math.max(0, canvasH - freed)}px`;
+  }
+  el.classList.add('flipping', 'size-morph', 'collapsing');
+  el.style.overflow = 'hidden';
+  el.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), width .55s cubic-bezier(.22, 1, .36, 1)';
+  el.style.height = `${startH}px`;
+  if (canvasEl) {
+    canvasEl.style.overflow = 'hidden';
+    canvasEl.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), opacity .32s ease';
+    canvasEl.style.height = `${canvasEl.offsetHeight}px`;
+    void el.offsetWidth;
+    canvasEl.style.height = '0px';
+    canvasEl.style.opacity = '0';
+  }
+  void el.offsetWidth;
+  el.style.height = `${endH}px`;
+  await waitMs(560);
+  return true;
+}
 function bindScene() {
   scene.querySelectorAll('.frame.float[data-drag-id]').forEach(bindFrameDrag);
-  scene.querySelectorAll('[data-folder-expand]').forEach(button => button.addEventListener('click', event => {
+  scene.querySelectorAll('[data-folder-expand]').forEach(button => button.addEventListener('click', async event => {
     event.stopPropagation();
     const id = button.dataset.folderExpand;
     const item = node(id);
@@ -3912,6 +4038,26 @@ function bindScene() {
     captureClickAnchor(id, event);
     markExpandAnchor(id);
     const opening = !expandedFolders.has(id);
+    if (!opening) {
+      const el = scene.querySelector(`[data-drag-id="${CSS.escape(id)}"]`);
+      await morphCollapseFrame(el);
+      toggleFolder(id);
+      selectItem(id, { record: false });
+      flowMode = true;
+      rebuildTrace();
+      // Child already morph-closed; let parents/siblings FLIP to the new pack.
+      skipFlipOnce = false;
+      app.classList.remove('layout-quiet');
+      clearTimeout(quietLayoutMotion._t);
+      render();
+      updateInspector();
+      requestAnimationFrame(() => {
+        softSettleAfterExpand(id, { duration: 720 });
+        animateReflowEdges(700);
+        pulseSelection();
+      });
+      return;
+    }
     toggleFolder(id);
     selectItem(id, { record: false });
     flowMode = true;
@@ -3925,10 +4071,10 @@ function bindScene() {
     requestAnimationFrame(() => {
       animateReflowEdges(1100);
       pulseSelection();
-      if (opening) scheduleTraceAlign(980);
+      scheduleTraceAlign(980);
     });
   }));
-  scene.querySelectorAll('[data-expand]').forEach(button => button.addEventListener('click', event => {
+  scene.querySelectorAll('[data-expand]').forEach(button => button.addEventListener('click', async event => {
     event.stopPropagation();
     const file = node(button.dataset.expand);
     if (!file) return;
@@ -3936,6 +4082,8 @@ function bindScene() {
       remember();
       captureClickAnchor(file.id, event);
       markExpandAnchor(file.id);
+      const el = scene.querySelector(`[data-drag-id="${CSS.escape(file.id)}"]`);
+      await morphCollapseFrame(el);
       expandedFiles.delete(file.id);
       selectItem(file.id, { record: false });
       skipFlipOnce = false;
@@ -3943,7 +4091,10 @@ function bindScene() {
       clearTimeout(quietLayoutMotion._t);
       render();
       updateInspector();
-      requestAnimationFrame(() => animateReflowEdges(1000));
+      requestAnimationFrame(() => {
+        softSettleAfterExpand(file.id, { duration: 720 });
+        animateReflowEdges(700);
+      });
     } else {
       focusFileFrame(file, { expand: true, event });
     }
@@ -4105,6 +4256,10 @@ function refreshFocusClasses() {
 function selectItem(id, { record = true } = {}) {
   if (record && selectedId !== id) remember();
   selectedId = id; selectedImportEdgeId = undefined; rebuildTrace(); refreshFocusClasses(); drawEdges(); renderMinimap(); updateInspector(); writeDeepLink();
+  // Keep rubber-band alive when focus changes (including off-screen partners).
+  if (traceEdges.size && !app.classList.contains('dragging')) {
+    scheduleGravityDrift(180);
+  }
 }
 function updateInspector() {
   const item = selected() || entryFile(); if (!item) return;
@@ -5063,7 +5218,19 @@ function applyGraph(next, { preserve = false } = {}) {
   if (!preserve) {
     requestAnimationFrame(() => {
       fitMap();
-      if (!applyDeepLink()) writeDeepLink();
+      const linked = applyDeepLink();
+      if (!linked) writeDeepLink();
+      // After layout + optional deep-link focus, start rubber-band even if
+      // partners begin outside the viewfinder.
+      requestAnimationFrame(() => {
+        rebuildTrace();
+        if (traceEdges.size > 0) {
+          scheduleTraceAlign(linked ? 640 : 320);
+          scheduleGravityDrift(720);
+        } else {
+          scheduleGravityDrift(300);
+        }
+      });
     });
   }
 }

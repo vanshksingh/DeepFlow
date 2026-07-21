@@ -1382,8 +1382,8 @@ function computeNestedShelfSeats(kids, draggedId, dropX, dropY, { gap = NESTED_G
  * beside one (shared top) when the drop is clearly in that pocket.
  */
 function snapNestedDropSeat(dropX, dropY, dropW, dropH, siblings, gap) {
-  let x = Math.max(NEST_PAD, dropX);
-  let y = Math.max(NEST_PAD, dropY);
+  let x = dropX;
+  let y = dropY;
   if (!siblings.length) return { x, y };
   const dropCx = x + dropW / 2;
   const dropCy = y + dropH / 2;
@@ -1410,15 +1410,15 @@ function snapNestedDropSeat(dropX, dropY, dropW, dropH, siblings, gap) {
     y = best.sy + best.h + gap;
   } else if (above) {
     x = best.sx;
-    y = Math.max(NEST_PAD, best.sy - dropH - gap);
+    y = best.sy - dropH - gap; // may go past top — parent grows up on settle
   } else if (right) {
     x = best.sx + best.w + gap;
     y = best.sy;
   } else if (left) {
-    x = Math.max(NEST_PAD, best.sx - dropW - gap);
+    x = best.sx - dropW - gap; // may go past left — parent grows left on settle
     y = best.sy;
   }
-  return { x: Math.max(NEST_PAD, x), y: Math.max(NEST_PAD, y) };
+  return { x, y };
 }
 /** Soft-settle siblings after a nested drop: keep the drop seat, make room, grow parent. */
 function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
@@ -1444,8 +1444,9 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
   }
   parentEl.style.transition = 'width .55s cubic-bezier(.22, 1, .36, 1), height .55s cubic-bezier(.22, 1, .36, 1)';
   canvasEl.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), min-height .55s cubic-bezier(.22, 1, .36, 1)';
-  const rawX = Math.max(NEST_PAD, parseFloat(mine.style.left) || 0);
-  const rawY = Math.max(NEST_PAD, parseFloat(mine.style.top) || 0);
+  // Keep the raw drop — including past top/left. Origin shift grows the folder there.
+  const rawX = parseFloat(mine.style.left) || 0;
+  const rawY = parseFloat(mine.style.top) || 0;
   const mineSize = frameLayoutSize(mine);
   const mineW = mineSize.w || mine.offsetWidth || 200;
   const mineH = mineSize.h || mine.offsetHeight || 70;
@@ -1476,12 +1477,8 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
     const box = nestBox(m.to.x, m.to.y, m.w, m.h);
     if (!rectsOverlap(wall, box, gap)) return false;
     const { dx, dy } = separationPush(box, wall, gap);
-    let nx = m.to.x + dx;
-    let ny = m.to.y + dy;
-    if (nx < NEST_PAD && dx < 0) nx = wall.right + gap;
-    if (ny < NEST_PAD && dy < 0) ny = wall.bottom + gap;
-    m.to.x = Math.max(NEST_PAD, nx);
-    m.to.y = Math.max(NEST_PAD, ny);
+    m.to.x += dx;
+    m.to.y += dy;
     return true;
   };
   for (let pass = 0; pass < 16; pass++) {
@@ -1501,22 +1498,38 @@ function softSettleNested(draggedId, parentId, { duration = 560 } = {}) {
         A.to.y += dy * .5;
         B.to.x -= dx * .5;
         B.to.y -= dy * .5;
-        if (A.to.x < NEST_PAD && dx < 0) A.to.x = bBox.right + gap;
-        if (A.to.y < NEST_PAD && dy < 0) A.to.y = bBox.bottom + gap;
-        if (B.to.x < NEST_PAD && dx > 0) B.to.x = aBox.right + gap;
-        if (B.to.y < NEST_PAD && dy > 0) B.to.y = aBox.bottom + gap;
-        A.to.x = Math.max(NEST_PAD, A.to.x);
-        A.to.y = Math.max(NEST_PAD, A.to.y);
-        B.to.x = Math.max(NEST_PAD, B.to.x);
-        B.to.y = Math.max(NEST_PAD, B.to.y);
         hit = true;
       }
     }
     if (!hit) break;
   }
 
+  // Top/left overflow → shift canvas origin so everything stays padded and the
+  // folder grows in that direction while the drop stays under the pointer.
+  let minX = mineTo.x;
+  let minY = mineTo.y;
+  for (const m of siblings) {
+    minX = Math.min(minX, m.to.x);
+    minY = Math.min(minY, m.to.y);
+  }
+  const shiftX = Math.max(0, NEST_PAD - minX);
+  const shiftY = Math.max(0, NEST_PAD - minY);
+  if (shiftX || shiftY) {
+    mineTo.x += shiftX;
+    mineTo.y += shiftY;
+    for (const m of siblings) {
+      m.to.x += shiftX;
+      m.to.y += shiftY;
+      m.from.x += shiftX;
+      m.from.y += shiftY;
+    }
+    shiftNestedCanvasOrigin(parentEl, canvasEl, draggedId, shiftX, shiftY);
+  }
+  const fromX = (parseFloat(mine.style.left) || 0);
+  const fromY = (parseFloat(mine.style.top) || 0);
+
   const movers = [
-    { id: draggedId, el: mine, from: { x: rawX, y: rawY }, to: { ...mineTo }, w: mineW, h: mineH },
+    { id: draggedId, el: mine, from: { x: fromX, y: fromY }, to: { ...mineTo }, w: mineW, h: mineH },
     ...siblings
   ];
 
@@ -1621,18 +1634,60 @@ function reshapeParentCanvas(parentEl, canvasEl, contentW, contentH, { allowShri
   canvasEl.style.height = `${Math.max(72, needH - headerH - 12)}px`;
   canvasEl.style.minHeight = canvasEl.style.height;
 }
-/** Grow the parent folder around a nested child. Never shifts canvas origin —
- *  left/top overflow is clamped so siblings and selection stay put. */
+/**
+ * Shift nested seats/DOM when the canvas grows left/up around a child.
+ * Parent island moves opposite so the dragged chip stays under the pointer.
+ */
+function shiftNestedCanvasOrigin(parentEl, canvasEl, skipId, shiftX, shiftY) {
+  if (!parentEl || !canvasEl || (!shiftX && !shiftY)) return;
+  for (const el of canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')) {
+    const kidId = el.dataset.dragId;
+    const left = (parseFloat(el.style.left) || 0) + shiftX;
+    const top = (parseFloat(el.style.top) || 0) + shiftY;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    const seat = nestedSeats.get(kidId);
+    if (seat) nestedSeats.set(kidId, { x: seat.x + shiftX, y: seat.y + shiftY });
+    else if (kidId === skipId || userArranged.has(kidId)) nestedSeats.set(kidId, { x: left, y: top });
+  }
+  const parentId = parentEl.dataset.dragId;
+  if (!parentId) return;
+  const islandId = dragIslandId(parentId);
+  if (islandId === parentId) {
+    const off = offsets.get(islandId) || { x: 0, y: 0 };
+    const next = { x: off.x - shiftX, y: off.y - shiftY };
+    offsets.set(islandId, next);
+    parentEl.style.translate = `${next.x}px ${next.y}px`;
+    parentEl.style.setProperty('--ox', `${next.x}px`);
+    parentEl.style.setProperty('--oy', `${next.y}px`);
+  } else {
+    // Parent itself is nested — nudge its seat the same way.
+    const seat = nestedSeats.get(parentId) || {
+      x: parseFloat(parentEl.style.left) || 0,
+      y: parseFloat(parentEl.style.top) || 0
+    };
+    const next = { x: seat.x - shiftX, y: seat.y - shiftY };
+    userArranged.add(parentId);
+    nestedSeats.set(parentId, next);
+    parentEl.style.left = `${next.x}px`;
+    parentEl.style.top = `${next.y}px`;
+  }
+}
+/** Grow the parent folder around a nested child — including top/left via origin shift. */
 function encapsulateNestedChild(parentEl, canvasEl, childEl, childX, childY, {
-  skipId: _skipId = null,
+  skipId = null,
   deep = false,
   allowShrink = false
 } = {}) {
   if (!parentEl || !canvasEl || !childEl) return { shiftX: 0, shiftY: 0, x: childX, y: childY };
-  // Clamp into the canvas — shifting origin hijacked folders leftward and
-  // dragged selection/siblings with it.
-  const x = Math.max(NEST_PAD, childX);
-  const y = Math.max(NEST_PAD, childY);
+  const childId = skipId || childEl.dataset.dragId;
+  let shiftX = 0;
+  let shiftY = 0;
+  if (childX < NEST_PAD) shiftX = NEST_PAD - childX;
+  if (childY < NEST_PAD) shiftY = NEST_PAD - childY;
+  if (shiftX || shiftY) shiftNestedCanvasOrigin(parentEl, canvasEl, childId, shiftX, shiftY);
+  const x = childX + shiftX;
+  const y = childY + shiftY;
   const childSize = frameLayoutSize(childEl);
   const childW = childSize.w || parseFloat(childEl.style.width) || childEl.offsetWidth || 0;
   const childH = childSize.h || parseFloat(childEl.style.height) || childEl.offsetHeight || 0;
@@ -1668,7 +1723,7 @@ function encapsulateNestedChild(parentEl, canvasEl, childEl, childX, childY, {
     }
   }
 
-  return { shiftX: 0, shiftY: 0, x, y };
+  return { shiftX, shiftY, x, y };
 }
 function clearNestDragChrome() {
   scene.querySelectorAll('.nest-drop-active, .nest-canvas-active').forEach(el => {
@@ -2019,60 +2074,66 @@ function computeConstellationMovers() {
     const idealX = side < 0 ? anchor.x - gap - box.w : anchor.x + anchor.w + gap;
     const anchorCy = yHint != null ? yHint : anchor.y + anchor.h / 2;
     const idealY = anchorCy - box.h / 2;
-    // If already on the right side with a readable gap, keep the seat nearly put —
-    // only tighten/loosen the wire and ease Y toward the connector.
+    // Already on the right side with a readable gap? Keep it — only polish the wire.
     const curCx = box.x + box.w / 2;
     const aCx = anchor.x + anchor.w / 2;
     const onSide = side < 0 ? curCx <= aCx + 8 : curCx >= aCx - 8;
     const curGap = side < 0 ? anchor.x - (box.x + box.w) : box.x - (anchor.x + anchor.w);
-    if (onSide && curGap >= LINK_GAP * 0.75 && curGap <= LINK_GAP * 2.8) {
-      const targetGap = LINK_GAP;
-      const x = side < 0 ? anchor.x - targetGap - box.w : anchor.x + anchor.w + targetGap;
-      const y = box.y + (idealY - box.y) * 0.62;
+    if (onSide && curGap >= LINK_GAP * 0.7 && curGap <= LINK_GAP * 3.2) {
+      const x = side < 0 ? anchor.x - LINK_GAP - box.w : anchor.x + anchor.w + LINK_GAP;
+      // Strong Y ease toward the connector so the edge reads as a short hop.
+      const y = box.y + (idealY - box.y) * 0.78;
       return { x, y, w: box.w, h: box.h };
     }
     return { x: idealX, y: idealY, w: box.w, h: box.h };
   };
 
-  /** Stack members beside anchor; preserve relative Y order; keep near connector. */
-  const stackBeside = (members, anchor, side) => {
-    if (!members.length) return;
-    members.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
-    const seats = members.map(box => seatBeside(anchor, box, side));
-    if (members.length === 1) {
-      world.set(members[0].id, seats[0]);
-      preferred.set(members[0].id, { x: seats[0].x, y: seats[0].y });
-      return;
+  /** Resolve same-side overlaps by sliding vertically — never push partners farther from the connector. */
+  const resolveVertical = (ids, side) => {
+    if (ids.length < 2) return;
+    const items = ids.map(id => world.get(id)).filter(Boolean);
+    items.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
+    for (let pass = 0; pass < 24; pass++) {
+      let hit = false;
+      for (let i = 0; i < items.length - 1; i++) {
+        const A = items[i], B = items[i + 1];
+        const need = A.y + A.h + ROW_GAP;
+        if (B.y >= need) continue;
+        const push = (need - B.y) / 2 + 0.5;
+        A.y -= push;
+        B.y += push;
+        hit = true;
+      }
+      if (!hit) break;
     }
-    // Vertical pack around the connector, but bias each seat toward its own ideal Y.
-    const totalH = seats.reduce((s, b) => s + b.h, 0) + Math.max(0, seats.length - 1) * ROW_GAP;
-    let y = (anchor.y + anchor.h / 2) - totalH / 2;
-    for (let i = 0; i < members.length; i++) {
-      const box = members[i];
-      const ideal = seats[i];
-      const x = ideal.x;
-      // Blend stacked slot with per-island connector alignment.
-      const blendedY = y * 0.55 + ideal.y * 0.45;
-      const seat = { x, y: blendedY, w: box.w, h: box.h };
-      world.set(box.id, seat);
-      preferred.set(box.id, { x: seat.x, y: ideal.y });
-      y = blendedY + box.h + ROW_GAP;
+    // Re-assert X on the connector side after vertical slides.
+    for (const id of ids) {
+      const seat = world.get(id);
+      const box = byId.get(id);
+      if (!seat || !box) continue;
+      const anchor = focusBox;
+      seat.x = side < 0 ? anchor.x - LINK_GAP - box.w : anchor.x + anchor.w + LINK_GAP;
+      preferred.set(id, { x: seat.x, y: seat.y });
     }
   };
 
-  const leftCol = [];
-  const rightCol = [];
+  // Hop-1: each partner sits beside focus at its own connector-aligned Y.
+  // Forced column stacks made traces look artificial; per-island seats read as real links.
+  const leftIds = [];
+  const rightIds = [];
   for (const box of hop1) {
     const isEmitter = emitsIntoFocus.has(box.id);
     const isReceiver = receivesFromFocus.has(box.id);
-    // Flow direction wins; otherwise keep the island's natural side of focus.
     let side = box.x + box.w / 2 <= focusCx ? -1 : 1;
     if (isEmitter && !isReceiver) side = -1;
     else if (isReceiver && !isEmitter) side = 1;
-    (side < 0 ? leftCol : rightCol).push(box);
+    const seat = seatBeside(focusBox, box, side);
+    world.set(box.id, { ...seat, id: box.id });
+    preferred.set(box.id, { x: seat.x, y: seat.y });
+    (side < 0 ? leftIds : rightIds).push(box.id);
   }
-  stackBeside(leftCol, focusBox, -1);
-  stackBeside(rightCol, focusBox, 1);
+  resolveVertical(leftIds, -1);
+  resolveVertical(rightIds, 1);
 
   const placeDeep = (list) => {
     const groups = new Map();
@@ -2085,15 +2146,44 @@ function computeConstellationMovers() {
     for (const [anchorId, members] of groups) {
       const anchor = world.get(anchorId) || byId.get(anchorId) || focusBox;
       const ax = anchor.x + anchor.w / 2;
-      // Sit on the outward side of the parent (away from focus) so the chain reads.
+      // Default: outward from focus so the chain keeps reading left→right / right→left.
       let side = ax <= focusCx ? -1 : 1;
-      // If directed edge from parent→child, child sits on the receive (right) of parent
-      // when parent emits; from child→parent, child sits on the emit (left).
       const outs = members.filter(m => directed.some(l => l.from === anchorId && l.to === m.id));
       const ins = members.filter(m => directed.some(l => l.from === m.id && l.to === anchorId));
       if (outs.length && !ins.length) side = 1;
       else if (ins.length && !outs.length) side = -1;
-      stackBeside(members, anchor, side);
+      const ids = [];
+      for (const box of members) {
+        const seat = seatBeside(anchor, box, side);
+        world.set(box.id, { ...seat, id: box.id });
+        preferred.set(box.id, { x: seat.x, y: seat.y });
+        ids.push(box.id);
+      }
+      // Vertical resolve relative to this parent — keep X locked to the parent side.
+      if (ids.length > 1) {
+        const items = ids.map(id => world.get(id)).filter(Boolean);
+        items.sort((a, b) => a.y - b.y || a.id.localeCompare(b.id));
+        for (let pass = 0; pass < 20; pass++) {
+          let hit = false;
+          for (let i = 0; i < items.length - 1; i++) {
+            const A = items[i], B = items[i + 1];
+            const need = A.y + A.h + ROW_GAP;
+            if (B.y >= need) continue;
+            const push = (need - B.y) / 2 + 0.5;
+            A.y -= push;
+            B.y += push;
+            hit = true;
+          }
+          if (!hit) break;
+        }
+        for (const id of ids) {
+          const seat = world.get(id);
+          const box = byId.get(id);
+          if (!seat || !box) continue;
+          seat.x = side < 0 ? anchor.x - LINK_GAP - box.w : anchor.x + anchor.w + LINK_GAP;
+          preferred.set(id, { x: seat.x, y: seat.y });
+        }
+      }
     }
   };
   placeDeep(hop2);
@@ -2101,18 +2191,17 @@ function computeConstellationMovers() {
 
   // 1) Clear overlaps among pulled islands (focus stays put).
   const movable = [...world.entries()].map(([id, box]) => ({ id, ...box }));
-  separateBoxes(movable, { gap: ISLAND_GAP, passes: 48, anchors: new Set([focusTop.id]), pad: 0 });
-  // Tether back toward connection seats so separation doesn't fling partners away
-  // from the node they actually link to.
-  for (let tug = 0; tug < 3; tug++) {
+  separateBoxes(movable, { gap: ISLAND_GAP, passes: 36, anchors: new Set([focusTop.id]), pad: 0 });
+  // Tether: hold X hard against the connector (readable wire), ease Y gently.
+  for (let tug = 0; tug < 4; tug++) {
     for (const box of movable) {
       if (box.id === focusTop.id) continue;
       const pref = preferred.get(box.id);
       if (!pref) continue;
-      box.x += (pref.x - box.x) * 0.55;
-      box.y += (pref.y - box.y) * 0.4;
+      box.x += (pref.x - box.x) * 0.72;
+      box.y += (pref.y - box.y) * 0.38;
     }
-    separateBoxes(movable, { gap: ISLAND_GAP, passes: 18, anchors: new Set([focusTop.id]), pad: 0 });
+    separateBoxes(movable, { gap: ISLAND_GAP, passes: 14, anchors: new Set([focusTop.id]), pad: 0 });
   }
   for (const box of movable) {
     if (box.id === focusTop.id) {
@@ -4172,9 +4261,9 @@ function bindFrameDrag(frame) {
         traceArranged.delete(islandId);
       }
       if (nested && parentId) {
-        // Keep raw seat for rubber-band settle; clamp happens in softSettleNested.
-        const dropX = Math.max(NEST_PAD, baseLeft + dx);
-        const dropY = Math.max(NEST_PAD, baseTop + dy);
+        // Keep raw seat (including past top/left) — softSettle grows the folder there.
+        const dropX = baseLeft + dx;
+        const dropY = baseTop + dy;
         userArranged.add(draggedId);
         nestedSeats.set(draggedId, {
           x: dropX,

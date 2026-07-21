@@ -5440,19 +5440,42 @@ function updateInspector() {
 function bindInspectorSource() {
   $('#inspect-source').querySelectorAll('[data-pin]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); const id = button.dataset.pin; remember(); pinned.has(id) ? pinned.delete(id) : pinned.add(id); rebuildTrace(); render(); updateInspector(); }));
 }
+function minimapMetrics() {
+  const mw = Math.max(1, minimap?.clientWidth || 160);
+  const mh = Math.max(1, minimap?.clientHeight || 104);
+  const worldW = Math.max(1, world?.offsetWidth || 1);
+  const worldH = Math.max(1, world?.offsetHeight || 1);
+  const scale = Math.min(mw / worldW, mh / worldH);
+  return {
+    mw,
+    mh,
+    worldW,
+    worldH,
+    scale,
+    // Letterbox so uniform scale matches click mapping (old code stretched axes).
+    ox: (mw - worldW * scale) / 2,
+    oy: (mh - worldH * scale) / 2
+  };
+}
 function renderMinimap() {
-  if (!graph) return;
-  const w = 160, h = 104;
-  const scale = Math.min(w / Math.max(1, world.offsetWidth), h / Math.max(1, world.offsetHeight));
-  const nodes = [...scene.querySelectorAll('.frame > .frame-bar')].map(row => {
+  if (!graph || !minimap) return;
+  const { scale, ox, oy } = minimapMetrics();
+  const worldRect = world.getBoundingClientRect();
+  // Top-level islands only — nested bars stacked into an unreadable cloud.
+  const bars = scene.querySelectorAll('.frame-artboard > .frame.float > .frame-bar[data-outline-row]');
+  const nodes = [...bars].map(row => {
     const id = row.dataset.outlineRow;
     const rect = row.getBoundingClientRect();
-    const worldRect = world.getBoundingClientRect();
     const x = (rect.left - worldRect.left) / canvas.scale + rect.width / (2 * canvas.scale);
     const y = (rect.top - worldRect.top) / canvas.scale + rect.height / (2 * canvas.scale);
-    return `<i class="mini-node ${id === selectedId ? 'selected' : ''}" style="left:${x * scale}px;top:${y * scale}px"></i>`;
+    return `<i class="mini-node ${id === selectedId || dragIslandId(selectedId) === id ? 'selected' : ''}" style="left:${ox + x * scale}px;top:${oy + y * scale}px"></i>`;
   }).join('');
-  minimap.innerHTML = `${nodes}<i class="mini-viewport" style="left:${-canvas.x * scale}px;top:${-canvas.y * scale}px;width:${board.clientWidth * scale / canvas.scale}px;height:${board.clientHeight * scale / canvas.scale}px"></i>`;
+  // Viewport in world space is (-canvas/scale) .. (+board/scale); divide translate by canvas.scale.
+  const viewLeft = ox + (-canvas.x / canvas.scale) * scale;
+  const viewTop = oy + (-canvas.y / canvas.scale) * scale;
+  const viewW = (board.clientWidth / canvas.scale) * scale;
+  const viewH = (board.clientHeight / canvas.scale) * scale;
+  minimap.innerHTML = `${nodes}<i class="mini-viewport" style="left:${viewLeft}px;top:${viewTop}px;width:${viewW}px;height:${viewH}px"></i>`;
 }
 function fitMap() {
   const tree = scene.querySelector('.frame-artboard') || scene.querySelector('.frame-stage');
@@ -5605,7 +5628,15 @@ function canvasControls() {
     else if (scopeId !== rootFolder().id) { remember(); scopeId = node(scopeId)?.parentId || rootFolder().id; layoutAnchorFileId = entryFile(folder())?.id; render(); }
   });
 }
-minimap.addEventListener('pointerdown', event => { const rect = minimap.getBoundingClientRect(); const x = (event.clientX - rect.left) / rect.width * world.offsetWidth, y = (event.clientY - rect.top) / rect.height * world.offsetHeight; canvas.x = board.clientWidth / 2 - x * canvas.scale; canvas.y = board.clientHeight / 2 - y * canvas.scale; applyCanvas(); });
+minimap.addEventListener('pointerdown', event => {
+  const rect = minimap.getBoundingClientRect();
+  const { scale, ox, oy } = minimapMetrics();
+  const x = (event.clientX - rect.left - ox) / scale;
+  const y = (event.clientY - rect.top - oy) / scale;
+  canvas.x = board.clientWidth / 2 - x * canvas.scale;
+  canvas.y = board.clientHeight / 2 - y * canvas.scale;
+  applyCanvas();
+});
 async function snapshotFiles(files) { sourceMode = 'snapshot'; if ($('#tracking-status')) $('#tracking-status').textContent = 'static browser snapshot'; const payload = await Promise.all(files.filter(file => file.size < 2_000_000).map(async file => ({ path: file.webkitRelativePath || file.name, source: await file.text() }))); const response = await fetch('/api/graph-files', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ files: payload }) }); if (!response.ok) throw new Error(await response.text()); applyGraph(await response.json()); }
 async function openWorkspace() { const input = $('#workspace-files'); if (!window.showDirectoryPicker) return input.click(); try { const handle = await window.showDirectoryPicker({ mode: 'read' }); const files = []; const walk = async (directory, prefix = '') => { for await (const [name, child] of directory.entries()) { if (['node_modules', '.git', 'dist', 'build'].includes(name)) continue; if (child.kind === 'directory') await walk(child, `${prefix}${name}/`); else files.push(Object.assign(await child.getFile(), { webkitRelativePath: `${prefix}${name}` })); } }; await walk(handle); await snapshotFiles(files); } catch (error) { if (error.name !== 'AbortError') console.error(error); } }
 function mcpSnippet() {

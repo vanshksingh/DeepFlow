@@ -328,11 +328,17 @@ body[data-theme="everforest"] {
   background: var(--panel);
 }
 #minimap {
-  width: 132px;
-  height: 88px;
+  width: 160px;
+  height: 104px;
   right: 12px;
   bottom: 12px;
   opacity: .88;
+}
+.mini-node {
+  transform: translate(-50%, -50%);
+}
+.mini-node.selected {
+  margin: 0;
 }
 
 .ribbon .workspace-name b,

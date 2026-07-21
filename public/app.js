@@ -4325,7 +4325,7 @@ function mcpSnippet() {
     mcpServers: {
       deepflow: {
         command: 'node',
-        args: [`${location.origin}/mcp-server.js`.replace(location.origin, '<path-to-DeepFlow>/mcp-server.js')]
+        args: ['<path-to-DeepFlow>/mcp-server.js']
       }
     }
   }, null, 2) + '\n\nThen ask your agent to call deepflow_open_workspace with the absolute repo path before it starts editing, and deepflow_after_edit after file changes.';

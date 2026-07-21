@@ -12,7 +12,7 @@
   </p>
 </div>
 
-<img width="1587" height="1049" alt="DeepFlow - interactive architecture signal map" src="https://github.com/user-attachments/assets/82dfc7fb-505d-4bf6-a7b9-329aa038f927" />
+<img width="1376" height="768" alt="IMG_7059" src="https://github.com/user-attachments/assets/cc5a1f5d-e9e5-4c56-b5c4-a665f7beb87b" />
 
 <br/>
 

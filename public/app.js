@@ -797,10 +797,11 @@ function triggerJelly(el, strength = 1) {
   clearTimeout(el._jellyTimer);
   el._jellyTimer = setTimeout(() => el.classList.remove('jelly-wobble'), 1400);
 }
-const ISLAND_GAP = 56; // extra breathing room so trace lines can route between islands
-const MODULE_GAP = 10; // tight pack for fn modules inside a file
-const NESTED_GAP = 16; // sibling folders/files inside a parent
-const NEST_PAD = 10; // inner canvas padding — never shift origin past this; clamp instead
+const ISLAND_GAP = 64; // breathing room between top-level islands
+const MODULE_GAP = 18; // air between fn modules inside a file
+const NESTED_GAP = 28; // padding between sibling folders/files inside a parent
+const NEST_PAD = 20; // inner canvas padding — keep counts/chips off the rim
+const NEST_SNAP = 16; // soft edge-align threshold for in-folder cleanup
 function topLevelIslandElements() {
   return [...scene.querySelectorAll('.frame-artboard > .frame.float[data-drag-id]')];
 }
@@ -1079,6 +1080,13 @@ function softSettleNested(draggedId, parentId, { duration = 720 } = {}) {
     m.to.x = Math.max(NEST_PAD, m.to.x);
     m.to.y = Math.max(NEST_PAD, m.to.y);
   }
+
+  // Soft neighbor snap — align edges when almost lined up (cleanup resolver).
+  const snapEntries = [
+    { id: draggedId, to: mineTo, w: mineBox.width, h: mineBox.height, fixed: true },
+    ...movers.map(m => ({ id: m.id, to: m.to, w: m.el.offsetWidth, h: m.el.offsetHeight, fixed: false }))
+  ];
+  softSnapNestedSeats(snapEntries);
 
   for (const m of movers) {
     m.el.style.left = `${m.to.x}px`;
@@ -2050,7 +2058,7 @@ function frameModuleSize(_file, module) {
   return { w, h: Math.max(52, h) };
 }
 function frameFileSize(file) {
-  const header = frameLabelMetrics(file.label, { minW: 248, maxW: 480, chrome: 118, charW: 7.1, baseH: 56, lineH: 17, maxLines: 3 });
+  const header = frameLabelMetrics(file.label, { minW: 260, maxW: 500, chrome: 136, charW: 7.1, baseH: 58, lineH: 17, maxLines: 3 });
   if (!expandedFiles.has(file.id)) return { w: header.w, h: header.h, headerH: header.h, children: [] };
   const boxes = modules(file).slice(0, 18).map(module => {
     const size = frameModuleSize(file, module);
@@ -2068,7 +2076,7 @@ function frameFileSize(file) {
   return { w: Math.max(header.w, packed.w + 8), h: Math.max(header.h, 48) + packed.h + 8, headerH: header.h, children: packed.items };
 }
 function frameFolderSize(item, depth = 0) {
-  const header = frameLabelMetrics(item.label, { minW: depth ? 208 : 232, maxW: 460, chrome: 108, baseH: 54, lineH: 17, maxLines: 3 });
+  const header = frameLabelMetrics(item.label, { minW: depth ? 220 : 248, maxW: 480, chrome: 128, baseH: 58, lineH: 17, maxLines: 3 });
   if ((!expandedFolders.has(item.id) && item.id !== SYNTHETIC_ROOT_ID) || depth > 8) {
     return { w: header.w, h: header.h, headerH: header.h, children: [] };
   }
@@ -2227,6 +2235,187 @@ function markExpandAnchor(id) {
 function clearExpandAnchor() {
   layoutAnchorIds = new Set();
 }
+/** Pin a nested frame's current canvas seat so open/resize grows in place
+ *  and the parent expands sideways instead of teleporting the chip. */
+function pinNestedSeatFromDom(id) {
+  if (!id || !parentCanvasId(id)) return false;
+  const el = scene.querySelector(`[data-drag-id="${CSS.escape(id)}"]`);
+  if (!el) return false;
+  userArranged.add(id);
+  nestedSeats.set(id, {
+    x: parseFloat(el.style.left) || 0,
+    y: parseFloat(el.style.top) || 0
+  });
+  return true;
+}
+/** Soft-align nearly matching left/top edges inside a folder canvas. */
+function softSnapNestedSeats(entries) {
+  if (!entries || entries.length < 2) return;
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const A = entries[i], B = entries[j];
+      const dx = A.to.x - B.to.x;
+      const dy = A.to.y - B.to.y;
+      if (Math.abs(dx) > 0.5 && Math.abs(dx) < NEST_SNAP) {
+        if (A.fixed && !B.fixed) B.to.x = A.to.x;
+        else if (B.fixed && !A.fixed) A.to.x = B.to.x;
+        else {
+          const x = (A.to.x + B.to.x) / 2;
+          if (!A.fixed) A.to.x = x;
+          if (!B.fixed) B.to.x = x;
+        }
+      }
+      if (Math.abs(dy) > 0.5 && Math.abs(dy) < NEST_SNAP) {
+        if (A.fixed && !B.fixed) B.to.y = A.to.y;
+        else if (B.fixed && !A.fixed) A.to.y = B.to.y;
+        else {
+          const y = (A.to.y + B.to.y) / 2;
+          if (!A.fixed) A.to.y = y;
+          if (!B.fixed) B.to.y = y;
+        }
+      }
+      // Also snap right/bottom edges when close.
+      const aRight = A.to.x + A.w, bRight = B.to.x + B.w;
+      const aBot = A.to.y + A.h, bBot = B.to.y + B.h;
+      if (!A.fixed && Math.abs(aRight - bRight) < NEST_SNAP && Math.abs(aRight - bRight) > 0.5) {
+        A.to.x = bRight - A.w;
+      } else if (!B.fixed && Math.abs(aRight - bRight) < NEST_SNAP && Math.abs(aRight - bRight) > 0.5) {
+        B.to.x = aRight - B.w;
+      }
+      if (!A.fixed && Math.abs(aBot - bBot) < NEST_SNAP && Math.abs(aBot - bBot) > 0.5) {
+        A.to.y = bBot - A.h;
+      } else if (!B.fixed && Math.abs(aBot - bBot) < NEST_SNAP && Math.abs(aBot - bBot) > 0.5) {
+        B.to.y = aBot - B.h;
+      }
+    }
+  }
+  for (const e of entries) {
+    e.to.x = Math.max(NEST_PAD, e.to.x);
+    e.to.y = Math.max(NEST_PAD, e.to.y);
+  }
+}
+/**
+ * In-folder cleanup resolver: separate with padding, soft-snap neighbors,
+ * grow the parent right/down only. Used after drop/expand/reset.
+ */
+function cleanupNestedLayout(parentId, { duration = 720, anchorId = null } = {}) {
+  const parentEl = scene.querySelector(`[data-drag-id="${CSS.escape(parentId)}"]`);
+  const canvasEl = parentEl?.querySelector(':scope > .frame-canvas');
+  if (!canvasEl) return;
+  const token = ++softSettleToken;
+  const kids = [...canvasEl.querySelectorAll(':scope > .frame.float[data-drag-id]')];
+  if (!kids.length) return;
+  const gap = kids.every(el => el.classList.contains('frame-fn')) ? MODULE_GAP : NESTED_GAP;
+  const entries = kids.map(el => {
+    const x = parseFloat(el.style.left) || 0;
+    const y = parseFloat(el.style.top) || 0;
+    return {
+      id: el.dataset.dragId,
+      el,
+      from: { x, y },
+      to: { x, y },
+      w: el.offsetWidth,
+      h: el.offsetHeight,
+      fixed: !!(anchorId && el.dataset.dragId === anchorId)
+    };
+  });
+  for (let pass = 0; pass < 18; pass++) {
+    let hit = false;
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const A = entries[i], B = entries[j];
+        const aBox = {
+          left: A.to.x, top: A.to.y, right: A.to.x + A.w, bottom: A.to.y + A.h,
+          width: A.w, height: A.h
+        };
+        const bBox = {
+          left: B.to.x, top: B.to.y, right: B.to.x + B.w, bottom: B.to.y + B.h,
+          width: B.w, height: B.h
+        };
+        if (!rectsOverlap(aBox, bBox, gap)) continue;
+        const { dx, dy } = separationPush(aBox, bBox, gap);
+        if (!dx && !dy) continue;
+        if (A.fixed && !B.fixed) {
+          B.to.x -= dx; B.to.y -= dy;
+        } else if (B.fixed && !A.fixed) {
+          A.to.x += dx; A.to.y += dy;
+        } else if (!A.fixed && !B.fixed) {
+          A.to.x += dx * .5; A.to.y += dy * .5;
+          B.to.x -= dx * .5; B.to.y -= dy * .5;
+        }
+        hit = true;
+      }
+    }
+    if (!hit) break;
+  }
+  softSnapNestedSeats(entries);
+  for (const e of entries) {
+    e.el.style.left = `${e.to.x}px`;
+    e.el.style.top = `${e.to.y}px`;
+  }
+  const grow = entries.reduce((acc, e) => ({
+    x: Math.max(acc.x, e.to.x + e.w),
+    y: Math.max(acc.y, e.to.y + e.h)
+  }), { x: NEST_PAD, y: NEST_PAD });
+  const anchor = entries.find(e => e.fixed) || entries[0];
+  if (anchor) {
+    encapsulateNestedChild(parentEl, canvasEl, anchor.el, anchor.to.x, anchor.to.y, {
+      skipId: anchor.id,
+      deep: true,
+      allowShrink: true
+    });
+  } else {
+    reshapeParentCanvas(parentEl, canvasEl, grow.x + NEST_PAD, grow.y + NEST_PAD, { allowShrink: true });
+  }
+  for (const e of entries) {
+    e.el.style.left = `${e.from.x}px`;
+    e.el.style.top = `${e.from.y}px`;
+  }
+  const applySeat = (el, x, y) => {
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+    el.style.translate = '0px 0px';
+    el.style.setProperty('--ox', '0px');
+    el.style.setProperty('--oy', '0px');
+  };
+  if (duration <= 0 || document.body.classList.contains('reduce-motion')) {
+    for (const e of entries) {
+      applySeat(e.el, e.to.x, e.to.y);
+      nestedSeats.set(e.id, { ...e.to });
+      userArranged.add(e.id);
+    }
+    scheduleDraw();
+    return;
+  }
+  parentEl.style.transition = 'width .55s cubic-bezier(.22, 1, .36, 1), height .55s cubic-bezier(.22, 1, .36, 1)';
+  canvasEl.style.transition = 'height .55s cubic-bezier(.22, 1, .36, 1), min-height .55s cubic-bezier(.22, 1, .36, 1)';
+  const start = performance.now();
+  const tick = now => {
+    if (token !== softSettleToken) return;
+    const t = Math.min(1, (now - start) / duration);
+    const ease = 1 - Math.pow(1 - t, 4);
+    for (const e of entries) {
+      applySeat(
+        e.el,
+        e.from.x + (e.to.x - e.from.x) * ease,
+        e.from.y + (e.to.y - e.from.y) * ease
+      );
+    }
+    if (t < 1) requestAnimationFrame(tick);
+    else {
+      parentEl.style.transition = '';
+      canvasEl.style.transition = '';
+      for (const e of entries) {
+        applySeat(e.el, e.to.x, e.to.y);
+        nestedSeats.set(e.id, { ...e.to });
+        userArranged.add(e.id);
+      }
+      scheduleDraw();
+      animateReflowEdges(400);
+    }
+  };
+  requestAnimationFrame(tick);
+}
 /** After expand/reflow, slowly ease overlapping top-level islands away from the grown one. */
 function softSettleAfterExpand(id, { duration = 1800 } = {}) {
   const islandId = dragIslandId(id);
@@ -2234,6 +2423,9 @@ function softSettleAfterExpand(id, { duration = 1800 } = {}) {
     || scene.querySelector(`[data-drag-id="${CSS.escape(islandId)}"]`);
   if (!islandEl) return;
   softSettleNeighbors(islandId, islandEl, { duration });
+  // Nested open: resolve siblings inside the parent canvas around the grown chip.
+  const parentId = parentCanvasId(id);
+  if (parentId) cleanupNestedLayout(parentId, { duration: Math.min(900, duration), anchorId: id });
 }
 /** Shelf width that prefers a near-square grid of top-level islands. */
 function preferredShelfWidth(boxes, { gap = 28, pad = 40 } = {}) {
@@ -2538,7 +2730,7 @@ function frameFolderHtml(item, placement, size = frameFolderSize(item, 0), depth
       <button class="frame-title outline-label" data-inline="${item.id}" data-kind="folder" type="button">
         <em class="frame-kind">${escape(copy.title)}</em>
         <b>${escape(item.label)}</b>
-        <span>${files}</span>
+        <span class="frame-count">${files}</span>
       </button>
       <button class="port pin-btn ${pinned.has(item.id) ? 'pinned' : ''}" data-pin="${item.id}" type="button" title="Pin"></button>
     </header>
@@ -2838,9 +3030,9 @@ function showOverviewEdge() {
 function wireFamily(type) {
   return CONTEXT_TYPES.has(type) ? 'context' : 'flow';
 }
-/** Calls ride above; imports ride below — keeps stacked corridors readable. */
+/** Calls / imports share a corridor with only a slight parallel offset. */
 function familyLaneBias(type) {
-  return CONTEXT_TYPES.has(type) ? 28 : -18;
+  return CONTEXT_TYPES.has(type) ? 6 : -6;
 }
 function moduleBusPath(a, b, spread, cross, backwards) {
   const lanePad = 34 + Math.min(46, Math.abs(cross) * .55);
@@ -2856,14 +3048,14 @@ function directedWirePath(a, b, spread = 0, cross = 0, family = 'flow') {
   const y0 = a.y;
   const y1 = b.y;
   const dx = b.x - a.x;
-  // Imports sit a touch lower in the mid-span so they don't paint over calls.
-  const familyY = family === 'context' ? 16 : -10;
-  const familyBow = family === 'context' ? 32 : 0;
-  const midLift = familyY + spread * .1 + cross * .45;
+  // Tiny family lift so imports track calls on nearly the same path.
+  const familyY = family === 'context' ? 5 : -5;
+  const familyBow = family === 'context' ? 8 : 0;
+  const midLift = familyY + spread * .08 + cross * .35;
 
   // Backwards: compact U-loop that still exits right and enters left.
   if (dx < 0) {
-    const bow = Math.max(32, Math.min(68, 36 + Math.abs(dx) * .18 + Math.abs(cross) * .2)) + familyBow * .35;
+    const bow = Math.max(32, Math.min(68, 36 + Math.abs(dx) * .18 + Math.abs(cross) * .2)) + familyBow;
     const midY = (y0 + y1) / 2 + midLift
       + (Math.abs(y0 - y1) < 24 ? (cross >= 0 ? bow * .3 : -bow * .3) : 0);
     const right = Math.max(a.x, b.x) + bow;
@@ -2874,12 +3066,12 @@ function directedWirePath(a, b, spread = 0, cross = 0, family = 'flow') {
 
   // Close but forward: short directed cubic (no wide loop).
   if (dx < 72) {
-    const reach = Math.min(Math.max(dx * .42, 18), 36) + (family === 'context' ? 8 : 0);
-    return `M ${a.x} ${y0} C ${a.x + reach} ${y0 + midLift * .6}, ${b.x - reach} ${y1 + midLift * .6}, ${b.x} ${y1}`;
+    const reach = Math.min(Math.max(dx * .42, 18), 36) + (family === 'context' ? 4 : 0);
+    return `M ${a.x} ${y0} C ${a.x + reach} ${y0 + midLift * .55}, ${b.x - reach} ${y1 + midLift * .55}, ${b.x} ${y1}`;
   }
 
   // Normal forward span — classic soft cubic, exit right / enter left.
-  const reach = Math.min(Math.max(dx * .4, 48), 120) + (family === 'context' ? 22 : 0);
+  const reach = Math.min(Math.max(dx * .4, 48), 120) + (family === 'context' ? 10 : 0);
   return `M ${a.x} ${y0} C ${a.x + reach} ${y0 + midLift}, ${b.x - reach} ${y1 + midLift}, ${b.x} ${y1}`;
 }
 function drawEdges() {
@@ -2907,25 +3099,25 @@ function drawEdges() {
   }
   const rendered = [...unique.values()].map((edge, index) => ({ edge, index, a: point(edge.from, 'out'), b: point(edge.to, 'in') })).filter(item => item.a && item.b);
   const crossOffsets = crossingOffsets(rendered);
-  // Fan within the same endpoint pair + family; families already sit on separate lanes.
+  // Fan within the same endpoint pair; call+import share one corridor key.
   const pairCounts = new Map();
   rendered.forEach(({ edge }) => {
     const key = `${edge.from}:${edge.to}:${wireFamily(edge.type)}`;
     pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
   });
   const pairSeen = new Map();
-  // Also fan when call+import share an island corridor (different ports, same path).
   const corridorCounts = new Map();
   const corridorSeen = new Map();
-  const corridorKeyFor = (edge, a, b) => {
+  const corridorKeyFor = (a, b) => {
     const ax = Math.round(a.x / 40);
     const bx = Math.round(b.x / 40);
     const ay = Math.round(a.y / 48);
     const by = Math.round(b.y / 48);
-    return `${ax}:${bx}:${ay}:${by}:${wireFamily(edge.type)}`;
+    // No family in key — imports track the same path as calls, offset only.
+    return `${ax}:${bx}:${ay}:${by}`;
   };
-  rendered.forEach(({ edge, a, b }) => {
-    const key = corridorKeyFor(edge, a, b);
+  rendered.forEach(({ a, b }) => {
+    const key = corridorKeyFor(a, b);
     corridorCounts.set(key, (corridorCounts.get(key) || 0) + 1);
   });
   rendered.forEach(({ edge, index, a, b }) => {
@@ -2935,14 +3127,16 @@ function drawEdges() {
     const pairIndex = pairSeen.get(pairKey) || 0;
     pairSeen.set(pairKey, pairIndex + 1);
     const total = pairCounts.get(pairKey) || 1;
-    const cKey = corridorKeyFor(edge, a, b);
+    const cKey = corridorKeyFor(a, b);
     const cIndex = corridorSeen.get(cKey) || 0;
     corridorSeen.set(cKey, cIndex + 1);
     const cTotal = corridorCounts.get(cKey) || 1;
-    const pairSpread = (pairIndex - (total - 1) / 2) * Math.min(16, Math.max(8, 40 / total));
-    const corridorSpread = (cIndex - (cTotal - 1) / 2) * Math.min(12, Math.max(6, 28 / cTotal));
+    const pairSpread = (pairIndex - (total - 1) / 2) * Math.min(10, Math.max(5, 24 / total));
+    const corridorSpread = cTotal > 1
+      ? (cIndex - (cTotal - 1) / 2) * Math.min(8, Math.max(5, 16 / cTotal))
+      : 0;
     const spread = pairSpread + corridorSpread + familyLaneBias(edge.type);
-    const cross = (crossOffsets.get(edge.id) || 0) + (family === 'context' ? 10 : -6);
+    const cross = (crossOffsets.get(edge.id) || 0) * 0.5 + (family === 'context' ? 3 : -3);
     const pathData = directedWirePath(a, b, spread, cross, family);
     const wireKey = edge.id;
     keep.add(wireKey);
@@ -3491,6 +3685,8 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   const opening = expand && folder.id !== displayRoot()?.id && !expandedFolders.has(folder.id);
   beginFocusAlignMotion({ animateOpen: opening || !!expand });
   markExpandAnchor(folder.id);
+  // Keep the folder seated so open grows the parent sideways instead of jumping.
+  if (opening) pinNestedSeatFromDom(folder.id);
   activateFocus(folder);
   layoutAnchorFileId = folder.id;
   if (expand && folder.id !== displayRoot()?.id) {
@@ -3505,7 +3701,7 @@ function focusFolderFrame(folder, { expand = true, event = null } = {}) {
   requestAnimationFrame(() => {
     animateReflowEdges(opening ? 1100 : 900);
     pulseSelection();
-    // Wait for size morph to finish before sibling trace pull.
+    if (opening) softSettleAfterExpand(folder.id, { duration: 900 });
     scheduleTraceAlign(opening ? 980 : 48);
   });
 }
@@ -3521,6 +3717,7 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
   const opening = expand && !expandedFiles.has(file.id);
   beginFocusAlignMotion({ animateOpen: opening || !!expand });
   markExpandAnchor(file.id);
+  if (opening) pinNestedSeatFromDom(file.id);
   activateFocus(file);
   layoutAnchorFileId = file.id;
   if (expand) {
@@ -3535,7 +3732,7 @@ function focusFileFrame(file, { expand = true, event = null } = {}) {
   requestAnimationFrame(() => {
     animateReflowEdges(opening ? 1100 : 900);
     pulseSelection();
-    // Let the expand morph finish before sibling islands ease over.
+    if (opening) softSettleAfterExpand(file.id, { duration: 900 });
     scheduleTraceAlign(opening ? 980 : 48);
   });
 }
@@ -4058,6 +4255,8 @@ function bindScene() {
       });
       return;
     }
+    // Pin seat first so the parent grows around this folder instead of moving it.
+    pinNestedSeatFromDom(id);
     toggleFolder(id);
     selectItem(id, { record: false });
     flowMode = true;
@@ -4069,6 +4268,7 @@ function bindScene() {
     render();
     updateInspector();
     requestAnimationFrame(() => {
+      softSettleAfterExpand(id, { duration: 900 });
       animateReflowEdges(1100);
       pulseSelection();
       scheduleTraceAlign(980);
@@ -4096,6 +4296,7 @@ function bindScene() {
         animateReflowEdges(700);
       });
     } else {
+      pinNestedSeatFromDom(file.id);
       focusFileFrame(file, { expand: true, event });
     }
   }));
@@ -4398,9 +4599,17 @@ function keepSelectionVisible() {
   canvas.y += dy;
   applyCanvas();
 }
+/**
+ * Reset presentation seats to a fresh shelf pack and fit the view.
+ * Explicit feature via `forceFreshPack` — clears drag offsets, nested seats,
+ * and layout memory so islands re-pack cleanly (not a side-effect of stale DOM).
+ * Keeps expand/selection state; only repositions the map.
+ */
 function resetPresentation() {
   remember();
   exitFlow();
+  cancelTraceAlign();
+  cancelSoftSettle();
   offsets.clear();
   localOffsets.clear();
   nestedSeats.clear();
@@ -4410,9 +4619,19 @@ function resetPresentation() {
   basePlacements.clear();
   layoutMemory.clear();
   basePlacementKey = '';
+  alignMotionPending = false;
   forceFreshPack = true;
+  skipFlipOnce = false;
   render();
-  requestAnimationFrame(fitMap);
+  requestAnimationFrame(() => {
+    fitMap();
+    // Soft in-folder cleanup with the current padding rules after the fresh pack.
+    scene.querySelectorAll('.frame.expanded[data-drag-id]').forEach(el => {
+      const id = el.dataset.dragId;
+      if (id) cleanupNestedLayout(id, { duration: 640 });
+    });
+    scheduleGravityDrift(500);
+  });
 }
 function canvasControls() {
   let pan, lastPanMoved = false, wheelRemainder = 0;

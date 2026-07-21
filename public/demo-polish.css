@@ -2159,20 +2159,22 @@ body.trace-dialects .wire.dialect-live {
   position: relative;
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
-  min-height: 40px;
-  padding: 7px 10px 7px 12px;
+  min-height: 44px;
+  padding: 10px 14px 10px 14px;
 }
 .frame-bar-file,
 .frame-bar-module {
   grid-template-columns: 20px minmax(0, 1fr) auto auto;
   align-items: start;
-  padding-top: 8px;
-  padding-bottom: 8px;
+  padding: 10px 14px 10px 14px;
+  column-gap: 10px;
 }
 .frame-bar-module {
   grid-template-columns: minmax(0, 1fr) auto auto;
+  padding-left: 14px;
+  padding-right: 14px;
 }
 .frame.expanded > .frame-bar {
   border-bottom: 1px solid color-mix(in srgb, var(--node) 16%, var(--line));
@@ -2220,9 +2222,22 @@ body.trace-dialects .wire.dialect-live {
 }
 .frame-title span,
 .frame-title .frame-count {
-  font: 600 10px/1 "IBM Plex Mono", ui-monospace, monospace;
+  font: 600 10px/1.2 "IBM Plex Mono", ui-monospace, monospace;
   color: var(--muted);
   flex: 0 0 auto;
+}
+.frame-title .frame-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.6em;
+  margin: 1px 2px 1px 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  color: color-mix(in srgb, var(--muted) 85%, var(--ink));
+  letter-spacing: .02em;
 }
 .frame-kind,
 .fn-kind {
@@ -2271,7 +2286,7 @@ body.trace-dialects .wire.dialect-live {
 
 .frame-canvas.float-canvas {
   position: relative;
-  padding: 8px;
+  padding: 14px;
   overflow: visible;
   min-width: 0;
 }
@@ -2312,6 +2327,8 @@ body.trace-dialects .wire.dialect-live {
   opacity: 0;
   width: 10px !important;
   height: 10px !important;
+  margin-left: 4px;
+  margin-right: 2px;
 }
 .frame:hover .pin-btn,
 .frame.selected .pin-btn,

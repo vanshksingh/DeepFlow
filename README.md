@@ -4,8 +4,6 @@
   <p><strong>Live architecture signal map for agentic coding</strong></p>
 </div>
 
-<br/>
-
 <img width="1587" height="1049" alt="DeepFlow - interactive architecture signal map" src="https://github.com/user-attachments/assets/82dfc7fb-505d-4bf6-a7b9-329aa038f927" />
 
 <br/>
@@ -28,10 +26,9 @@ GPT-5.6 Terra drove the core coding loop. Medium reasoning for architecture disc
 
 ## Hosted Demo
 
-A live, interactive fixture version of DeepFlow is available here:
-**[Explore DeepFlow Live](https://deepflow-42li.onrender.com/#path=services&mode=signal)**
+Explore the live interactive fixture map: **[DeepFlow Live Demo](https://deepflow-42li.onrender.com/#path=services&mode=signal)**
 
-*(Note: The demo is running on a free Render instance. If it hasn't been accessed recently, it may take up to 50 seconds to spin back up on your first visit. Please be patient!)*
+*(Note: Hosted on Render's free tier. If the instance has been inactive, it may take ~50 seconds to spin back up on your first click.)*
 
 ---
 
